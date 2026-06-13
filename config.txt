@@ -5,6 +5,10 @@ MAIN_WINDOW_HEIGHT=FULL
 # Set OCR_WINDOW_WIDTH=FULL to open the OCR window at full screen size.
 OCR_WINDOW_WIDTH=FULL
 OCR_WINDOW_HEIGHT=FULL
+# Set SPLIT_PDF_WINDOW_WIDTH=FULL to open the Split PDF window at full screen size.
+SPLIT_PDF_WINDOW_WIDTH=FULL
+# Used only when SPLIT_PDF_WINDOW_WIDTH is a number.
+SPLIT_PDF_WINDOW_HEIGHT=680
 OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
 
 # New projects made from the New button are created here.

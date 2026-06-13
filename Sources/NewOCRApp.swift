@@ -25,6 +25,14 @@ private struct BookSectionEntry: Codable {
     var title: String?
 }
 
+private func isSectionPDFURL(_ url: URL) -> Bool {
+    guard url.pathExtension.localizedCaseInsensitiveCompare("pdf") == .orderedSame else {
+        return false
+    }
+    let stem = url.deletingPathExtension().lastPathComponent
+    return stem.range(of: #"^section-\d+$"#, options: [.regularExpression, .caseInsensitive]) != nil
+}
+
 private struct OCRLine: Codable {
     let text: String
     let left: CGFloat
@@ -226,6 +234,9 @@ final class AppState: ObservableObject {
     @Published var ocrWindowWidth: CGFloat = 820
     @Published var ocrWindowHeight: CGFloat = 620
     @Published var shouldOpenOCRWindowFullScreen: Bool = false
+    @Published var splitPDFWindowWidth: CGFloat = 980
+    @Published var splitPDFWindowHeight: CGFloat = 680
+    @Published var shouldOpenSplitPDFWindowFullScreen: Bool = true
     @Published var newProjectsFolderPath: String = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Downloads", isDirectory: true)
         .path
@@ -601,14 +612,26 @@ final class AppState: ObservableObject {
                 self.saveBookSections()
             }
         }
+
+        let initialRect: NSRect
+        if shouldOpenSplitPDFWindowFullScreen, let visibleFrame = NSScreen.main?.visibleFrame {
+            initialRect = visibleFrame
+        } else {
+            initialRect = NSRect(x: 0, y: 0, width: splitPDFWindowWidth, height: splitPDFWindowHeight)
+        }
+
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
+            contentRect: initialRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "New Split Plan - \(fallbackURL.lastPathComponent)"
-        window.center()
+        if shouldOpenSplitPDFWindowFullScreen {
+            window.setFrame(initialRect, display: true)
+        } else {
+            window.center()
+        }
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(
             rootView: SplitPlannerWindowView()
@@ -3763,7 +3786,7 @@ final class AppState: ObservableObject {
         )) ?? []
 
         let physicalItems = urls
-            .filter { $0.pathExtension.localizedCaseInsensitiveCompare("pdf") == .orderedSame }
+            .filter(isSectionPDFURL)
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             .map { PDFFileItem(id: $0.path, url: $0) }
 
@@ -3864,6 +3887,8 @@ final class AppState: ObservableObject {
                 try defaultConfigText().write(to: configFileURL, atomically: true, encoding: .utf8)
             } else {
                 try ensureConfigKeyExists("NEW_PROJECTS_FOLDER", defaultValue: "~/Downloads", comment: "# New projects made from the New button are created here.")
+                try ensureConfigKeyExists("SPLIT_PDF_WINDOW_WIDTH", defaultValue: "FULL", comment: "# Set SPLIT_PDF_WINDOW_WIDTH=FULL to open the Split PDF window at full screen size.")
+                try ensureConfigKeyExists("SPLIT_PDF_WINDOW_HEIGHT", defaultValue: "680", comment: "# Used only when SPLIT_PDF_WINDOW_WIDTH is a number.")
             }
 
             if !FileManager.default.fileExists(atPath: ocrInstructionFileURL.path) {
@@ -3905,6 +3930,14 @@ final class AppState: ObservableObject {
             ocrWindowWidth = CGFloat(parseDouble(values["OCR_WINDOW_WIDTH"], defaultValue: 820, minimum: 640))
             ocrWindowHeight = CGFloat(parseDouble(values["OCR_WINDOW_HEIGHT"], defaultValue: 620, minimum: 480))
         }
+        let splitPDFWindowWidthValue = values["SPLIT_PDF_WINDOW_WIDTH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased() ?? "FULL"
+        shouldOpenSplitPDFWindowFullScreen = splitPDFWindowWidthValue == "FULL"
+        if !shouldOpenSplitPDFWindowFullScreen {
+            splitPDFWindowWidth = CGFloat(parseDouble(values["SPLIT_PDF_WINDOW_WIDTH"], defaultValue: 980, minimum: 760))
+            splitPDFWindowHeight = CGFloat(parseDouble(values["SPLIT_PDF_WINDOW_HEIGHT"], defaultValue: 680, minimum: 560))
+        }
     }
 
     private func readKeyValueConfig(from url: URL) -> [String: String] {
@@ -3945,6 +3978,10 @@ final class AppState: ObservableObject {
         # Set OCR_WINDOW_WIDTH=FULL to open the OCR window at full screen size.
         OCR_WINDOW_WIDTH=820
         OCR_WINDOW_HEIGHT=620
+        # Set SPLIT_PDF_WINDOW_WIDTH=FULL to open the Split PDF window at full screen size.
+        SPLIT_PDF_WINDOW_WIDTH=FULL
+        # Used only when SPLIT_PDF_WINDOW_WIDTH is a number.
+        SPLIT_PDF_WINDOW_HEIGHT=680
         OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
 
         """
@@ -5559,11 +5596,14 @@ final class SplitPlannerState: ObservableObject {
     @Published var projectPDFs: [PDFFileItem] = []
     @Published var status: String = "Loading PDF..."
     @Published var isLoadingPDF: Bool = true
+    @Published var hasPDFBookmarks: Bool = false
+    @Published var isUsingFallbackRange: Bool = false
 
     private var bookmarkData: Data
     private var isAccessingSecurityScopedResource = false
     private var pdfDocument: PDFDocument?
     private var cropWindows: [NSWindow] = []
+    private var addSplitWindows: [NSWindow] = []
     private let onSectionsSaved: ([(URL, String)]) -> Void
 
     init(bookmarkData: Data, fallbackURL: URL, projectFolderURL: URL, onSectionsSaved: @escaping ([(URL, String)]) -> Void = { _ in }) {
@@ -5616,6 +5656,112 @@ final class SplitPlannerState: ObservableObject {
         )
         cropWindows.append(window)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    func openAddSplitWindow() {
+        guard !hasPDFBookmarks else {
+            status = "Add Split is only available when this PDF has no bookmarks."
+            return
+        }
+        guard pdfDocument?.page(at: 0) != nil else {
+            status = "PDF is not loaded yet."
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 720),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Add Split - \(pdfName)"
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: AddSplitWindowView()
+                .environmentObject(self)
+        )
+        addSplitWindows.append(window)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func nextAddSplitFromPage() -> Int {
+        if isUsingFallbackRange {
+            return 1
+        }
+
+        let lastTo = ranges.compactMap { Int($0.pageTo) }.max() ?? 0
+        return min(max(lastTo + 1, 1), max(pageCount, 1))
+    }
+
+    func addSplit(title: String, pageFrom: String, pageTo: String, completion: @escaping (Bool, Int) -> Void) {
+        guard !hasPDFBookmarks else {
+            status = "Add Split is only available when this PDF has no bookmarks."
+            completion(false, nextAddSplitFromPage())
+            return
+        }
+        guard pdfDocument != nil, pageCount > 0 else {
+            status = "PDF is not loaded yet."
+            completion(false, nextAddSplitFromPage())
+            return
+        }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            status = "Enter a title before splitting."
+            completion(false, nextAddSplitFromPage())
+            return
+        }
+        guard let from = Int(pageFrom),
+              let to = Int(pageTo),
+              from >= 1,
+              to >= from,
+              to <= pageCount else {
+            status = "Enter a valid page range from 1-\(pageCount)."
+            completion(false, nextAddSplitFromPage())
+            return
+        }
+
+        isLoadingPDF = true
+        status = "Creating split PDF..."
+        let sourceURL = pdfURL
+        let outputIndex = (isUsingFallbackRange ? 0 : ranges.count) + 1
+        let range = SplitPlanRange(title: trimmedTitle, pageFrom: "\(from)", pageTo: "\(to)")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                guard let freshDocument = PDFDocument(url: sourceURL), freshDocument.pageCount > 0 else {
+                    throw NSError(domain: "NewOCR", code: 41, userInfo: [NSLocalizedDescriptionKey: "Could not reload source PDF."])
+                }
+                let sectionDocument = try self.documentForRange(range, from: freshDocument)
+                let outputURL = self.projectFolderURL.appendingPathComponent(String(format: "section-%03d.pdf", outputIndex))
+                if FileManager.default.fileExists(atPath: outputURL.path) {
+                    try FileManager.default.removeItem(at: outputURL)
+                }
+                guard sectionDocument.write(to: outputURL) else {
+                    throw NSError(domain: "NewOCR", code: 42, userInfo: [NSLocalizedDescriptionKey: "Could not write \(outputURL.lastPathComponent)."])
+                }
+
+                DispatchQueue.main.async {
+                    if self.isUsingFallbackRange {
+                        self.ranges = [range]
+                        self.isUsingFallbackRange = false
+                    } else {
+                        self.ranges.append(range)
+                    }
+                    self.loadProjectPDFs()
+                    self.onSectionsSaved([(outputURL, trimmedTitle)])
+                    self.status = "Created \(outputURL.lastPathComponent)."
+                    self.isLoadingPDF = false
+                    completion(true, to + 1)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.status = "Could not add split: \(error.localizedDescription)"
+                    self.isLoadingPDF = false
+                    completion(false, self.nextAddSplitFromPage())
+                }
+            }
+        }
     }
 
     func cropPreviewImage(pageIndex: Int, size: CGSize = CGSize(width: 900, height: 1100)) -> NSImage? {
@@ -5698,6 +5844,8 @@ final class SplitPlannerState: ObservableObject {
 
         do {
             let bookmarkRanges = splitRangesFromBookmarks(in: document)
+            hasPDFBookmarks = !bookmarkRanges.isEmpty
+            isUsingFallbackRange = bookmarkRanges.isEmpty
             ranges = bookmarkRanges.isEmpty ? [
                 SplitPlanRange(
                     title: pdfURL.deletingPathExtension().lastPathComponent,
@@ -5848,6 +5996,8 @@ final class SplitPlannerState: ObservableObject {
             pdfDocument = document
             pageCount = document.pageCount
             let bookmarkRanges = splitRangesFromBookmarks(in: document)
+            hasPDFBookmarks = !bookmarkRanges.isEmpty
+            isUsingFallbackRange = bookmarkRanges.isEmpty
             ranges = bookmarkRanges.isEmpty ? [
                 SplitPlanRange(
                     title: resolvedURL.deletingPathExtension().lastPathComponent,
@@ -5923,8 +6073,7 @@ final class SplitPlannerState: ObservableObject {
         )) ?? []
 
         projectPDFs = urls
-            .filter { $0.pathExtension.localizedCaseInsensitiveCompare("pdf") == .orderedSame }
-            .filter { !$0.deletingPathExtension().lastPathComponent.hasSuffix("_bkp") }
+            .filter(isSectionPDFURL)
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             .map { PDFFileItem(id: $0.path, url: $0) }
     }
@@ -6130,6 +6279,11 @@ struct SplitPlannerWindowView: View {
                         planner.openPDF()
                     }
                     .disabled(planner.pageCount == 0)
+
+                    Button("Add Split") {
+                        planner.openAddSplitWindow()
+                    }
+                    .disabled(planner.isLoadingPDF || planner.pageCount == 0 || planner.hasPDFBookmarks)
 
                     Button("Re-Generate files") {
                         planner.regenerateFiles()
@@ -6358,6 +6512,143 @@ struct CropPDFWindowView: View {
             width: width,
             height: height
         )
+    }
+}
+
+struct AddSplitWindowView: View {
+    @EnvironmentObject private var planner: SplitPlannerState
+    @State private var previewPageIndex = 0
+    @State private var titleText = ""
+    @State private var pageFrom = "1"
+    @State private var pageTo = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Add Split")
+                        .font(.largeTitle.weight(.semibold))
+                    Text(planner.pdfName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer()
+
+                Button("Close") {
+                    NSApp.keyWindow?.close()
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button("<") {
+                    previewPageIndex = max(previewPageIndex - 1, 0)
+                }
+                .frame(width: 44)
+                .disabled(previewPageIndex <= 0 || planner.pageCount == 0)
+
+                Text("Page \(min(previewPageIndex + 1, max(planner.pageCount, 1))) of \(max(planner.pageCount, 1))")
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 120)
+
+                Button(">") {
+                    previewPageIndex = min(previewPageIndex + 1, max(planner.pageCount - 1, 0))
+                }
+                .frame(width: 44)
+                .disabled(previewPageIndex >= planner.pageCount - 1 || planner.pageCount == 0)
+
+                Spacer()
+            }
+
+            HStack(spacing: 10) {
+                TextField("Title", text: $titleText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 260)
+
+                Text("From")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextField("From", text: $pageFrom)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 72)
+
+                Text("To")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextField("To", text: $pageTo)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 72)
+
+                Button("Split") {
+                    planner.addSplit(title: titleText, pageFrom: pageFrom, pageTo: pageTo) { saved, nextFrom in
+                        if saved {
+                            titleText = ""
+                            pageFrom = "\(nextFrom)"
+                            pageTo = "\(planner.pageCount)"
+                            previewPageIndex = min(max(nextFrom - 1, 0), max(planner.pageCount - 1, 0))
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(planner.isLoadingPDF || titleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || planner.pageCount == 0)
+            }
+
+            if planner.isLoadingPDF {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(planner.status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(10)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                Text(planner.status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            if let image = planner.cropPreviewImage(pageIndex: previewPageIndex) {
+                GeometryReader { proxy in
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+                .frame(minWidth: 720, minHeight: 500)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+            } else {
+                ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext", description: Text("Load the source PDF before adding splits."))
+                    .frame(minWidth: 720, minHeight: 500)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 820, minHeight: 620)
+        .onAppear {
+            resetRange()
+        }
+        .onChange(of: planner.pageCount) { _, _ in
+            resetRange()
+        }
+    }
+
+    private func resetRange() {
+        let nextFrom = planner.nextAddSplitFromPage()
+        pageFrom = "\(nextFrom)"
+        pageTo = "\(max(planner.pageCount, nextFrom))"
+        previewPageIndex = min(max(nextFrom - 1, 0), max(planner.pageCount - 1, 0))
     }
 }
 
