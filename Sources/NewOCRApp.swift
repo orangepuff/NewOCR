@@ -199,9 +199,13 @@ final class AppState: ObservableObject {
     @Published var isEPUBBuiltAlertPresented: Bool = false
 
     @Published var pdfListMinHeight: CGFloat = 420
+    @Published var mainWindowWidth: CGFloat = 780
+    @Published var mainWindowHeight: CGFloat = 520
+    @Published var shouldOpenMainWindowFullScreen: Bool = false
     @Published var ocrParagraphTextAreaMinHeight: CGFloat = 58
     @Published var ocrWindowWidth: CGFloat = 820
     @Published var ocrWindowHeight: CGFloat = 620
+    @Published var shouldOpenOCRWindowFullScreen: Bool = false
 
     @Published private(set) var pdfFiles: [PDFFileItem] = []
 
@@ -330,14 +334,25 @@ final class AppState: ObservableObject {
     }
 
     func openOCRWindow() {
+        let initialRect: NSRect
+        if shouldOpenOCRWindowFullScreen, let visibleFrame = NSScreen.main?.visibleFrame {
+            initialRect = visibleFrame
+        } else {
+            initialRect = NSRect(x: 0, y: 0, width: ocrWindowWidth, height: ocrWindowHeight)
+        }
+
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: ocrWindowWidth, height: ocrWindowHeight),
+            contentRect: initialRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "OCR - \(selectedPDFName)"
-        window.center()
+        if shouldOpenOCRWindowFullScreen {
+            window.setFrame(initialRect, display: true)
+        } else {
+            window.center()
+        }
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(
             rootView: StepTwoOCRView()
@@ -2525,9 +2540,17 @@ final class AppState: ObservableObject {
     private func loadAppConfigValues() {
         let values = readKeyValueConfig(from: configFileURL)
         pdfListMinHeight = CGFloat(parseDouble(values["PDF_LIST_MIN_HEIGHT"], defaultValue: 420, minimum: 200))
+        shouldOpenMainWindowFullScreen = values["MAIN_WINDOW_WIDTH"]?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
+        if !shouldOpenMainWindowFullScreen {
+            mainWindowWidth = CGFloat(parseDouble(values["MAIN_WINDOW_WIDTH"], defaultValue: 780, minimum: 640))
+            mainWindowHeight = CGFloat(parseDouble(values["MAIN_WINDOW_HEIGHT"], defaultValue: 520, minimum: 480))
+        }
         ocrParagraphTextAreaMinHeight = CGFloat(parseDouble(values["OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT"], defaultValue: 58, minimum: 40))
-        ocrWindowWidth = CGFloat(parseDouble(values["OCR_WINDOW_WIDTH"], defaultValue: 820, minimum: 640))
-        ocrWindowHeight = CGFloat(parseDouble(values["OCR_WINDOW_HEIGHT"], defaultValue: 620, minimum: 480))
+        shouldOpenOCRWindowFullScreen = values["OCR_WINDOW_WIDTH"]?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
+        if !shouldOpenOCRWindowFullScreen {
+            ocrWindowWidth = CGFloat(parseDouble(values["OCR_WINDOW_WIDTH"], defaultValue: 820, minimum: 640))
+            ocrWindowHeight = CGFloat(parseDouble(values["OCR_WINDOW_HEIGHT"], defaultValue: 620, minimum: 480))
+        }
     }
 
     private func readKeyValueConfig(from url: URL) -> [String: String] {
@@ -2560,6 +2583,10 @@ final class AppState: ObservableObject {
     private func defaultConfigText() -> String {
         """
         PDF_LIST_MIN_HEIGHT=420
+        # Set MAIN_WINDOW_WIDTH=FULL to open the main window at full screen size.
+        MAIN_WINDOW_WIDTH=780
+        MAIN_WINDOW_HEIGHT=520
+        # Set OCR_WINDOW_WIDTH=FULL to open the OCR window at full screen size.
         OCR_WINDOW_WIDTH=820
         OCR_WINDOW_HEIGHT=620
         OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
@@ -2583,8 +2610,21 @@ struct ContentView: View {
         VStack(spacing: 0) {
             StepOneLoadPDFView()
         }
-        .frame(minWidth: 780, minHeight: 520)
+        .frame(
+            minWidth: appState.shouldOpenMainWindowFullScreen ? 780 : appState.mainWindowWidth,
+            minHeight: appState.shouldOpenMainWindowFullScreen ? 520 : appState.mainWindowHeight
+        )
         .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            guard appState.shouldOpenMainWindowFullScreen else { return }
+            DispatchQueue.main.async {
+                guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first,
+                      let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame else {
+                    return
+                }
+                window.setFrame(visibleFrame, display: true)
+            }
+        }
     }
 }
 
@@ -2631,6 +2671,11 @@ struct StepOneLoadPDFView: View {
 
                         Button("Open Config") {
                             appState.openConfigEditor()
+                        }
+                        .controlSize(.large)
+
+                        Button("Close") {
+                            NSApp.terminate(nil)
                         }
                         .controlSize(.large)
                     }
@@ -3585,6 +3630,7 @@ struct FilterLineCountField: View {
 @main
 struct NewOCRApp: App {
     @StateObject private var appState = AppState()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
@@ -3592,5 +3638,11 @@ struct NewOCRApp: App {
                 .environmentObject(appState)
         }
         .windowStyle(.titleBar)
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
     }
 }
