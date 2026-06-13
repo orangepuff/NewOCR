@@ -12,6 +12,17 @@ struct PDFFileItem: Identifiable, Equatable {
     var fileName: String {
         url.lastPathComponent
     }
+
+    var isManualSection: Bool {
+        url.pathExtension.localizedCaseInsensitiveCompare("manual") == .orderedSame
+    }
+}
+
+private struct BookSectionEntry: Codable {
+    var id: String
+    var type: String
+    var path: String?
+    var title: String?
 }
 
 private struct OCRLine: Codable {
@@ -233,12 +244,21 @@ final class AppState: ObservableObject {
 
     var selectedPDFName: String {
         guard !selectedPDFPath.isEmpty else { return "No PDF selected" }
+        if selectedItemIsManualSection {
+            let title = selectedPDFTitle
+            return title.isEmpty ? "Manual Section" : title
+        }
         return URL(fileURLWithPath: selectedPDFPath).lastPathComponent
     }
 
     var selectedPDFTitle: String {
         guard !selectedPDFPath.isEmpty else { return "" }
         return pdfTitles[selectedPDFPath]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    var selectedItemIsManualSection: Bool {
+        guard !selectedPDFPath.isEmpty else { return false }
+        return URL(fileURLWithPath: selectedPDFPath).pathExtension.localizedCaseInsensitiveCompare("manual") == .orderedSame
     }
 
     var configFileURL: URL {
@@ -278,6 +298,10 @@ final class AppState: ObservableObject {
     var localAppleVisionOutputFolderURL: URL? {
         guard !selectedPDFPath.isEmpty else { return nil }
         let pdfURL = URL(fileURLWithPath: selectedPDFPath)
+        if selectedItemIsManualSection {
+            guard !selectedFolderPath.isEmpty else { return nil }
+            return manualMarkdownFolderURL(for: pdfURL)
+        }
         return appleVisionOutputFolderURL(for: pdfURL)
             .appendingPathComponent(pdfURL.deletingPathExtension().lastPathComponent, isDirectory: true)
     }
@@ -305,6 +329,10 @@ final class AppState: ObservableObject {
     var localAppleVisionOutputFolderPathIfExists: String? {
         guard let folderURL = localAppleVisionOutputFolderURL else {
             return nil
+        }
+
+        if selectedItemIsManualSection {
+            return folderURL.path
         }
 
         var isDirectory: ObjCBool = false
@@ -570,6 +598,7 @@ final class AppState: ObservableObject {
             }
             if self.selectedFolderPath == projectFolderURL.path {
                 self.loadPDFFiles()
+                self.saveBookSections()
             }
         }
         let window = NSWindow(
@@ -594,6 +623,23 @@ final class AppState: ObservableObject {
         currentStep = 1
         isOCRRunning = false
         logOutput = ""
+
+        if item.isManualSection {
+            if let markdownText = loadAppleVisionMarkdownText() {
+                ocrText = markdownText
+                updateSelectedPDFTitleFromOCRText(markdownText)
+                ocrStatus = "Loaded existing Markdown."
+                logOutput = "Loaded Markdown:\n\(localAppleVisionOutputFolderURL?.path ?? "")"
+            } else {
+                ocrText = "\n"
+                ocrStatus = "Ready. Add text, then save Markdown."
+                logOutput = "Manual section has no PDF. Save will create Markdown."
+            }
+            skipProcessOCREngine = true
+            openOCRWindow()
+            return
+        }
+
         if let markdownText = loadAppleVisionMarkdownText() {
             ocrText = markdownText
             updateSelectedPDFTitleFromOCRText(markdownText)
@@ -988,7 +1034,7 @@ final class AppState: ObservableObject {
         }
 
         ocrStatus = "No AppleVision Markdown found."
-        logOutput = "Run OCR first to create Markdown files."
+        logOutput = selectedItemIsManualSection ? "Add text, then save Markdown." : "Run OCR first to create Markdown files."
     }
 
     func loadExistingMarkdownAsync() {
@@ -1001,7 +1047,7 @@ final class AppState: ObservableObject {
         }
 
         ocrStatus = "No AppleVision Markdown found."
-        logOutput = "Run OCR first to create Markdown files."
+        logOutput = selectedItemIsManualSection ? "Add text, then save Markdown." : "Run OCR first to create Markdown files."
     }
 
     func saveOCRTextFile() {
@@ -1033,17 +1079,16 @@ final class AppState: ObservableObject {
         }
 
         let chapters = pdfFiles.compactMap { item -> [String: Any]? in
-            let markdownFolder = appleVisionOutputFolderURL(for: item.url)
-                .appendingPathComponent(item.url.deletingPathExtension().lastPathComponent, isDirectory: true)
+            let markdownFolder = markdownFolderURL(for: item)
             let markdownFiles = appleVisionMarkdownPageFiles(in: markdownFolder)
             guard !markdownFiles.isEmpty else {
                 return nil
             }
             let title = pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? item.url.deletingPathExtension().lastPathComponent
+                ?? displayName(for: item)
             return [
                 "pdf": item.url.path,
-                "title": title.isEmpty ? item.url.deletingPathExtension().lastPathComponent : title,
+                "title": title.isEmpty ? displayName(for: item) : title,
                 "markdownFiles": markdownFiles.map(\.path),
             ]
         }
@@ -1702,14 +1747,30 @@ final class AppState: ObservableObject {
     }
 
     func appleVisionMarkdownExists(for item: PDFFileItem) -> Bool {
-        let folderURL = appleVisionOutputFolderURL(for: item.url)
-            .appendingPathComponent(item.url.deletingPathExtension().lastPathComponent, isDirectory: true)
+        let folderURL = markdownFolderURL(for: item)
         let pageFiles = (try? FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)) ?? []
         return pageFiles.contains { $0.pathExtension.lowercased() == "md" }
     }
 
     var markdownChapterCount: Int {
         pdfFiles.filter { appleVisionMarkdownExists(for: $0) }.count
+    }
+
+    private func markdownFolderURL(for item: PDFFileItem) -> URL {
+        if item.isManualSection {
+            return manualMarkdownFolderURL(for: item.url)
+        }
+
+        return appleVisionOutputFolderURL(for: item.url)
+            .appendingPathComponent(item.url.deletingPathExtension().lastPathComponent, isDirectory: true)
+    }
+
+    private func manualMarkdownFolderURL(for url: URL) -> URL {
+        let folderURL = URL(fileURLWithPath: selectedFolderPath)
+        return folderURL
+            .appendingPathComponent("AppleVision", isDirectory: true)
+            .appendingPathComponent("MD", isDirectory: true)
+            .appendingPathComponent(url.deletingPathExtension().lastPathComponent, isDirectory: true)
     }
 
     private func loadAppleVisionMarkdownText() -> String? {
@@ -1767,11 +1828,50 @@ final class AppState: ObservableObject {
             },
             set: { value in
                 self.pdfTitles[item.id] = value
+                if item.isManualSection {
+                    self.saveBookSections()
+                }
             }
         )
     }
 
+    func addManualSection(after item: PDFFileItem) {
+        guard !selectedFolderPath.isEmpty else { return }
+        let id = "manual-\(UUID().uuidString)"
+        let url = manualSectionURL(id: id)
+        let newItem = PDFFileItem(id: url.path, url: url)
+        let insertIndex = (pdfFiles.firstIndex(of: item) ?? (pdfFiles.count - 1)) + 1
+
+        pdfFiles.insert(newItem, at: min(insertIndex, pdfFiles.count))
+        pdfTitles[newItem.id] = "Section"
+        saveBookSections()
+        save()
+    }
+
+    func addManualSectionAtEnd() {
+        guard !selectedFolderPath.isEmpty else { return }
+        let id = "manual-\(UUID().uuidString)"
+        let url = manualSectionURL(id: id)
+        let newItem = PDFFileItem(id: url.path, url: url)
+        pdfFiles.append(newItem)
+        pdfTitles[newItem.id] = "Section"
+        saveBookSections()
+        save()
+    }
+
+    func deleteManualSection(_ item: PDFFileItem) {
+        guard item.isManualSection else { return }
+        pdfFiles.removeAll { $0 == item }
+        pdfTitles.removeValue(forKey: item.id)
+        saveBookSections()
+        save()
+    }
+
     func displayName(for item: PDFFileItem) -> String {
+        if item.isManualSection {
+            return "Section"
+        }
+
         let stem = item.url.deletingPathExtension().lastPathComponent
         guard stem.range(of: #"^section-\d+$"#, options: [.regularExpression, .caseInsensitive]) != nil else {
             return item.fileName
@@ -2278,6 +2378,12 @@ final class AppState: ObservableObject {
     }
 
     func sendSelectedPDFToOCREngine() {
+        guard !selectedItemIsManualSection else {
+            ocrStatus = "Manual section has no PDF to OCR."
+            logOutput = "Add text in the editor, then save Markdown."
+            return
+        }
+
         guard !selectedPDFPath.isEmpty else {
             ocrStatus = "No PDF selected."
             return
@@ -3656,10 +3762,40 @@ final class AppState: ObservableObject {
             options: [.skipsHiddenFiles]
         )) ?? []
 
-        pdfFiles = urls
+        let physicalItems = urls
             .filter { $0.pathExtension.localizedCaseInsensitiveCompare("pdf") == .orderedSame }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             .map { PDFFileItem(id: $0.path, url: $0) }
+
+        let physicalByPath = Dictionary(uniqueKeysWithValues: physicalItems.map { ($0.url.path, $0) })
+        let entries = loadBookSections()
+        var orderedItems: [PDFFileItem] = []
+        var usedPaths = Set<String>()
+
+        for entry in entries {
+            if entry.type == "manual" {
+                let url = manualSectionURL(id: entry.id)
+                let item = PDFFileItem(id: url.path, url: url)
+                orderedItems.append(item)
+                usedPaths.insert(item.url.path)
+                if let title = entry.title, !title.isEmpty {
+                    pdfTitles[item.id] = title
+                }
+            } else if let path = entry.path,
+                      let item = physicalByPath[path] {
+                orderedItems.append(item)
+                usedPaths.insert(path)
+                if let title = entry.title, !title.isEmpty {
+                    pdfTitles[item.id] = title
+                }
+            }
+        }
+
+        for item in physicalItems where !usedPaths.contains(item.url.path) {
+            orderedItems.append(item)
+        }
+
+        pdfFiles = orderedItems
     }
 
     private func appleVisionOutputFolderURL(for pdfURL: URL) -> URL {
@@ -3667,6 +3803,55 @@ final class AppState: ObservableObject {
             .deletingLastPathComponent()
             .appendingPathComponent("AppleVision", isDirectory: true)
             .appendingPathComponent("MD", isDirectory: true)
+    }
+
+    private func bookSectionsURL() -> URL? {
+        guard !selectedFolderPath.isEmpty else { return nil }
+        return URL(fileURLWithPath: selectedFolderPath).appendingPathComponent("book-sections.json")
+    }
+
+    private func manualSectionURL(id: String) -> URL {
+        URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("ManualSections", isDirectory: true)
+            .appendingPathComponent(id)
+            .appendingPathExtension("manual")
+    }
+
+    private func loadBookSections() -> [BookSectionEntry] {
+        guard let url = bookSectionsURL(),
+              let data = try? Data(contentsOf: url),
+              let entries = try? JSONDecoder().decode([BookSectionEntry].self, from: data) else {
+            return []
+        }
+        return entries
+    }
+
+    private func saveBookSections() {
+        guard let url = bookSectionsURL() else { return }
+        let entries = pdfFiles.map { item -> BookSectionEntry in
+            let title = pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if item.isManualSection {
+                return BookSectionEntry(
+                    id: item.url.deletingPathExtension().lastPathComponent,
+                    type: "manual",
+                    path: nil,
+                    title: title
+                )
+            }
+            return BookSectionEntry(
+                id: item.url.deletingPathExtension().lastPathComponent,
+                type: "pdf",
+                path: item.url.path,
+                title: title
+            )
+        }
+
+        do {
+            let data = try JSONEncoder().encode(entries)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            logOutput = "Could not save book sections: \(error.localizedDescription)"
+        }
     }
 
     private func ensureConfigFilesExist() {
@@ -3917,7 +4102,7 @@ struct StepOneLoadPDFView: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("PDF Files")
+                        Text("Sections")
                             .font(.headline)
                         Text("\(appState.pdfFiles.count)")
                             .font(.caption.weight(.semibold))
@@ -4079,16 +4264,26 @@ struct PDFListView: View {
             if appState.selectedFolderPath.isEmpty {
                 EmptyStateView(title: "Choose a folder to load PDF files.")
             } else if appState.pdfFiles.isEmpty {
-                EmptyStateView(title: "No PDF files found in this folder.")
+                VStack(spacing: 12) {
+                    EmptyStateView(title: "No sections found in this folder.")
+                        .frame(minHeight: 180)
+                    Button("Add Section") {
+                        appState.addManualSectionAtEnd()
+                    }
+                    .controlSize(.large)
+                    .padding(.bottom, 16)
+                }
             } else {
                 VStack(spacing: 0) {
                     HStack(spacing: 12) {
-                        Text("PDF")
+                        Text("")
+                            .frame(width: 34)
+                        Text("Section")
                             .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
                         Text("Title")
                             .frame(width: 260, alignment: .leading)
                         Text("Command")
-                            .frame(width: 220, alignment: .leading)
+                            .frame(width: 260, alignment: .leading)
                     }
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -4100,9 +4295,19 @@ struct PDFListView: View {
 
                     List(appState.pdfFiles) { item in
                         HStack(spacing: 12) {
+                            Button {
+                                appState.addManualSection(after: item)
+                            } label: {
+                                Image(systemName: "plus")
+                                    .frame(width: 18, height: 18)
+                            }
+                            .buttonStyle(.bordered)
+                            .help("Add manual section below")
+                            .frame(width: 34)
+
                             HStack(spacing: 8) {
-                                Image(systemName: "doc.richtext")
-                                    .foregroundStyle(.red)
+                                Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
+                                    .foregroundStyle(item.isManualSection ? .blue : .red)
 
                                 if appState.appleVisionMarkdownExists(for: item) {
                                     Text("MD")
@@ -4110,17 +4315,24 @@ struct PDFListView: View {
                                         .foregroundStyle(.green)
                                 }
 
-                                Button {
-                                    NSWorkspace.shared.open(item.url)
-                                } label: {
+                                if item.isManualSection {
                                     Text(appState.displayName(for: item))
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                         .frame(maxWidth: .infinity, alignment: .leading)
+                                } else {
+                                    Button {
+                                        NSWorkspace.shared.open(item.url)
+                                    } label: {
+                                        Text(appState.displayName(for: item))
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.link)
+                                    .help("Open PDF")
                                 }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.link)
-                                .help("Open PDF")
                             }
                             .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
 
@@ -4129,17 +4341,28 @@ struct PDFListView: View {
                                 .frame(width: 260)
 
                             HStack(spacing: 8) {
-                                Button(appState.isScanningHeaderFooter(for: item) ? "Scanning..." : "Scan Header") {
-                                    appState.scanHeaderFooterSample(for: item)
-                                }
-                                .disabled(appState.isScanningHeaderFooter(for: item))
+                                if item.isManualSection {
+                                    Button("Process") {
+                                        appState.beginOCR(for: item)
+                                    }
 
-                                Button("Process") {
-                                    appState.beginOCR(for: item)
+                                    Button("Delete") {
+                                        appState.deleteManualSection(item)
+                                    }
+                                    .foregroundStyle(.red)
+                                } else {
+                                    Button(appState.isScanningHeaderFooter(for: item) ? "Scanning..." : "Scan Header") {
+                                        appState.scanHeaderFooterSample(for: item)
+                                    }
+                                    .disabled(appState.isScanningHeaderFooter(for: item))
+
+                                    Button("Process") {
+                                        appState.beginOCR(for: item)
+                                    }
+                                    .disabled((!appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item))
                                 }
-                                .disabled((!appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item))
                             }
-                            .frame(width: 220, alignment: .leading)
+                            .frame(width: 260, alignment: .leading)
                         }
                         .padding(.vertical, 5)
                     }
@@ -4429,11 +4652,11 @@ struct StepTwoOCRView: View {
                                     .environmentObject(appState)
                             }
 
-                            Text("Ready for OCR")
+                            Text(appState.selectedItemIsManualSection ? "Manual Section" : "Ready for OCR")
                                 .font(.headline)
 
                             Button {
-                                if !appState.selectedPDFPath.isEmpty {
+                                if !appState.selectedPDFPath.isEmpty && !appState.selectedItemIsManualSection {
                                     NSWorkspace.shared.open(URL(fileURLWithPath: appState.selectedPDFPath))
                                 }
                             } label: {
@@ -4445,13 +4668,13 @@ struct StepTwoOCRView: View {
                             .buttonStyle(.plain)
                             .foregroundStyle(.link)
                             .help("Open PDF")
-                            .disabled(appState.selectedPDFPath.isEmpty)
+                            .disabled(appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
 
                             HStack(spacing: 10) {
                                 Button(appState.isOCRRunning ? "Processing..." : "Run OCR") {
                                     appState.sendSelectedPDFToOCREngine()
                                 }
-                                .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty)
+                                .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
 
                                 Button("Load Markdown") {
                                     appState.loadExistingMarkdownAsync()
