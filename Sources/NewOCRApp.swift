@@ -4690,7 +4690,7 @@ private struct NewOCRButtonStyleBody: View {
         if isDestructive {
             return Color.red.opacity(isHovered || configuration.isPressed ? 0.48 : 0.28)
         }
-        return Color(nsColor: .separatorColor).opacity(isHovered || configuration.isPressed ? 1.0 : 0.72)
+        return Color.accentColor.opacity(isHovered || configuration.isPressed ? 0.82 : 0.52)
     }
 
     var body: some View {

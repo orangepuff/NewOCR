@@ -652,6 +652,8 @@ Width values may be numeric or `FULL` for full-screen opening.
 
 - Keep the app as a practical working tool, not a landing page.
 - Buttons should be clear, friendly, and consistent.
+- Regular buttons should have a visible accent-colored border; destructive
+  buttons such as Revert Original keep the red border style.
 - Use icons where they help scanning.
 - Do not let decorative UI reduce section-list space.
 - Do not alter behavior while only making UI more beautiful.
