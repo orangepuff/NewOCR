@@ -933,13 +933,21 @@ final class AppState: ObservableObject {
         p { margin: 0 0 1em 0; }
         img { max-width: 100%; height: auto; }
         figure { margin: 1em 0; }
+        .footnote-ref { font-size: 0.75em; line-height: 0; vertical-align: super; }
+        .footnote-ref a { color: inherit; text-decoration: none; }
+        .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #d0d0d0; font-size: 0.9em; }
+        .footnotes ol { margin: 0; padding-left: 1.5rem; }
+        .footnotes li { margin-bottom: 0.5rem; }
+        .footnote-back { margin-left: 0.25rem; text-decoration: none; }
         </style>
         """
     }
 
     private func markdownToPreviewHTML(_ markdown: String) -> String {
         var parts: [String] = []
-        let paragraphs = splitParagraphs(markdown)
+        let extracted = extractMarkdownFootnotes(from: markdown)
+        var usedFootnotes: [String] = []
+        let paragraphs = splitParagraphs(extracted.markdown)
         for paragraph in paragraphs {
             let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
@@ -949,24 +957,27 @@ final class AppState: ObservableObject {
                 continue
             }
 
-            if let heading = markdownHeadingHTML(from: trimmed) {
+            if let heading = markdownHeadingHTML(from: trimmed, usedFootnotes: &usedFootnotes) {
                 parts.append(heading)
                 continue
             }
 
-            parts.append("<p>\(markdownInlinePreviewHTML(trimmed.replacingOccurrences(of: "\n", with: " ")))</p>")
+            parts.append("<p>\(markdownInlinePreviewHTML(trimmed.replacingOccurrences(of: "\n", with: " "), usedFootnotes: &usedFootnotes))</p>")
+        }
+        if let footnotesHTML = footnotesPreviewHTML(definitions: extracted.footnotes, usedLabels: usedFootnotes) {
+            parts.append(footnotesHTML)
         }
         return parts.joined(separator: "\n")
     }
 
-    private func markdownHeadingHTML(from text: String) -> String? {
+    private func markdownHeadingHTML(from text: String, usedFootnotes: inout [String]) -> String? {
         guard let firstLine = text.components(separatedBy: .newlines).first else { return nil }
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("#") else { return nil }
         let level = min(trimmed.prefix(while: { $0 == "#" }).count, 6)
         let title = trimmed.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
-        return "<h\(level)>\(markdownInlinePreviewHTML(title))</h\(level)>"
+        return "<h\(level)>\(markdownInlinePreviewHTML(title, usedFootnotes: &usedFootnotes))</h\(level)>"
     }
 
     private func markdownImagePreviewHTML(from text: String) -> String? {
@@ -983,10 +994,91 @@ final class AppState: ObservableObject {
         return "<figure><img src=\"\(htmlEscaped(path))\" alt=\"\(htmlEscaped(alt))\"></figure>"
     }
 
+    private func extractMarkdownFootnotes(from markdown: String) -> (markdown: String, footnotes: [String: String]) {
+        var contentLines: [String] = []
+        var footnotes: [String: [String]] = [:]
+        var activeLabel: String?
+
+        for line in markdown.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n") {
+            if line.hasPrefix("[^"), let closeIndex = line.firstIndex(of: "]") {
+                let afterClose = line[line.index(after: closeIndex)...]
+                if afterClose.hasPrefix(":") {
+                    let labelStart = line.index(line.startIndex, offsetBy: 2)
+                    let label = String(line[labelStart..<closeIndex])
+                    let noteStart = afterClose.index(after: afterClose.startIndex)
+                    activeLabel = label
+                    footnotes[label] = [String(afterClose[noteStart...]).trimmingCharacters(in: .whitespaces)]
+                    continue
+                }
+            }
+
+            if let label = activeLabel, line.hasPrefix("    ") || line.hasPrefix("\t") {
+                footnotes[label, default: []].append(line.trimmingCharacters(in: .whitespaces))
+                continue
+            }
+
+            activeLabel = nil
+            contentLines.append(line)
+        }
+
+        let cleaned = footnotes.mapValues { parts in
+            parts.filter { !$0.isEmpty }.joined(separator: " ")
+        }.filter { !$0.value.isEmpty }
+
+        return (contentLines.joined(separator: "\n"), cleaned)
+    }
+
+    private func footnoteFragmentID(_ label: String, fallback: String) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        let scalars = label.unicodeScalars.map { scalar -> Character in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        let slug = String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-_")).lowercased()
+        return slug.isEmpty ? fallback : slug
+    }
+
+    private func footnotesPreviewHTML(definitions: [String: String], usedLabels: [String]) -> String? {
+        var items: [String] = []
+        for (index, label) in usedLabels.enumerated() {
+            guard let noteText = definitions[label] else { continue }
+            let fragment = footnoteFragmentID(label, fallback: "note-\(index + 1)")
+            items.append("<li id=\"fn-\(htmlEscaped(fragment))\">\(markdownInlinePreviewHTML(noteText)) <a href=\"#fnref-\(htmlEscaped(fragment))\" class=\"footnote-back\">&#8617;</a></li>")
+        }
+        guard !items.isEmpty else { return nil }
+        return "<section class=\"footnotes\">\n<ol>\n\(items.joined(separator: "\n"))\n</ol>\n</section>"
+    }
+
     private func markdownInlinePreviewHTML(_ text: String) -> String {
+        var usedFootnotes: [String] = []
+        return markdownInlinePreviewHTML(text, usedFootnotes: &usedFootnotes)
+    }
+
+    private func markdownInlinePreviewHTML(_ text: String, usedFootnotes: inout [String]) -> String {
         var escaped = htmlEscaped(text)
         escaped = escaped.replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
         escaped = escaped.replacingOccurrences(of: #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#, with: "<em>$1</em>", options: .regularExpression)
+        let pattern = #"\[\^([A-Za-z0-9_-]+)\]"#
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            let nsRange = NSRange(escaped.startIndex..<escaped.endIndex, in: escaped)
+            let matches = regex.matches(in: escaped, range: nsRange)
+            for match in matches {
+                guard match.numberOfRanges > 1,
+                      let labelRange = Range(match.range(at: 1), in: escaped) else { continue }
+                let label = String(escaped[labelRange])
+                if !usedFootnotes.contains(label) {
+                    usedFootnotes.append(label)
+                }
+            }
+            for match in matches.reversed() {
+                guard match.numberOfRanges > 1,
+                      let fullRange = Range(match.range(at: 0), in: escaped),
+                      let labelRange = Range(match.range(at: 1), in: escaped) else { continue }
+                let label = String(escaped[labelRange])
+                let fragment = footnoteFragmentID(label, fallback: "note-\(usedFootnotes.count)")
+                let replacement = "<sup id=\"fnref-\(htmlEscaped(fragment))\" class=\"footnote-ref\"><a href=\"#fn-\(htmlEscaped(fragment))\">\(htmlEscaped(label))</a></sup>"
+                escaped.replaceSubrange(fullRange, with: replacement)
+            }
+        }
         return escaped
     }
 
@@ -3548,7 +3640,9 @@ struct MarkdownSyntaxPopoverView: View {
         ("A blank line", "Starts a new paragraph"),
         ("**bold text**", "Bold text"),
         ("*italic text*", "Italic text"),
-        ("![Alt text](Images/example.png)", "Image")
+        ("![Alt text](Images/example.png)", "Image"),
+        ("Text with a note.[^1]", "Footnote marker"),
+        ("[^1]: Footnote text", "Footnote at bottom")
     ]
 
     var body: some View {
@@ -3586,13 +3680,13 @@ struct MarkdownSyntaxPopoverView: View {
                 }
             }
 
-            Text("Image paths are relative to the Markdown folder. Other Markdown characters stay as normal text unless the converter supports them later.")
+            Text("Image paths are relative to the Markdown folder. Footnotes use matching labels, such as [^1] or [^a]. Other Markdown characters stay as normal text unless the converter supports them later.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
-        .frame(width: 430, alignment: .leading)
+        .frame(width: 500, alignment: .leading)
     }
 }
 

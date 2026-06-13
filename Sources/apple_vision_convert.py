@@ -70,6 +70,8 @@ def stylesheet_links(assets, prefix=""):
 
 
 MARKDOWN_IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
+FOOTNOTE_DEF_RE = re.compile(r"^\[\^([A-Za-z0-9_-]+)\]:\s*(.*)$")
+FOOTNOTE_REF_RE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
 
 
 def clean_markdown_link_target(value):
@@ -138,11 +140,79 @@ def slugify_epub_id(text, fallback):
     return slug or fallback
 
 
-def markdown_inline_to_html(text):
+def footnote_fragment_id(label, fallback):
+    return slugify_epub_id(label, fallback)
+
+
+def extract_markdown_footnotes(text):
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    content_lines = []
+    definitions = {}
+    active_label = None
+
+    for line in lines:
+        match = FOOTNOTE_DEF_RE.match(line)
+        if match:
+            active_label = match.group(1)
+            definitions[active_label] = [match.group(2).strip()]
+            continue
+
+        if active_label and (line.startswith("    ") or line.startswith("\t")):
+            definitions[active_label].append(line.strip())
+            continue
+
+        active_label = None
+        content_lines.append(line)
+
+    cleaned_definitions = {}
+    for label, parts in definitions.items():
+        text_value = " ".join(part for part in parts if part).strip()
+        if text_value:
+            cleaned_definitions[label] = text_value
+
+    return "\n".join(content_lines), cleaned_definitions
+
+
+def markdown_inline_to_html(text, footnote_state=None):
     escaped = html.escape(text)
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
     escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", escaped)
+
+    if footnote_state is not None:
+        def replace_footnote(match):
+            label = match.group(1)
+            fragment = footnote_fragment_id(label, f"note-{len(footnote_state['used']) + 1}")
+            if label not in footnote_state["used"]:
+                footnote_state["used"].append(label)
+            return (
+                f'<sup id="fnref-{html.escape(fragment)}" class="footnote-ref">'
+                f'<a href="#fn-{html.escape(fragment)}">{html.escape(label)}</a>'
+                f'</sup>'
+            )
+
+        escaped = FOOTNOTE_REF_RE.sub(replace_footnote, escaped)
+
     return escaped
+
+
+def footnotes_to_html(footnote_state):
+    items = []
+    for index, label in enumerate(footnote_state["used"], start=1):
+        note_text = footnote_state["definitions"].get(label)
+        if not note_text:
+            continue
+        fragment = footnote_fragment_id(label, f"note-{index}")
+        items.append(
+            f'<li id="fn-{html.escape(fragment)}">'
+            f'{markdown_inline_to_html(note_text)} '
+            f'<a href="#fnref-{html.escape(fragment)}" class="footnote-back">&#8617;</a>'
+            f'</li>'
+        )
+
+    if not items:
+        return ""
+
+    return '<section class="footnotes">\n<ol>\n' + "\n".join(items) + "\n</ol>\n</section>"
 
 
 def markdown_image_to_html(stripped, source_path=None, image_map=None, image_prefix=""):
@@ -160,18 +230,20 @@ def markdown_image_to_html(stripped, source_path=None, image_map=None, image_pre
 
 
 def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=None, image_prefix=""):
+    text, footnote_definitions = extract_markdown_footnotes(text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     body_parts = []
     toc = []
     paragraph_lines = []
     heading_count = 0
+    footnote_state = {"definitions": footnote_definitions, "used": []}
 
     def flush_paragraph():
         if not paragraph_lines:
             return
         paragraph_text = " ".join(line.strip() for line in paragraph_lines if line.strip())
         if paragraph_text:
-            body_parts.append(f"<p>{markdown_inline_to_html(paragraph_text)}</p>")
+            body_parts.append(f"<p>{markdown_inline_to_html(paragraph_text, footnote_state)}</p>")
         paragraph_lines.clear()
 
     for line in lines:
@@ -194,11 +266,14 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
             heading_count += 1
             anchor = slugify_epub_id(title, f"heading-{heading_count}")
             toc.append({"id": anchor, "title": re.sub(r"[*_`]+", "", title).strip() or fallback_title, "level": level})
-            body_parts.append(f'<h{level} id="{anchor}">{markdown_inline_to_html(title)}</h{level}>')
+            body_parts.append(f'<h{level} id="{anchor}">{markdown_inline_to_html(title, footnote_state)}</h{level}>')
         else:
             paragraph_lines.append(stripped)
 
     flush_paragraph()
+    footnotes_html = footnotes_to_html(footnote_state)
+    if footnotes_html:
+        body_parts.append(footnotes_html)
 
     if not body_parts:
         body_parts.append(f"<p>{html.escape(fallback_title)}</p>")
