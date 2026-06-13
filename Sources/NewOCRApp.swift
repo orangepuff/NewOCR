@@ -3,6 +3,7 @@ import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
 import Vision
+import WebKit
 
 struct PDFFileItem: Identifiable, Equatable {
     let id: String
@@ -852,6 +853,149 @@ final class AppState: ObservableObject {
             return
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    func openOCRMarkdownPreviewWindow() {
+        guard let markdownFolderURL = localAppleVisionOutputFolderURL else {
+            ocrStatus = "No PDF selected."
+            return
+        }
+
+        do {
+            let previewURL = markdownFolderURL.appendingPathComponent("preview.html")
+            try previewHTML(for: ocrText).write(to: previewURL, atomically: true, encoding: .utf8)
+
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 820, height: 720),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Preview - \(selectedPDFName)"
+            window.center()
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(
+                rootView: OCRMarkdownPreviewWindowView(previewURL: previewURL, readAccessURL: markdownFolderURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
+            )
+            window.makeKeyAndOrderFront(nil)
+        } catch {
+            ocrStatus = "Could not open preview."
+            logOutput = error.localizedDescription
+        }
+    }
+
+    private func previewHTML(for markdown: String) -> String {
+        let escapedTitle = htmlEscaped(selectedPDFName)
+        let styles = previewStylesHTML()
+
+        return """
+        <!doctype html>
+        <html lang="th">
+        <head>
+        <meta charset="utf-8">
+        <title>\(escapedTitle)</title>
+        \(styles)
+        </head>
+        <body>
+        \(markdownToPreviewHTML(markdown))
+        </body>
+        </html>
+        """
+    }
+
+    private func previewStylesHTML() -> String {
+        guard !selectedPDFPath.isEmpty else {
+            return fallbackPreviewStyleHTML()
+        }
+
+        let pdfFolderURL = URL(fileURLWithPath: selectedPDFPath).deletingLastPathComponent()
+        let stylesheetURL = pdfFolderURL
+            .appendingPathComponent("Styles", isDirectory: true)
+            .appendingPathComponent("stylesheet.css")
+
+        if FileManager.default.fileExists(atPath: stylesheetURL.path) {
+            return """
+            <link rel="stylesheet" type="text/css" href="../../../Styles/stylesheet.css">
+            <style>
+            img { max-width: 100%; height: auto; }
+            figure { margin: 1em 0; }
+            </style>
+            """
+        }
+
+        return fallbackPreviewStyleHTML()
+    }
+
+    private func fallbackPreviewStyleHTML() -> String {
+        """
+        <style>
+        body { font-family: serif; line-height: 1.55; padding: 24px; }
+        p { margin: 0 0 1em 0; }
+        img { max-width: 100%; height: auto; }
+        figure { margin: 1em 0; }
+        </style>
+        """
+    }
+
+    private func markdownToPreviewHTML(_ markdown: String) -> String {
+        var parts: [String] = []
+        let paragraphs = splitParagraphs(markdown)
+        for paragraph in paragraphs {
+            let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            if let imageHTML = markdownImagePreviewHTML(from: trimmed) {
+                parts.append(imageHTML)
+                continue
+            }
+
+            if let heading = markdownHeadingHTML(from: trimmed) {
+                parts.append(heading)
+                continue
+            }
+
+            parts.append("<p>\(markdownInlinePreviewHTML(trimmed.replacingOccurrences(of: "\n", with: " ")))</p>")
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    private func markdownHeadingHTML(from text: String) -> String? {
+        guard let firstLine = text.components(separatedBy: .newlines).first else { return nil }
+        let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("#") else { return nil }
+        let level = min(trimmed.prefix(while: { $0 == "#" }).count, 6)
+        let title = trimmed.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        return "<h\(level)>\(markdownInlinePreviewHTML(title))</h\(level)>"
+    }
+
+    private func markdownImagePreviewHTML(from text: String) -> String? {
+        guard text.hasPrefix("!["),
+              let closeBracket = text.firstIndex(of: "]"),
+              let openParen = text.firstIndex(of: "("),
+              let closeParen = text.lastIndex(of: ")"),
+              closeBracket < openParen,
+              openParen < closeParen else {
+            return nil
+        }
+        let alt = String(text[text.index(text.startIndex, offsetBy: 2)..<closeBracket])
+        let path = String(text[text.index(after: openParen)..<closeParen])
+        return "<figure><img src=\"\(htmlEscaped(path))\" alt=\"\(htmlEscaped(alt))\"></figure>"
+    }
+
+    private func markdownInlinePreviewHTML(_ text: String) -> String {
+        var escaped = htmlEscaped(text)
+        escaped = escaped.replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
+        escaped = escaped.replacingOccurrences(of: #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#, with: "<em>$1</em>", options: .regularExpression)
+        return escaped
+    }
+
+    private func htmlEscaped(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
     func appleVisionMarkdownExists(for item: PDFFileItem) -> Bool {
@@ -3180,6 +3324,18 @@ struct StepTwoOCRView: View {
                         MarkdownSyntaxPopoverView()
                     }
 
+                    Button("Preview") {
+                        appState.openOCRMarkdownPreviewWindow()
+                    }
+                    .controlSize(.large)
+                    .disabled(appState.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
+
+                    Button("Save") {
+                        appState.saveOCRTextFile()
+                    }
+                    .controlSize(.large)
+                    .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
+
                     Button("Close") {
                         NSApp.keyWindow?.close()
                     }
@@ -3201,10 +3357,6 @@ struct StepTwoOCRView: View {
                                         .background(Color(nsColor: .quaternaryLabelColor))
                                         .clipShape(Capsule())
                                     Spacer()
-                                    Button("Save") {
-                                        appState.saveOCRTextFile()
-                                    }
-                                    .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty)
                                 }
                                 GeometryReader { proxy in
                                     HStack(spacing: 10) {
@@ -3294,31 +3446,6 @@ struct StepTwoOCRView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
                     VStack(alignment: .leading, spacing: 14) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Log")
-                                .font(.headline)
-
-                            HStack(spacing: 10) {
-                                if appState.isOCRRunning {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                }
-
-                                Text(appState.ocrStatus)
-                                    .font(.caption)
-                                    .foregroundStyle(appState.isOCRRunning ? .secondary : .primary)
-                                    .lineLimit(2)
-                            }
-
-                            TextEditor(text: $appState.logOutput)
-                                .font(.body.monospaced())
-                                .frame(height: 220)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                                )
-                        }
-
                         VStack(alignment: .leading, spacing: 10) {
                             Button("Files") {
                                 isFilesPopoverPresented.toggle()
@@ -3376,6 +3503,31 @@ struct StepTwoOCRView: View {
                                     .disabled(appState.isOCRCancelling)
                                 }
                             }
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Log")
+                                .font(.headline)
+
+                            HStack(spacing: 10) {
+                                if appState.isOCRRunning {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+
+                                Text(appState.ocrStatus)
+                                    .font(.caption)
+                                    .foregroundStyle(appState.isOCRRunning ? .secondary : .primary)
+                                    .lineLimit(2)
+                            }
+
+                            TextEditor(text: $appState.logOutput)
+                                .font(.body.monospaced())
+                                .frame(height: 220)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                                )
                         }
                     }
                     .frame(minWidth: 320, idealWidth: 320, maxWidth: 320, alignment: .topLeading)
@@ -3467,6 +3619,43 @@ struct OCRSearchGuidelinePopoverView: View {
         }
         .padding(16)
         .frame(width: 360, alignment: .leading)
+    }
+}
+
+struct OCRMarkdownPreviewWindowView: View {
+    let previewURL: URL
+    let readAccessURL: URL
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                Button("Close") {
+                    NSApp.keyWindow?.close()
+                }
+                .controlSize(.large)
+            }
+            .padding(12)
+            .background(Color(nsColor: .windowBackgroundColor))
+
+            Divider()
+
+            WebPreviewView(url: previewURL, readAccessURL: readAccessURL)
+        }
+        .frame(minWidth: 520, minHeight: 420)
+    }
+}
+
+struct WebPreviewView: NSViewRepresentable {
+    let url: URL
+    let readAccessURL: URL
+
+    func makeNSView(context: Context) -> WKWebView {
+        WKWebView()
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        webView.loadFileURL(url, allowingReadAccessTo: readAccessURL)
     }
 }
 
@@ -3681,6 +3870,8 @@ struct ParagraphItemView: View {
     @EnvironmentObject private var appState: AppState
     let index: Int
     @Binding var text: String
+    @State private var editorHeight: CGFloat? = nil
+    @State private var resizeStartHeight: CGFloat? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -3741,15 +3932,32 @@ struct ParagraphItemView: View {
                 if let imageURL = appState.markdownImageURL(from: text) {
                     OCRMarkdownImagePreview(imageURL: imageURL, markdownText: text)
                 } else {
-                    HighlightingTextEditor(
-                        text: $text,
-                        searchText: appState.ocrSearchText
-                    )
-                        .frame(minHeight: appState.ocrParagraphTextAreaMinHeight)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    VStack(spacing: 0) {
+                        HighlightingTextEditor(
+                            text: $text,
+                            searchText: appState.ocrSearchText
                         )
+                            .frame(height: currentEditorHeight)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                            )
+
+                        ResizeHandleView()
+                            .gesture(
+                                DragGesture()
+                                    .onChanged { value in
+                                        if resizeStartHeight == nil {
+                                            resizeStartHeight = currentEditorHeight
+                                        }
+                                        let baseHeight = resizeStartHeight ?? currentEditorHeight
+                                        editorHeight = max(appState.ocrParagraphTextAreaMinHeight, baseHeight + value.translation.height)
+                                    }
+                                    .onEnded { _ in
+                                        resizeStartHeight = nil
+                                    }
+                            )
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3757,6 +3965,30 @@ struct ParagraphItemView: View {
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onAppear {
+            if editorHeight == nil {
+                editorHeight = appState.ocrParagraphTextAreaMinHeight
+            }
+        }
+    }
+
+    private var currentEditorHeight: CGFloat {
+        max(appState.ocrParagraphTextAreaMinHeight, editorHeight ?? appState.ocrParagraphTextAreaMinHeight)
+    }
+}
+
+struct ResizeHandleView: View {
+    var body: some View {
+        HStack {
+            Spacer()
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color(nsColor: .tertiaryLabelColor))
+                .frame(width: 44, height: 4)
+            Spacer()
+        }
+        .frame(height: 16)
+        .contentShape(Rectangle())
+        .help("Drag to resize text area")
     }
 }
 

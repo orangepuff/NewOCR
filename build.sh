@@ -31,7 +31,8 @@ swiftc \
   -framework SwiftUI \
   -framework AppKit \
   -framework PDFKit \
-  -framework Vision
+  -framework Vision \
+  -framework WebKit
 
 chmod +x "$APP_BUNDLE/Contents/MacOS/NewOCR"
 
