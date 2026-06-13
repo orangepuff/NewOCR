@@ -29,6 +29,7 @@ private struct SavedSplitRange: Codable {
     var title: String
     var pageFrom: String
     var pageTo: String
+    var file: String?
 }
 
 private func isSectionPDFURL(_ url: URL) -> Bool {
@@ -37,6 +38,17 @@ private func isSectionPDFURL(_ url: URL) -> Bool {
     }
     let stem = url.deletingPathExtension().lastPathComponent
     return stem.range(of: #"^section-\d+$"#, options: [.regularExpression, .caseInsensitive]) != nil
+}
+
+private func sectionPDFIndex(_ url: URL) -> Int? {
+    guard isSectionPDFURL(url) else { return nil }
+    let stem = url.deletingPathExtension().lastPathComponent
+    let numberText = stem.replacingOccurrences(
+        of: #"(?i)^section-"#,
+        with: "",
+        options: .regularExpression
+    )
+    return Int(numberText)
 }
 
 private struct OCRLine: Codable {
@@ -120,6 +132,9 @@ final class AppState: ObservableObject {
 
     @Published var selectedFolderPath: String = "" {
         didSet {
+            if !isRestoring, selectedFolderPath != oldValue {
+                resetOCRFilterStateForFolderChange()
+            }
             loadPDFFiles()
             refreshCoverImagePathsForSelectedFolder()
             if !isRestoring {
@@ -183,6 +198,13 @@ final class AppState: ObservableObject {
     @Published var isOCRRunning: Bool = false
     @Published var ocrProgressPercent: Double? = nil
     @Published var isOCRCancelling: Bool = false
+    @Published var isBulkOCRProgressPresented: Bool = false
+    @Published var bulkOCRProgressTitle: String = "Process OCR All"
+    @Published var bulkOCRProgressMessage: String = ""
+    @Published var bulkOCRCurrentFile: String = ""
+    @Published var bulkOCRCompletedCount: Int = 0
+    @Published var bulkOCRTotalCount: Int = 0
+    @Published var isBulkOCRFinished: Bool = false
     @Published var ocrStatus: String = "No OCR job has been sent yet." {
         didSet {
             if !isRestoring {
@@ -365,11 +387,7 @@ final class AppState: ObservableObject {
             return false
         }
 
-        let ranges = loadSavedSplitRanges(from: projectFolderURL)
-        guard let lastTo = ranges.compactMap({ Int($0.pageTo) }).max() else {
-            return true
-        }
-        return lastTo < document.pageCount
+        return true
     }
 
     var localAppleVisionOutputFolderPathIfExists: String? {
@@ -495,7 +513,7 @@ final class AppState: ObservableObject {
 
             let alert = NSAlert()
             alert.messageText = "Revert to original PDF?"
-            alert.informativeText = "This will restore the working PDF from the _original file and remove generated section PDFs, OCR Markdown, scan text, manual sections, and EPUB output."
+            alert.informativeText = "This will restore the working PDF from the _original file and remove split plan data, generated section PDFs, OCR Markdown, scan text, manual sections, and EPUB output."
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Revert")
             alert.addButton(withTitle: "Cancel")
@@ -529,13 +547,6 @@ final class AppState: ObservableObject {
                 }
                 try FileManager.default.moveItem(at: temporaryURL, to: sourceURL)
 
-                let bookmarkData = try sourceURL.bookmarkData(
-                    options: [.withSecurityScope],
-                    includingResourceValuesForKeys: nil,
-                    relativeTo: nil
-                )
-                try self.saveSplitPlan(bookmarkData: bookmarkData, sourcePDFURL: sourceURL, projectFolderURL: projectFolderURL, splitRanges: [])
-
                 DispatchQueue.main.async {
                     let projectPath = projectFolderURL.standardizedFileURL.path + "/"
                     self.pdfTitles = self.pdfTitles.filter { key, _ in
@@ -547,7 +558,7 @@ final class AppState: ObservableObject {
                     }
                     self.builtEPUBPath = ""
                     self.loadPDFFiles()
-                    self.configStatus = "Reverted to original PDF and removed generated output."
+                    self.configStatus = "Reverted to original PDF and removed split plan data and generated output."
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -588,8 +599,10 @@ final class AppState: ObservableObject {
             "sourcePDFName": sourcePDFURL.lastPathComponent,
             "sourcePDFPath": sourcePDFURL.path,
             "sourcePDFBookmark": bookmarkData.base64EncodedString(),
-            "splitRanges": existingRanges.map { range in
-                [
+            "splitRanges": existingRanges.compactMap { range -> [String: String]? in
+                guard let file = range.file else { return nil }
+                return [
+                    "file": file,
                     "title": range.title,
                     "pageFrom": range.pageFrom,
                     "pageTo": range.pageTo,
@@ -669,10 +682,11 @@ final class AppState: ObservableObject {
             let title = item["title"] as? String ?? ""
             let pageFrom = item["pageFrom"] as? String ?? ""
             let pageTo = item["pageTo"] as? String ?? ""
+            let file = item["file"] as? String
             guard Int(pageFrom) != nil, Int(pageTo) != nil else {
                 return nil
             }
-            return SavedSplitRange(title: title, pageFrom: pageFrom, pageTo: pageTo)
+            return SavedSplitRange(title: title, pageFrom: pageFrom, pageTo: pageTo, file: file)
         }
     }
 
@@ -718,6 +732,11 @@ final class AppState: ObservableObject {
         let bookSectionsURL = projectFolderURL.appendingPathComponent("book-sections.json")
         if fileManager.fileExists(atPath: bookSectionsURL.path) {
             try fileManager.removeItem(at: bookSectionsURL)
+        }
+
+        let planURL = splitPlanURL(for: projectFolderURL)
+        if fileManager.fileExists(atPath: planURL.path) {
+            try fileManager.removeItem(at: planURL)
         }
     }
 
@@ -874,9 +893,20 @@ final class AppState: ObservableObject {
                 ocrStatus = "Loaded existing Markdown."
                 logOutput = "Loaded Markdown:\n\(localAppleVisionOutputFolderURL?.path ?? "")"
             } else {
-                ocrText = "\n"
-                ocrStatus = "Ready. Add text, then save Markdown."
-                logOutput = "Manual section has no PDF. Save will create Markdown."
+                let title = pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? "Manual Section"
+                let markdownText = "## \(title.isEmpty ? "Manual Section" : title)"
+                do {
+                    let markdownFolderURL = manualMarkdownFolderURL(for: item.url)
+                    try saveAppleVisionMarkdownText(markdownText, folderURL: markdownFolderURL)
+                    ocrText = markdownText
+                    ocrStatus = "Created manual Markdown."
+                    logOutput = "Created Markdown:\n\(markdownFolderURL.appendingPathComponent("page1.md").path)"
+                } catch {
+                    ocrText = markdownText
+                    ocrStatus = "Could not create manual Markdown."
+                    logOutput = error.localizedDescription
+                }
             }
             skipProcessOCREngine = true
             openOCRWindow()
@@ -1293,11 +1323,11 @@ final class AppState: ObservableObject {
         logOutput = selectedItemIsManualSection ? "Add text, then save Markdown." : "Run OCR first to create Markdown files."
     }
 
-    func saveOCRTextFile() {
+    func saveOCRTextFile() -> Bool {
         guard let markdownFolderURL = localAppleVisionOutputFolderURL else {
             ocrStatus = "No PDF selected."
             logOutput = ""
-            return
+            return false
         }
 
         do {
@@ -1308,10 +1338,11 @@ final class AppState: ObservableObject {
             \(markdownFolderURL.path)
             """
             ocrSaveAlertMessage = "Saved Markdown:\n\(markdownFolderURL.path)"
-            isOCRSaveAlertPresented = true
+            return true
         } catch {
             ocrStatus = "Could not save Markdown."
             logOutput = error.localizedDescription
+            return false
         }
     }
 
@@ -1327,11 +1358,10 @@ final class AppState: ObservableObject {
             guard !markdownFiles.isEmpty else {
                 return nil
             }
-            let title = pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines)
-                ?? displayName(for: item)
+            let title = chapterTitle(for: item, markdownFiles: markdownFiles)
             return [
                 "pdf": item.url.path,
-                "title": title.isEmpty ? displayName(for: item) : title,
+                "title": title,
                 "markdownFiles": markdownFiles.map(\.path),
             ]
         }
@@ -1417,6 +1447,23 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    private func chapterTitle(for item: PDFFileItem, markdownFiles: [URL]) -> String {
+        let savedTitle = pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !savedTitle.isEmpty {
+            return savedTitle
+        }
+
+        for markdownFile in markdownFiles {
+            guard let text = try? String(contentsOf: markdownFile, encoding: .utf8),
+                  let heading = firstMarkdownHeading(in: text) else {
+                continue
+            }
+            return heading
+        }
+
+        return displayName(for: item)
     }
 
     func applyStylesheet() {
@@ -1999,6 +2046,10 @@ final class AppState: ObservableObject {
         pdfFiles.filter { appleVisionMarkdownExists(for: $0) }.count
     }
 
+    var canProcessOCRAllSections: Bool {
+        !isOCRRunning && pdfFiles.contains { !($0.isManualSection) && FileManager.default.fileExists(atPath: $0.url.path) }
+    }
+
     private func markdownFolderURL(for item: PDFFileItem) -> URL {
         if item.isManualSection {
             return manualMarkdownFolderURL(for: item.url)
@@ -2102,12 +2153,51 @@ final class AppState: ObservableObject {
         save()
     }
 
-    func deleteManualSection(_ item: PDFFileItem) {
-        guard item.isManualSection else { return }
-        pdfFiles.removeAll { $0 == item }
-        pdfTitles.removeValue(forKey: item.id)
-        saveBookSections()
-        save()
+    func removeSectionItem(_ item: PDFFileItem) {
+        guard item.isManualSection || isSectionPDFURL(item.url) else { return }
+        let title = sectionRemovalTitle(for: item)
+
+        let alert = NSAlert()
+        alert.messageText = "Remove \(title)?"
+        alert.informativeText = "Are you sure you want to remove \(title)?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        do {
+            if item.isManualSection {
+                let markdownFolderURL = manualMarkdownFolderURL(for: item.url)
+                if FileManager.default.fileExists(atPath: markdownFolderURL.path) {
+                    try FileManager.default.removeItem(at: markdownFolderURL)
+                }
+                if FileManager.default.fileExists(atPath: item.url.path) {
+                    try FileManager.default.removeItem(at: item.url)
+                }
+            } else {
+                if FileManager.default.fileExists(atPath: item.url.path) {
+                    try FileManager.default.removeItem(at: item.url)
+                }
+                removeSplitPlanEntry(forFile: item.url.lastPathComponent)
+            }
+            pdfFiles.removeAll { $0 == item }
+            pdfTitles.removeValue(forKey: item.id)
+            saveBookSections()
+            save()
+        } catch {
+            configStatus = "Could not remove section: \(error.localizedDescription)"
+            showAlert(title: "Could Not Remove Section", message: error.localizedDescription)
+        }
+    }
+
+    private func sectionRemovalTitle(for item: PDFFileItem) -> String {
+        let title = pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !title.isEmpty {
+            return title
+        }
+        return item.isManualSection ? "Manual Section" : item.url.lastPathComponent
     }
 
     func displayName(for item: PDFFileItem) -> String {
@@ -2126,6 +2216,16 @@ final class AppState: ObservableObject {
             options: .regularExpression
         )
         return "Section \(numberText)"
+    }
+
+    func sectionListDisplayName(for item: PDFFileItem) -> String {
+        let name = displayName(for: item)
+        guard !item.isManualSection,
+              let document = PDFDocument(url: item.url),
+              document.pageCount > 0 else {
+            return name
+        }
+        return "\(name) (\(document.pageCount) pages)"
     }
 
     private func updateSelectedPDFTitleFromOCRText(_ text: String) {
@@ -2636,6 +2736,100 @@ final class AppState: ObservableObject {
         sendSelectedPDFToAppleVision()
     }
 
+    func processOCRAllSections() {
+        let sectionItems = pdfFiles.filter { !($0.isManualSection) && FileManager.default.fileExists(atPath: $0.url.path) }
+        guard !sectionItems.isEmpty else {
+            ocrStatus = "No section PDF files to OCR."
+            logOutput = "Manual sections are skipped because they do not have PDF files."
+            return
+        }
+        guard !isOCRRunning else { return }
+
+        ensureConfigFilesExist()
+        isOCRRunning = true
+        isOCRCancelling = false
+        ocrProgressPercent = 0
+        ocrStatus = "Processing OCR for \(sectionItems.count) sections..."
+        logOutput = ""
+        bulkOCRProgressTitle = "Process OCR All"
+        bulkOCRProgressMessage = "Preparing OCR..."
+        bulkOCRCurrentFile = ""
+        bulkOCRCompletedCount = 0
+        bulkOCRTotalCount = sectionItems.count
+        isBulkOCRFinished = false
+        isBulkOCRProgressPresented = true
+
+        let filterTopLinesValue = filterTopLines
+        let filterBottomLinesValue = filterBottomLines
+        let filteredTextValue = filteredText
+        let titles = Dictionary(uniqueKeysWithValues: sectionItems.map { item in
+            (item.url.path, pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+        })
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var completed = 0
+            var logs: [String] = []
+
+            do {
+                for (index, item) in sectionItems.enumerated() {
+                    if self.isOCRCancelling {
+                        throw NSError(domain: "NewOCR", code: 3, userInfo: [NSLocalizedDescriptionKey: "AppleVision OCR cancelled."])
+                    }
+
+                    let pdfPath = item.url.path
+                    let title = titles[pdfPath] ?? ""
+                    try self.removeAppleVisionResources(for: item.url)
+
+                    DispatchQueue.main.async {
+                        let percent = (Double(index) / Double(sectionItems.count)) * 100
+                        self.ocrProgressPercent = percent
+                        self.ocrStatus = "Processing OCR \(index + 1)/\(sectionItems.count): \(item.url.lastPathComponent)"
+                        self.bulkOCRProgressMessage = "Processing \(index + 1) of \(sectionItems.count)"
+                        self.bulkOCRCurrentFile = item.url.lastPathComponent
+                        self.bulkOCRCompletedCount = index
+                    }
+
+                    let result = try self.runAppleVisionOCR(
+                        pdfPath: pdfPath,
+                        filterTopLines: filterTopLinesValue,
+                        filterBottomLines: filterBottomLinesValue,
+                        filteredText: filteredTextValue,
+                        documentTitle: title
+                    )
+                    completed += 1
+                    logs.append("\(item.url.lastPathComponent): \(result.pages) pages, \(result.characters) characters")
+                }
+
+                DispatchQueue.main.async {
+                    self.isOCRRunning = false
+                    self.isOCRCancelling = false
+                    self.ocrProgressPercent = 100
+                    self.ocrStatus = "Processed OCR for \(completed) sections."
+                    self.logOutput = logs.joined(separator: "\n")
+                    self.bulkOCRProgressTitle = "Finished Successfully"
+                    self.bulkOCRProgressMessage = "Finished OCR for \(completed) sections."
+                    self.bulkOCRCurrentFile = ""
+                    self.bulkOCRCompletedCount = completed
+                    self.isBulkOCRFinished = true
+                    self.loadPDFFiles()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isOCRRunning = false
+                    self.isOCRCancelling = false
+                    self.ocrProgressPercent = nil
+                    self.ocrStatus = "Bulk OCR failed."
+                    self.logOutput = error.localizedDescription
+                    self.bulkOCRProgressTitle = "OCR Failed"
+                    self.bulkOCRProgressMessage = error.localizedDescription
+                    self.bulkOCRCurrentFile = ""
+                    self.isBulkOCRFinished = true
+                    self.loadPDFFiles()
+                }
+            }
+        }
+    }
+
     private func sendSelectedPDFToAppleVision() {
         isOCRRunning = true
         isOCRCancelling = false
@@ -2999,6 +3193,14 @@ final class AppState: ObservableObject {
         }
 
         let mergedRegions = mergeOverlappingPixelRegions(regions)
+            .filter {
+                !isScannedTextPageImageRegion(
+                    $0,
+                    pageWidth: width,
+                    pageHeight: height,
+                    textLines: textLines
+                )
+            }
         guard !mergedRegions.isEmpty else { return [] }
 
         let imagesFolder = outputFolder.appendingPathComponent("Images", isDirectory: true)
@@ -3050,6 +3252,50 @@ final class AppState: ObservableObject {
             }
             return $0.minX < $1.minX
         }
+    }
+
+    private func isScannedTextPageImageRegion(
+        _ pixelRect: CGRect,
+        pageWidth: Int,
+        pageHeight: Int,
+        textLines: [OCRLine]
+    ) -> Bool {
+        let meaningfulTextLines = textLines.filter {
+            $0.text.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+                && $0.width >= 0.03
+                && $0.height >= 0.004
+        }
+        guard meaningfulTextLines.count >= 4 else { return false }
+
+        let width = CGFloat(pageWidth)
+        let height = CGFloat(pageHeight)
+        let left = max(0, pixelRect.minX / width)
+        let right = min(1, pixelRect.maxX / width)
+        let top = 1 - max(0, pixelRect.minY / height)
+        let bottom = 1 - min(1, pixelRect.maxY / height)
+        let regionWidth = max(0, right - left)
+        let regionHeight = max(0, top - bottom)
+        let regionArea = regionWidth * regionHeight
+        let isPageSized = regionWidth >= 0.65
+            && regionHeight >= 0.45
+            && regionArea >= 0.35
+        guard isPageSized else { return false }
+
+        let overlappingLineCount = meaningfulTextLines.filter { line in
+            let overlapLeft = max(line.left, left)
+            let overlapRight = min(line.right, right)
+            let overlapBottom = max(line.bottom, bottom)
+            let overlapTop = min(line.top, top)
+            guard overlapRight > overlapLeft, overlapTop > overlapBottom else {
+                return false
+            }
+            let overlapArea = (overlapRight - overlapLeft) * (overlapTop - overlapBottom)
+            let lineArea = max(0.0001, line.width * line.height)
+            return overlapArea / lineArea >= 0.50
+        }.count
+        let overlapRatio = Double(overlappingLineCount) / Double(meaningfulTextLines.count)
+
+        return overlappingLineCount >= 4 && overlapRatio >= 0.60
     }
 
     private func writePNG(_ image: CGImage, to url: URL) throws {
@@ -3217,6 +3463,32 @@ final class AppState: ObservableObject {
         try data.write(to: cacheURL, options: .atomic)
     }
 
+    private func removeAppleVisionResources(for pdfURL: URL) throws {
+        let mdFolder = appleVisionOutputFolderURL(for: pdfURL)
+            .appendingPathComponent(pdfURL.deletingPathExtension().lastPathComponent, isDirectory: true)
+        if FileManager.default.fileExists(atPath: mdFolder.path) {
+            try FileManager.default.removeItem(at: mdFolder)
+        }
+
+        let cacheURL = appleVisionLineCacheURL(for: pdfURL)
+        if FileManager.default.fileExists(atPath: cacheURL.path),
+           let data = try? Data(contentsOf: cacheURL),
+           var pages = try? JSONDecoder().decode([OCRLineCachePage].self, from: data) {
+            pages.removeAll { $0.pdfName == pdfURL.lastPathComponent }
+            if pages.isEmpty {
+                try FileManager.default.removeItem(at: cacheURL)
+            } else {
+                let encoded = try JSONEncoder().encode(pages.sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending })
+                try encoded.write(to: cacheURL, options: .atomic)
+            }
+        }
+
+        let reviewURL = headerFooterReviewURL(for: pdfURL)
+        if FileManager.default.fileExists(atPath: reviewURL.path) {
+            try FileManager.default.removeItem(at: reviewURL)
+        }
+    }
+
     private func scanHeaderFooterSample(pdfURL: URL, progress: ((Int, Int) -> Void)? = nil) throws -> String? {
         guard let document = PDFDocument(url: pdfURL) else {
             throw NSError(domain: "NewOCR", code: 10, userInfo: [NSLocalizedDescriptionKey: "Could not open PDF: \(pdfURL.path)"])
@@ -3344,7 +3616,7 @@ final class AppState: ObservableObject {
            let reviewText = try? String(contentsOf: reviewURL, encoding: .utf8) {
             return Set(parseHeaderFooterReviewRemoveItems(from: reviewText).compactMap { normalizedHeaderFooterKey($0) })
         }
-        return Set(repeatedHeaderFooterGroups(for: pdfURL).flatMap(\.keys))
+        return []
     }
 
     private func parseHeaderFooterReviewRemoveItems(from text: String) -> [String] {
@@ -3475,6 +3747,24 @@ final class AppState: ObservableObject {
         appleVisionLineCacheURL(for: pdfURL)
             .deletingLastPathComponent()
             .appendingPathComponent("header-footer-review.txt")
+    }
+
+    private func resetOCRFilterStateForFolderChange() {
+        filteredText = ""
+        configText = ""
+        if configEditorTitle == "Header/Footer Review" {
+            activeConfigFileURL = nil
+            isConfigEditorPresented = false
+        }
+
+        guard !selectedFolderPath.isEmpty else { return }
+        let reviewURL = URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("AppleVision", isDirectory: true)
+            .appendingPathComponent("LineCache", isDirectory: true)
+            .appendingPathComponent("header-footer-review.txt")
+        if FileManager.default.fileExists(atPath: reviewURL.path) {
+            try? FileManager.default.removeItem(at: reviewURL)
+        }
     }
 
     private enum OCRMarkdownBlock {
@@ -4097,6 +4387,28 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func removeSplitPlanEntry(forFile fileName: String) {
+        guard !selectedFolderPath.isEmpty else { return }
+        let projectFolderURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
+        let planURL = splitPlanURL(for: projectFolderURL)
+        guard let data = try? Data(contentsOf: planURL),
+              var payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ranges = payload["splitRanges"] as? [[String: Any]] else {
+            return
+        }
+
+        payload["splitRanges"] = ranges.filter { item in
+            (item["file"] as? String) != fileName
+        }
+
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: planURL, options: .atomic)
+        } catch {
+            logOutput = "Could not update split plan: \(error.localizedDescription)"
+        }
+    }
+
     private func ensureConfigFilesExist() {
         let folderURL = configFileURL.deletingLastPathComponent()
 
@@ -4242,6 +4554,7 @@ struct ContentView: View {
             minHeight: appState.shouldOpenMainWindowFullScreen ? 520 : appState.mainWindowHeight
         )
         .background(Color(nsColor: .windowBackgroundColor))
+        .buttonStyle(NewOCRButtonStyle())
         .onAppear {
             guard appState.shouldOpenMainWindowFullScreen else { return }
             DispatchQueue.main.async {
@@ -4255,134 +4568,239 @@ struct ContentView: View {
     }
 }
 
+struct NewOCRButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        NewOCRButtonStyleBody(configuration: configuration)
+    }
+}
+
+private struct NewOCRButtonStyleBody: View {
+    let configuration: NewOCRButtonStyle.Configuration
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    private var isDestructive: Bool {
+        configuration.role == .destructive
+    }
+
+    private var foregroundColor: Color {
+        if !isEnabled {
+            return Color(nsColor: .disabledControlTextColor)
+        }
+        if isDestructive {
+            return .red
+        }
+        return .primary
+    }
+
+    private var backgroundColor: Color {
+        if !isEnabled {
+            return Color(nsColor: .controlBackgroundColor).opacity(0.45)
+        }
+        if configuration.isPressed {
+            return isDestructive ? Color.red.opacity(0.16) : Color.accentColor.opacity(0.18)
+        }
+        if isHovered {
+            return isDestructive ? Color.red.opacity(0.10) : Color.accentColor.opacity(0.10)
+        }
+        return Color(nsColor: .controlBackgroundColor)
+    }
+
+    private var borderColor: Color {
+        if !isEnabled {
+            return Color(nsColor: .separatorColor).opacity(0.7)
+        }
+        if isDestructive {
+            return Color.red.opacity(isHovered || configuration.isPressed ? 0.48 : 0.28)
+        }
+        return Color(nsColor: .separatorColor).opacity(isHovered || configuration.isPressed ? 1.0 : 0.72)
+    }
+
+    var body: some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .minFrame(width: 34, height: 30)
+            .background(backgroundColor)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(borderColor, lineWidth: 1)
+            )
+            .shadow(
+                color: Color.black.opacity(isEnabled && isHovered ? 0.08 : 0),
+                radius: 5,
+                x: 0,
+                y: 2
+            )
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+
+private extension View {
+    func minFrame(width: CGFloat, height: CGFloat) -> some View {
+        frame(minWidth: width, minHeight: height)
+    }
+}
+
 struct StepOneLoadPDFView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Load PDF/OCR")
                             .font(.largeTitle.weight(.semibold))
                         Text("Choose which PDF file and do OCR.")
                             .foregroundStyle(.secondary)
-                        Text(appState.selectedFolderPath.isEmpty ? "No folder selected yet" : appState.selectedFolderPath)
-                            .font(.caption)
-                            .foregroundStyle(appState.selectedFolderPath.isEmpty ? .secondary : .primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: 260, alignment: .leading)
+                        ProjectPathView(path: appState.selectedFolderPath)
+                            .frame(maxWidth: 360, alignment: .leading)
                     }
 
                     Spacer(minLength: 0)
 
-                    HStack(spacing: 10) {
-                        Button("New") {
-                            appState.newSplitPlan()
-                        }
-                        .controlSize(.large)
-                        .keyboardShortcut("n", modifiers: [.command])
-
-                        Button("Open") {
-                            appState.chooseFolder()
-                        }
-                        .controlSize(.large)
-                        .keyboardShortcut("o", modifiers: [.command])
-
-                        if appState.canOpenSplitPlannerForSelectedFolder {
-                            Button("Add Split") {
-                                appState.openSelectedFolderAddSplit()
+                    VStack(alignment: .trailing, spacing: 8) {
+                        HStack(spacing: 10) {
+                            Button {
+                                appState.newSplitPlan()
+                            } label: {
+                                Label("New", systemImage: "plus")
                             }
                             .controlSize(.large)
-                            .disabled(!appState.canAddSplitForSelectedFolder)
+                            .keyboardShortcut("n", modifiers: [.command])
 
-                            Button("Crop") {
-                                appState.openSelectedFolderCropPDF()
+                            Button {
+                                appState.chooseFolder()
+                            } label: {
+                                Label("Open", systemImage: "folder")
+                            }
+                            .controlSize(.large)
+                            .keyboardShortcut("o", modifiers: [.command])
+
+                            if appState.canOpenSplitPlannerForSelectedFolder {
+                                Button {
+                                    appState.openSelectedFolderAddSplit()
+                                } label: {
+                                    Label("Add Split", systemImage: "rectangle.split.2x1")
+                                }
+                                .controlSize(.large)
+                                .disabled(!appState.canAddSplitForSelectedFolder)
+
+                                Button {
+                                    appState.openSelectedFolderCropPDF()
+                                } label: {
+                                    Label("Crop", systemImage: "crop")
+                                }
+                                .controlSize(.large)
+
+                                Button(role: .destructive) {
+                                    appState.confirmAndRevertSelectedFolderToOriginalPDF()
+                                } label: {
+                                    Label("Revert Original", systemImage: "arrow.uturn.backward")
+                                }
+                                .controlSize(.large)
+                            }
+                        }
+
+                        HStack(spacing: 10) {
+                            Button {
+                                appState.applyStylesheet()
+                            } label: {
+                                Label("Apply CSS", systemImage: "paintbrush")
+                            }
+                            .controlSize(.large)
+                            .disabled(appState.selectedFolderPath.isEmpty)
+
+                            Button {
+                                appState.buildBookEPUB()
+                            } label: {
+                                Label(appState.isOCRRunning ? "Building EPUB..." : "Build EPUB", systemImage: "book")
+                            }
+                            .controlSize(.large)
+                            .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
+
+                            if appState.bookEPUBFilePathIfExists != nil {
+                                Button {
+                                    appState.openBuiltEPUBFile()
+                                } label: {
+                                    Label("View EPUB", systemImage: "eye")
+                                }
+                                .controlSize(.large)
+                            }
+
+                            Button(role: .destructive) {
+                                appState.clearAllHeaderFooterScans()
+                            } label: {
+                                Label("Clear Scan Report", systemImage: "trash")
+                            }
+                            .controlSize(.large)
+                            .disabled(appState.selectedFolderPath.isEmpty || appState.isHeaderFooterScanRunning)
+
+                            Button {
+                                appState.openConfigEditor()
+                            } label: {
+                                Label("Open Config", systemImage: "gearshape")
                             }
                             .controlSize(.large)
 
-                            Button("Revert Original") {
-                                appState.confirmAndRevertSelectedFolderToOriginalPDF()
+                            Button {
+                                NSApp.terminate(nil)
+                            } label: {
+                                Label("Close", systemImage: "xmark")
                             }
                             .controlSize(.large)
                         }
-
-                        Button("Clear Scan Report") {
-                            appState.clearAllHeaderFooterScans()
-                        }
-                        .controlSize(.large)
-                        .disabled(appState.selectedFolderPath.isEmpty || appState.isHeaderFooterScanRunning)
-
-                        Button("Open Config") {
-                            appState.openConfigEditor()
-                        }
-                        .controlSize(.large)
-
-                        Button("Close") {
-                            NSApp.terminate(nil)
-                        }
-                        .controlSize(.large)
                     }
                     .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(1)
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 10) {
-                        Text("EPUB Covers")
-                            .font(.headline)
+                HStack(spacing: 14) {
+                    Spacer(minLength: 0)
 
-                        Spacer()
+                    HStack(spacing: 8) {
+                        Text("EPUB Covers")
+                            .font(.subheadline.weight(.semibold))
 
                         Text("\(appState.markdownChapterCount) Markdown chapters")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-
-                        Button("Apply CSS") {
-                            appState.applyStylesheet()
-                        }
-                        .controlSize(.large)
-                        .disabled(appState.selectedFolderPath.isEmpty)
-
-                        Button(appState.isOCRRunning ? "Building EPUB..." : "Build EPUB") {
-                            appState.buildBookEPUB()
-                        }
-                        .controlSize(.large)
-                        .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
-
-                        if appState.bookEPUBFilePathIfExists != nil {
-                            Button("View EPUB") {
-                                appState.openBuiltEPUBFile()
-                            }
-                            .controlSize(.large)
-                        }
                     }
 
-                    HStack(spacing: 24) {
-                        HStack(spacing: 10) {
-                            Button("Front Cover") {
-                                appState.chooseFrontCoverImage()
-                            }
+                    Divider()
+                        .frame(height: 26)
 
-                            CoverThumbnailView(path: appState.frontCoverImagePath)
+                    HStack(spacing: 10) {
+                        Button {
+                            appState.chooseFrontCoverImage()
+                        } label: {
+                            Label("Front Cover", systemImage: "photo")
                         }
 
-                        HStack(spacing: 10) {
-                            Button("Back Cover") {
-                                appState.chooseBackCoverImage()
-                            }
-
-                            CoverThumbnailView(path: appState.backCoverImagePath)
-                        }
-
-                        Spacer()
+                        CoverThumbnailView(path: appState.frontCoverImagePath)
                     }
 
+                    HStack(spacing: 10) {
+                        Button {
+                            appState.chooseBackCoverImage()
+                        } label: {
+                            Label("Back Cover", systemImage: "photo.on.rectangle")
+                        }
+
+                        CoverThumbnailView(path: appState.backCoverImagePath)
+                    }
+
+                    Spacer(minLength: 0)
                 }
-                .padding(12)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.vertical, 4)
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -4395,6 +4813,13 @@ struct StepOneLoadPDFView: View {
                             .padding(.vertical, 3)
                             .background(Color(nsColor: .quaternaryLabelColor))
                             .clipShape(Capsule())
+                        Button {
+                            appState.processOCRAllSections()
+                        } label: {
+                            Label(appState.isOCRRunning ? "Processing OCR..." : "Process OCR All", systemImage: "text.viewfinder")
+                        }
+                        .controlSize(.large)
+                        .disabled(!appState.canProcessOCRAllSections)
                         Spacer()
                     }
 
@@ -4439,6 +4864,65 @@ struct StepOneLoadPDFView: View {
         } message: {
             Text(appState.cssApplyAlertMessage)
         }
+        .sheet(isPresented: $appState.isBulkOCRProgressPresented) {
+            BulkOCRProgressView()
+                .environmentObject(appState)
+        }
+    }
+}
+
+struct BulkOCRProgressView: View {
+    @EnvironmentObject private var appState: AppState
+
+    private var progressValue: Double {
+        guard appState.bulkOCRTotalCount > 0 else { return 0 }
+        return Double(appState.bulkOCRCompletedCount) / Double(appState.bulkOCRTotalCount)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: appState.isBulkOCRFinished ? "checkmark.circle.fill" : "text.viewfinder")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(appState.isBulkOCRFinished ? .green : Color.accentColor)
+                Text(appState.bulkOCRProgressTitle)
+                    .font(.title2.weight(.semibold))
+                Spacer()
+            }
+
+            Text(appState.bulkOCRProgressMessage)
+                .foregroundStyle(.secondary)
+
+            if !appState.bulkOCRCurrentFile.isEmpty {
+                HStack(spacing: 8) {
+                    Text("File")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(appState.bulkOCRCurrentFile)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            ProgressView(value: progressValue)
+                .progressViewStyle(.linear)
+
+            HStack {
+                Text("\(appState.bulkOCRCompletedCount) / \(appState.bulkOCRTotalCount)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if appState.isBulkOCRFinished {
+                    Button("OK") {
+                        appState.isBulkOCRProgressPresented = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -4502,6 +4986,7 @@ struct ConfigEditorView: View {
             }
         }
         .padding(20)
+        .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -4540,6 +5025,54 @@ struct HeaderFooterReviewView: View {
     }
 }
 
+struct ProjectPathView: View {
+    let path: String
+
+    private var isEmpty: Bool {
+        path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var folderName: String {
+        guard !isEmpty else { return "No project folder selected" }
+        return URL(fileURLWithPath: path, isDirectory: true).lastPathComponent
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: isEmpty ? "folder.badge.questionmark" : "folder.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(isEmpty ? Color(nsColor: .secondaryLabelColor) : Color.accentColor)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(folderName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isEmpty ? Color(nsColor: .secondaryLabelColor) : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if !isEmpty {
+                    Text(path)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.72), lineWidth: 1)
+        )
+        .help(isEmpty ? "No project folder selected" : path)
+    }
+}
+
 struct PDFListView: View {
     @EnvironmentObject private var appState: AppState
 
@@ -4551,8 +5084,10 @@ struct PDFListView: View {
                 VStack(spacing: 12) {
                     EmptyStateView(title: "No sections found in this folder.")
                         .frame(minHeight: 180)
-                    Button("Add Section") {
+                    Button {
                         appState.addManualSectionAtEnd()
+                    } label: {
+                        Label("Add Section", systemImage: "plus.rectangle.on.rectangle")
                     }
                     .controlSize(.large)
                     .padding(.bottom, 16)
@@ -4561,7 +5096,7 @@ struct PDFListView: View {
                 VStack(spacing: 0) {
                     HStack(spacing: 12) {
                         Text("")
-                            .frame(width: 34)
+                            .frame(width: 68)
                         Text("Section")
                             .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
                         Text("Title")
@@ -4579,15 +5114,26 @@ struct PDFListView: View {
 
                     List(appState.pdfFiles) { item in
                         HStack(spacing: 12) {
-                            Button {
-                                appState.addManualSection(after: item)
-                            } label: {
-                                Image(systemName: "plus")
-                                    .frame(width: 18, height: 18)
+	                            HStack(spacing: 6) {
+	                                Button(role: .destructive) {
+	                                    appState.removeSectionItem(item)
+	                                } label: {
+	                                    Image(systemName: "xmark")
+	                                        .font(.system(size: 12, weight: .semibold))
+	                                        .frame(width: 18, height: 18)
+	                                }
+	                                .help("Remove section")
+
+                                Button {
+                                    appState.addManualSection(after: item)
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .frame(width: 18, height: 18)
+                                }
+                                .help("Add manual section below")
                             }
-                            .buttonStyle(.bordered)
-                            .help("Add manual section below")
-                            .frame(width: 34)
+                            .frame(width: 68)
 
                             HStack(spacing: 8) {
                                 Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
@@ -4600,7 +5146,7 @@ struct PDFListView: View {
                                 }
 
                                 if item.isManualSection {
-                                    Text(appState.displayName(for: item))
+                                    Text(appState.sectionListDisplayName(for: item))
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -4608,7 +5154,7 @@ struct PDFListView: View {
                                     Button {
                                         NSWorkspace.shared.open(item.url)
                                     } label: {
-                                        Text(appState.displayName(for: item))
+                                        Text(appState.sectionListDisplayName(for: item))
                                             .lineLimit(1)
                                             .truncationMode(.middle)
                                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -4625,16 +5171,11 @@ struct PDFListView: View {
                                 .frame(width: 260)
 
                             HStack(spacing: 8) {
-                                if item.isManualSection {
-                                    Button("Process") {
-                                        appState.beginOCR(for: item)
-                                    }
-
-                                    Button("Delete") {
-                                        appState.deleteManualSection(item)
-                                    }
-                                    .foregroundStyle(.red)
-                                } else {
+	                                if item.isManualSection {
+	                                    Button("Process") {
+	                                        appState.beginOCR(for: item)
+	                                    }
+	                                } else {
                                     Button(appState.isScanningHeaderFooter(for: item) ? "Scanning..." : "Scan Header") {
                                         appState.scanHeaderFooterSample(for: item)
                                     }
@@ -4762,6 +5303,8 @@ struct StepTwoOCRView: View {
     @State private var isMarkdownInfoPopoverPresented = false
     @State private var isSearchInfoPopoverPresented = false
     @State private var isReplacePopoverPresented = false
+    @State private var isSaveAlertPresented = false
+    @State private var windowToCloseAfterSave: NSWindow?
     @State private var replacementText = ""
 
     var body: some View {
@@ -4797,7 +5340,12 @@ struct StepTwoOCRView: View {
                     .disabled(appState.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
 
                     Button("Save") {
-                        appState.saveOCRTextFile()
+                        windowToCloseAfterSave = NSApp.keyWindow
+                        if appState.saveOCRTextFile() {
+                            isSaveAlertPresented = true
+                        } else {
+                            windowToCloseAfterSave = nil
+                        }
                     }
                     .controlSize(.large)
                     .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
@@ -5017,11 +5565,15 @@ struct StepTwoOCRView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .padding(22)
-            .alert("Saved Successfully", isPresented: $appState.isOCRSaveAlertPresented) {
-                Button("OK", role: .cancel) {}
+            .alert("Saved Successfully", isPresented: $isSaveAlertPresented) {
+                Button("OK", role: .cancel) {
+                    windowToCloseAfterSave?.close()
+                    windowToCloseAfterSave = nil
+                }
             } message: {
                 Text(appState.ocrSaveAlertMessage)
             }
+            .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -5142,6 +5694,7 @@ struct OCRMarkdownPreviewWindowView: View {
             WebPreviewView(url: previewURL, readAccessURL: readAccessURL)
         }
         .frame(minWidth: 520, minHeight: 420)
+        .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -5828,6 +6381,7 @@ struct SplitPlanRange: Identifiable, Equatable {
     var title: String
     var pageFrom: String
     var pageTo: String
+    var file: String? = nil
 }
 
 private struct PDFBookmarkSplitPoint {
@@ -5980,12 +6534,21 @@ final class SplitPlannerState: ObservableObject {
     }
 
     func nextAddSplitFromPage() -> Int {
-        if isUsingFallbackRange {
+        let sectionURLs = existingSectionPDFURLs()
+        guard !sectionURLs.isEmpty else {
             return 1
         }
 
-        let lastTo = ranges.compactMap { Int($0.pageTo) }.max() ?? 0
-        return max(lastTo + 1, 1)
+        if let lastURL = sectionURLs.last,
+           let lastRange = ranges.first(where: { $0.file == lastURL.lastPathComponent }),
+           let lastTo = Int(lastRange.pageTo) {
+            return max(lastTo + 1, 1)
+        }
+
+        let createdPageCount = sectionURLs.reduce(0) { total, url in
+            total + ((PDFDocument(url: url)?.pageCount) ?? 0)
+        }
+        return max(createdPageCount + 1, 1)
     }
 
     var canAddMoreSplits: Bool {
@@ -5998,9 +6561,15 @@ final class SplitPlannerState: ObservableObject {
             completion(false, nextAddSplitFromPage())
             return
         }
+        guard canAddMoreSplits else {
+            status = "All pages have already been split."
+            showLastPageAlreadyAlert()
+            completion(false, nextAddSplitFromPage())
+            return
+        }
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else {
-            status = "Enter a title before splitting."
+            status = "Title is required."
             completion(false, nextAddSplitFromPage())
             return
         }
@@ -6017,8 +6586,9 @@ final class SplitPlannerState: ObservableObject {
         isLoadingPDF = true
         status = "Creating split PDF..."
         let sourceURL = pdfURL
-        let outputIndex = (isUsingFallbackRange ? 0 : ranges.count) + 1
-        let range = SplitPlanRange(title: trimmedTitle, pageFrom: "\(from)", pageTo: "\(to)")
+        let outputIndex = nextSectionPDFIndex()
+        let outputFileName = String(format: "section-%03d.pdf", outputIndex)
+        let range = SplitPlanRange(title: trimmedTitle, pageFrom: "\(from)", pageTo: "\(to)", file: outputFileName)
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -6026,7 +6596,7 @@ final class SplitPlannerState: ObservableObject {
                     throw NSError(domain: "NewOCR", code: 41, userInfo: [NSLocalizedDescriptionKey: "Could not reload source PDF."])
                 }
                 let sectionDocument = try self.documentForRange(range, from: freshDocument)
-                let outputURL = self.projectFolderURL.appendingPathComponent(String(format: "section-%03d.pdf", outputIndex))
+                let outputURL = self.projectFolderURL.appendingPathComponent(outputFileName)
                 if FileManager.default.fileExists(atPath: outputURL.path) {
                     try FileManager.default.removeItem(at: outputURL)
                 }
@@ -6225,7 +6795,12 @@ final class SplitPlannerState: ObservableObject {
             }
             if shouldOpenAddSplitWindowAfterLoad {
                 shouldOpenAddSplitWindowAfterLoad = false
-                openAddSplitWindow()
+                if canAddMoreSplits {
+                    openAddSplitWindow()
+                } else {
+                    status = "All pages have already been split."
+                    showLastPageAlreadyAlert()
+                }
             }
         } catch {
             status = "Could not open PDF bookmark: \(error.localizedDescription)"
@@ -6297,6 +6872,36 @@ final class SplitPlannerState: ObservableObject {
             .map { PDFFileItem(id: $0.path, url: $0) }
     }
 
+    private func existingSectionPDFURLs() -> [URL] {
+        projectPDFs
+            .map(\.url)
+            .filter { sectionPDFIndex($0) != nil }
+            .sorted { left, right in
+                let leftIndex = sectionPDFIndex(left) ?? 0
+                let rightIndex = sectionPDFIndex(right) ?? 0
+                if leftIndex != rightIndex {
+                    return leftIndex < rightIndex
+                }
+                return left.lastPathComponent.localizedStandardCompare(right.lastPathComponent) == .orderedAscending
+            }
+    }
+
+    private func nextSectionPDFIndex() -> Int {
+        let lastIndex = existingSectionPDFURLs()
+            .compactMap(sectionPDFIndex)
+            .max() ?? 0
+        return lastIndex + 1
+    }
+
+    private func showLastPageAlreadyAlert() {
+        let alert = NSAlert()
+        alert.messageText = "All pages have already been split."
+        alert.informativeText = "All pages in the original PDF are already covered by the created section files."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     private func backupPDFURL(for sourceURL: URL) -> URL {
         sourceURL
             .deletingLastPathComponent()
@@ -6336,9 +6941,17 @@ final class SplitPlannerState: ObservableObject {
             "sourcePDFPath": pdfURL.path,
             "sourcePDFBookmark": bookmarkData.base64EncodedString(),
             "splitRanges": ranges
-                .filter { Int($0.pageFrom) != nil && Int($0.pageTo) != nil }
+                .filter { range in
+                    guard let file = range.file,
+                          Int(range.pageFrom) != nil,
+                          Int(range.pageTo) != nil else {
+                        return false
+                    }
+                    return FileManager.default.fileExists(atPath: projectFolderURL.appendingPathComponent(file).path)
+                }
                 .map { range in
                     [
+                        "file": range.file ?? "",
                         "title": range.title,
                         "pageFrom": range.pageFrom,
                         "pageTo": range.pageTo,
@@ -6361,10 +6974,15 @@ final class SplitPlannerState: ObservableObject {
             let title = item["title"] as? String ?? ""
             let pageFrom = item["pageFrom"] as? String ?? ""
             let pageTo = item["pageTo"] as? String ?? ""
-            guard Int(pageFrom) != nil, Int(pageTo) != nil else {
+            let file = item["file"] as? String
+            guard let file,
+                  !file.isEmpty,
+                  Int(pageFrom) != nil,
+                  Int(pageTo) != nil,
+                  FileManager.default.fileExists(atPath: projectFolderURL.appendingPathComponent(file).path) else {
                 return nil
             }
-            return SplitPlanRange(title: title, pageFrom: pageFrom, pageTo: pageTo)
+            return SplitPlanRange(title: title, pageFrom: pageFrom, pageTo: pageTo, file: file)
         }
     }
 
@@ -6555,6 +7173,7 @@ struct CropPDFWindowView: View {
         }
         .padding(18)
         .frame(minWidth: 820, minHeight: 620)
+        .buttonStyle(NewOCRButtonStyle())
         .onChange(of: planner.pageCount) { _, newValue in
             previewPageIndex = min(previewPageIndex, max(newValue - 1, 0))
         }
@@ -6585,124 +7204,165 @@ struct AddSplitWindowView: View {
     @State private var pageTo = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Add Split")
                         .font(.largeTitle.weight(.semibold))
-                    Text(planner.pdfName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Spacer()
-
-                Button("Close") {
-                    NSApp.keyWindow?.close()
-                }
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    setPreviewPageIndex(max(previewPageIndex - 1, 0))
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.title3.weight(.semibold))
-                        .frame(width: 52, height: 36)
-                }
-                .disabled(previewPageIndex <= 0 || planner.pageCount == 0)
-
-                Text("Page \(min(previewPageIndex + 1, max(planner.pageCount, 1))) of \(max(planner.pageCount, 1))")
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 120)
-
-                Button {
-                    setPreviewPageIndex(min(previewPageIndex + 1, max(planner.pageCount - 1, 0)))
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.title3.weight(.semibold))
-                        .frame(width: 52, height: 36)
-                }
-                .disabled(previewPageIndex >= planner.pageCount - 1 || planner.pageCount == 0)
-
-                Button("Set From") {
-                    pageFrom = "\(previewPageIndex + 1)"
-                }
-                .disabled(planner.pageCount == 0 || !planner.canAddMoreSplits)
-
-                Button("Set To") {
-                    pageTo = "\(previewPageIndex + 1)"
-                }
-                .disabled(planner.pageCount == 0)
-
-                Button("Set Title") {
-                    setTitleFromCurrentPage()
-                }
-                .disabled(planner.isLoadingPDF || planner.pageCount == 0)
-
-                Spacer()
-            }
-
-            HStack(spacing: 10) {
-                TextField("Title", text: $titleText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 260)
-
-                Text("From")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                TextField("From", text: $pageFrom)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 72)
-
-                Text("To")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                TextField("To", text: $pageTo)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 72)
-
-                Button("Split") {
-                    planner.addSplit(title: titleText, pageFrom: pageFrom, pageTo: pageTo) { saved, nextFrom in
-                        if saved {
-                            titleText = ""
-                            if nextFrom > planner.pageCount {
-                                pageFrom = "\(nextFrom)"
-                                pageTo = "\(planner.pageCount)"
-                                previewPageIndex = max(planner.pageCount - 1, 0)
-                            } else {
-                                pageTo = "\(planner.pageCount)"
-                                setPreviewPageIndex(min(max(nextFrom - 1, 0), max(planner.pageCount - 1, 0)))
-                                setTitleFromCurrentPage()
-                            }
-                        }
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.richtext")
+                            .foregroundStyle(.red)
+                        Text(planner.pdfName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text("\(max(planner.pageCount, 0)) pages")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color(nsColor: .quaternaryLabelColor))
+                            .clipShape(Capsule())
                     }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(planner.isLoadingPDF || !planner.canAddMoreSplits || titleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || planner.pageCount == 0)
+
+                Spacer()
+
+                Button {
+                    NSApp.keyWindow?.close()
+                } label: {
+                    Label("Close", systemImage: "xmark")
+                }
             }
 
-            if planner.isLoadingPDF {
+            HStack(spacing: 12) {
                 HStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(planner.status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                    Button {
+                        setPreviewPageIndex(max(previewPageIndex - 1, 0))
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.title3.weight(.semibold))
+                            .frame(width: 42, height: 24)
+                    }
+                    .disabled(previewPageIndex <= 0 || planner.pageCount == 0)
+
+                    VStack(spacing: 2) {
+                        Text("Current Page")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text("\(min(previewPageIndex + 1, max(planner.pageCount, 1))) / \(max(planner.pageCount, 1))")
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                    }
+                    .frame(width: 96)
+
+                    Button {
+                        setPreviewPageIndex(min(previewPageIndex + 1, max(planner.pageCount - 1, 0)))
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.title3.weight(.semibold))
+                            .frame(width: 42, height: 24)
+                    }
+                    .disabled(previewPageIndex >= planner.pageCount - 1 || planner.pageCount == 0)
+
+                    Divider()
+                        .frame(height: 30)
+
+                    Button {
+                        pageFrom = "\(previewPageIndex + 1)"
+                    } label: {
+                        Label("Set From", systemImage: "arrow.right.to.line")
+                    }
+                    .disabled(planner.pageCount == 0 || !planner.canAddMoreSplits)
+
+                    Button {
+                        pageTo = "\(previewPageIndex + 1)"
+                    } label: {
+                        Label("Set To", systemImage: "arrow.left.to.line")
+                    }
+                    .disabled(planner.pageCount == 0)
+
+                    Button {
+                        setTitleFromCurrentPage()
+                    } label: {
+                        Label("Set Title", systemImage: "textformat")
+                    }
+                    .disabled(planner.isLoadingPDF || planner.pageCount == 0)
                 }
                 .padding(10)
                 .background(Color(nsColor: .controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .bottom, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Title")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("Section title", text: $titleText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(minWidth: 280)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("From")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("From", text: $pageFrom)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 76)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("To")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    TextField("To", text: $pageTo)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 76)
+                }
+
+                Button {
+                    saveSplit()
+                } label: {
+                    Label("Split", systemImage: "scissors")
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(planner.isLoadingPDF || !planner.canAddMoreSplits || planner.pageCount == 0)
+
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            HStack(spacing: 10) {
+                if planner.isLoadingPDF {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: planner.status.lowercased().hasPrefix("created") ? "checkmark.circle.fill" : "info.circle")
+                        .foregroundStyle(planner.status.lowercased().hasPrefix("created") ? .green : .secondary)
+                }
+
                 Text(planner.status)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+
+                Spacer()
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.72), lineWidth: 1)
+            )
 
             if let image = planner.cropPreviewImage(pageIndex: previewPageIndex) {
                 GeometryReader { proxy in
@@ -6725,11 +7385,28 @@ struct AddSplitWindowView: View {
         }
         .padding(18)
         .frame(minWidth: 820, minHeight: 620)
+        .buttonStyle(NewOCRButtonStyle())
         .onAppear {
             resetRange()
         }
         .onChange(of: planner.pageCount) { _, _ in
             resetRange()
+        }
+    }
+
+    private func saveSplit() {
+        planner.addSplit(title: titleText, pageFrom: pageFrom, pageTo: pageTo) { saved, nextFrom in
+            if saved {
+                if nextFrom > planner.pageCount {
+                    pageFrom = "\(nextFrom)"
+                    pageTo = "\(planner.pageCount)"
+                    previewPageIndex = max(planner.pageCount - 1, 0)
+                } else {
+                    pageTo = "\(planner.pageCount)"
+                    setPreviewPageIndex(min(max(nextFrom - 1, 0), max(planner.pageCount - 1, 0)), updatePageFrom: true)
+                    setTitleFromCurrentPage()
+                }
+            }
         }
     }
 
@@ -6741,14 +7418,25 @@ struct AddSplitWindowView: View {
             pageTo = "\(planner.pageCount)"
             previewPageIndex = max(planner.pageCount - 1, 0)
         } else {
-            setPreviewPageIndex(min(max(nextFrom - 1, 0), max(planner.pageCount - 1, 0)))
+            setPreviewPageIndex(min(max(nextFrom - 1, 0), max(planner.pageCount - 1, 0)), updatePageFrom: true)
         }
     }
 
-    private func setPreviewPageIndex(_ index: Int) {
+    private func setPreviewPageIndex(_ index: Int, updatePageFrom: Bool? = nil) {
         let clampedIndex = min(max(index, 0), max(planner.pageCount - 1, 0))
         previewPageIndex = clampedIndex
-        pageFrom = "\(clampedIndex + 1)"
+        let pageNumber = "\(clampedIndex + 1)"
+        if let updatePageFrom {
+            if updatePageFrom {
+                pageFrom = pageNumber
+            } else {
+                pageTo = pageNumber
+            }
+        } else if titleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            pageFrom = pageNumber
+        } else {
+            pageTo = pageNumber
+        }
     }
 
     private func setTitleFromCurrentPage() {
