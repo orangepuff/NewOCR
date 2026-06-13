@@ -200,6 +200,9 @@ final class AppState: ObservableObject {
     @Published var epubStatus: String = ""
     @Published var builtEPUBPath: String = ""
     @Published var isEPUBBuiltAlertPresented: Bool = false
+    @Published var isCSSAppliedAlertPresented: Bool = false
+    @Published var cssApplyAlertTitle: String = "CSS"
+    @Published var cssApplyAlertMessage: String = ""
 
     @Published var pdfListMinHeight: CGFloat = 420
     @Published var mainWindowWidth: CGFloat = 780
@@ -837,6 +840,194 @@ final class AppState: ObservableObject {
         }
     }
 
+    func applyStylesheet() {
+        guard !selectedFolderPath.isEmpty else {
+            epubStatus = "No folder selected."
+            cssApplyAlertTitle = "Apply CSS"
+            cssApplyAlertMessage = "No folder selected."
+            isCSSAppliedAlertPresented = true
+            return
+        }
+
+        let folderURL = URL(fileURLWithPath: selectedFolderPath)
+        let stylesFolderURL = folderURL.appendingPathComponent("Styles", isDirectory: true)
+        let stylesheetURL = stylesFolderURL.appendingPathComponent("stylesheet.css")
+
+        do {
+            try FileManager.default.createDirectory(at: stylesFolderURL, withIntermediateDirectories: true)
+            let existingCSS = (try? String(contentsOf: stylesheetURL, encoding: .utf8)) ?? ""
+            let imageResult = upsertingImagePageStyles(in: existingCSS)
+            let footnoteResult = upsertingFootnoteStyles(in: imageResult.css)
+            let updatedCSS = footnoteResult.css
+            let progressLines = [
+                "Image CSS: \(imageResult.status)",
+                "Footnote CSS: \(footnoteResult.status)",
+            ]
+            if updatedCSS == existingCSS {
+                epubStatus = "CSS already up to date."
+                let message = """
+                Stylesheet already matches NewOCR CSS:
+                \(stylesheetURL.path)
+
+                \(progressLines.joined(separator: "\n"))
+                """
+                logOutput = message
+                cssApplyAlertTitle = "CSS Already Up To Date"
+                cssApplyAlertMessage = message
+                isCSSAppliedAlertPresented = true
+                return
+            }
+            try updatedCSS.write(to: stylesheetURL, atomically: true, encoding: .utf8)
+            epubStatus = "Applied CSS."
+            let message = """
+            Updated stylesheet:
+            \(stylesheetURL.path)
+
+            \(progressLines.joined(separator: "\n"))
+            """
+            logOutput = message
+            cssApplyAlertTitle = "Applied CSS"
+            cssApplyAlertMessage = message
+            isCSSAppliedAlertPresented = true
+        } catch {
+            epubStatus = "Could not apply CSS."
+            logOutput = error.localizedDescription
+            cssApplyAlertTitle = "Could Not Apply CSS"
+            cssApplyAlertMessage = error.localizedDescription
+            isCSSAppliedAlertPresented = true
+        }
+    }
+
+    private func upsertingImagePageStyles(in css: String) -> (css: String, status: String) {
+        let block = imagePageStylesheetBlock.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markerPattern = #"(?s)/\* NewOCR image page stylesheet: begin \*/.*?/\* NewOCR image page stylesheet: end \*/"#
+
+        if css.range(of: markerPattern, options: .regularExpression) != nil {
+            let updatedCSS = css.replacingOccurrences(of: markerPattern, with: block, options: .regularExpression)
+            return (updatedCSS, updatedCSS == css ? "already up to date" : "replaced")
+        }
+
+        var cleanedCSS = css
+        let legacyImagesSectionPattern = #"(?s)\n*/\* Images \*/\s*(?:img\s*\{.*?\}\s*)?(?:\.image-figure\s*\{.*?\}\s*)?(?:\.image-figure\s+img\s*\{.*?\}\s*)?(?:\.image-figure\s+figcaption\s*\{.*?\}\s*)?"#
+        cleanedCSS = cleanedCSS.replacingOccurrences(of: legacyImagesSectionPattern, with: "\n", options: .regularExpression)
+
+        for pattern in [
+            #"(?s)\n*\.image-figure\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.image-figure\s+img\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.image-figure\s+figcaption\s*\{.*?\}\s*"#,
+        ] {
+            cleanedCSS = cleanedCSS.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
+        }
+
+        let status = cleanedCSS == css ? "added" : "replaced legacy rules"
+        return (cleanedCSS.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + block + "\n", status)
+    }
+
+    private func upsertingFootnoteStyles(in css: String) -> (css: String, status: String) {
+        let block = footnoteStylesheetBlock.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markerPattern = #"(?s)/\* NewOCR footnote stylesheet: begin \*/.*?/\* NewOCR footnote stylesheet: end \*/"#
+
+        if css.range(of: markerPattern, options: .regularExpression) != nil {
+            let updatedCSS = css.replacingOccurrences(of: markerPattern, with: block, options: .regularExpression)
+            return (updatedCSS, updatedCSS == css ? "already up to date" : "replaced")
+        }
+
+        var cleanedCSS = css
+        for pattern in [
+            #"(?s)\n*\.footnote-ref\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.footnote-ref\s+a\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.footnotes\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.footnotes\s+ol\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.footnotes\s+li\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.footnotes\s+p\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.footnote-back\s*\{.*?\}\s*"#,
+        ] {
+            cleanedCSS = cleanedCSS.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
+        }
+
+        let status = cleanedCSS == css ? "added" : "replaced legacy rules"
+        return (cleanedCSS.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + block + "\n", status)
+    }
+
+    private var imagePageStylesheetBlock: String {
+        """
+        /* NewOCR image page stylesheet: begin */
+        img {
+          max-width: 100%;
+          height: auto;
+        }
+
+        .image-figure {
+          page-break-before: always;
+          page-break-after: always;
+          page-break-inside: avoid;
+          break-before: page;
+          break-after: page;
+          break-inside: avoid;
+          margin: 0;
+          padding: 0;
+          text-align: center;
+        }
+
+        .image-figure img {
+          max-width: 100%;
+          max-height: 82vh;
+          width: auto;
+          height: auto;
+          object-fit: contain;
+        }
+
+        .image-figure figcaption {
+          margin-top: 0.6em;
+          font-size: 0.9em;
+          line-height: 1.4;
+          text-align: center;
+          text-indent: 0;
+          color: #555;
+        }
+        /* NewOCR image page stylesheet: end */
+        """
+    }
+
+    private var footnoteStylesheetBlock: String {
+        """
+        /* NewOCR footnote stylesheet: begin */
+        .footnote-ref {
+          font-size: 0.75em;
+          line-height: 0;
+          vertical-align: super;
+        }
+
+        .footnote-ref a {
+          color: inherit;
+          text-decoration: none;
+        }
+
+        .footnotes {
+          margin-top: 2rem;
+          padding-top: 1rem;
+          border-top: 1px solid #d0d0d0;
+          font-size: 0.9em;
+          line-height: 1.5;
+        }
+
+        .footnotes ol {
+          margin: 0;
+          padding-left: 1.5rem;
+        }
+
+        .footnotes li {
+          margin-bottom: 0.5rem;
+        }
+
+        .footnote-back {
+          margin-left: 0.25rem;
+          text-decoration: none;
+        }
+        /* NewOCR footnote stylesheet: end */
+        """
+    }
+
     private func epubPathFromBuilderOutput(_ output: String) -> String? {
         guard let data = output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -919,6 +1110,7 @@ final class AppState: ObservableObject {
             <style>
             img { max-width: 100%; height: auto; }
             figure { margin: 1em 0; }
+            figcaption { margin-top: 0.5em; }
             </style>
             """
         }
@@ -933,6 +1125,7 @@ final class AppState: ObservableObject {
         p { margin: 0 0 1em 0; }
         img { max-width: 100%; height: auto; }
         figure { margin: 1em 0; }
+        figcaption { margin-top: 0.5em; font-size: 0.9em; color: #555; }
         .footnote-ref { font-size: 0.75em; line-height: 0; vertical-align: super; }
         .footnote-ref a { color: inherit; text-decoration: none; }
         .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #d0d0d0; font-size: 0.9em; }
@@ -981,17 +1174,55 @@ final class AppState: ObservableObject {
     }
 
     private func markdownImagePreviewHTML(from text: String) -> String? {
-        guard text.hasPrefix("!["),
-              let closeBracket = text.firstIndex(of: "]"),
-              let openParen = text.firstIndex(of: "("),
-              let closeParen = text.lastIndex(of: ")"),
+        let lines = text.components(separatedBy: .newlines)
+        guard let firstLine = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              firstLine.hasPrefix("!["),
+              let closeBracket = firstLine.firstIndex(of: "]"),
+              let openParen = firstLine.firstIndex(of: "("),
+              let closeParen = firstLine.lastIndex(of: ")"),
               closeBracket < openParen,
               openParen < closeParen else {
             return nil
         }
-        let alt = String(text[text.index(text.startIndex, offsetBy: 2)..<closeBracket])
-        let path = String(text[text.index(after: openParen)..<closeParen])
-        return "<figure><img src=\"\(htmlEscaped(path))\" alt=\"\(htmlEscaped(alt))\"></figure>"
+        let alt = String(firstLine[firstLine.index(firstLine.startIndex, offsetBy: 2)..<closeBracket])
+        let path = String(firstLine[firstLine.index(after: openParen)..<closeParen])
+        let captionLines = imageCaptionLines(from: lines)
+        let captionHTML = captionLines.isEmpty ? "" : "\n<figcaption>\(captionLines.map { markdownInlinePreviewHTML($0) }.joined(separator: "<br>"))</figcaption>"
+        return "<figure class=\"image-figure\"><img src=\"\(htmlEscaped(path))\" alt=\"\(htmlEscaped(alt))\">\(captionHTML)</figure>"
+    }
+
+    private func imageCaption(from lines: [String]) -> String {
+        imageCaptionLines(from: lines).joined(separator: "\n")
+    }
+
+    private func imageCaptionLines(from lines: [String]) -> [String] {
+        var foundCaption = false
+        return lines.dropFirst().compactMap { rawLine -> String? in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowercased = line.lowercased()
+            if lowercased.hasPrefix("caption:") {
+                foundCaption = true
+                return String(line.dropFirst("caption:".count)).trimmingCharacters(in: .whitespaces)
+            }
+            if lowercased.hasPrefix("description:") {
+                foundCaption = true
+                return String(line.dropFirst("description:".count)).trimmingCharacters(in: .whitespaces)
+            }
+            if foundCaption && (rawLine.hasPrefix("  ") || rawLine.hasPrefix("    ") || rawLine.hasPrefix("\t")) {
+                return line
+            }
+            if foundCaption && !line.isEmpty && !isMarkdownBlockStart(line) {
+                return line
+            }
+            return nil
+        }
+        .filter { !$0.isEmpty }
+    }
+
+    private func isMarkdownBlockStart(_ line: String) -> Bool {
+        line.hasPrefix("![")
+        || line.hasPrefix("[^")
+        || line.range(of: #"^#{1,6}\s+.+"#, options: .regularExpression) != nil
     }
 
     private func extractMarkdownFootnotes(from markdown: String) -> (markdown: String, footnotes: [String: String]) {
@@ -1195,6 +1426,36 @@ final class AppState: ObservableObject {
         ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Image") == .orderedSame
     }
 
+    var shouldFilterOCRFootnotesOnly: Bool {
+        ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Footnote") == .orderedSame
+    }
+
+    var hasOCRMarkdownImages: Bool {
+        ocrParagraphs.contains { markdownImageURL(from: $0) != nil }
+    }
+
+    var hasOCRMarkdownFootnotes: Bool {
+        footnoteParagraphIndexes().isEmpty == false
+    }
+
+    func focusFirstOCRMarkdownImage() {
+        guard let index = ocrParagraphs.indices.first(where: { markdownImageURL(from: ocrParagraphs[$0]) != nil }) else {
+            return
+        }
+        ocrSearchText = "Image"
+        paragraphScrollTargetIndex = index
+        paragraphScrollRequestID += 1
+    }
+
+    func focusFirstOCRMarkdownFootnote() {
+        guard let index = footnoteParagraphIndexes().first else {
+            return
+        }
+        ocrSearchText = "Footnote"
+        paragraphScrollTargetIndex = index
+        paragraphScrollRequestID += 1
+    }
+
     var ocrSearchResultText: String {
         let query = ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return "" }
@@ -1202,6 +1463,11 @@ final class AppState: ObservableObject {
         if shouldFilterOCRImagesOnly {
             let count = ocrParagraphs.filter { markdownImageURL(from: $0) != nil }.count
             return count == 0 ? "Found 0 image paragraphs" : "Showing \(count) image paragraphs"
+        }
+
+        if shouldFilterOCRFootnotesOnly {
+            let count = footnoteParagraphIndexes().count
+            return count == 0 ? "Found 0 footnote paragraphs" : "Showing \(count) footnote paragraphs"
         }
 
         let matches = ocrParagraphSearchMatches(query: query).map { match -> (Int, Int) in
@@ -1225,7 +1491,17 @@ final class AppState: ObservableObject {
         if shouldFilterOCRImagesOnly {
             return ocrParagraphs.indices.filter { markdownImageURL(from: ocrParagraphs[$0]) != nil }
         }
+        if shouldFilterOCRFootnotesOnly {
+            return footnoteParagraphIndexes()
+        }
         return ocrParagraphSearchMatches(query: query).map(\.index)
+    }
+
+    private func footnoteParagraphIndexes() -> [Int] {
+        ocrParagraphs.indices.filter { index in
+            let paragraph = ocrParagraphs[index]
+            return markdownFootnoteLabel(from: paragraph) != nil || markdownFootnoteReferenceLabels(in: paragraph).isEmpty == false
+        }
     }
 
     private func ocrParagraphSearchMatches(query: String) -> [(index: Int, count: Int)] {
@@ -1294,6 +1570,94 @@ final class AppState: ObservableObject {
         paragraphs.remove(at: index)
         setOCRParagraphs(paragraphs)
         finishParagraphAction(focusIndex: min(index, max(0, paragraphs.count - 1)))
+    }
+
+    func imageParagraphHasDescription(at index: Int) -> Bool {
+        let paragraphs = ocrParagraphs
+        guard paragraphs.indices.contains(index),
+              markdownImageURL(from: paragraphs[index]) != nil else {
+            return false
+        }
+        return markdownImageDescription(from: paragraphs[index]).isEmpty == false
+    }
+
+    func addImageDescription(at index: Int) {
+        var paragraphs = ocrParagraphs
+        guard paragraphs.indices.contains(index),
+              markdownImageURL(from: paragraphs[index]) != nil,
+              markdownImageDescription(from: paragraphs[index]).isEmpty else {
+            return
+        }
+        let trimmed = paragraphs[index].trimmingTrailingCharacters(in: .whitespacesAndNewlines)
+        paragraphs[index] = "\(trimmed)\nCaption:\n  "
+        setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: index)
+    }
+
+    func paragraphDisplayTitle(at index: Int) -> String {
+        let paragraphs = ocrParagraphs
+        guard paragraphs.indices.contains(index) else {
+            return "Paragraph \(index + 1)"
+        }
+        if let label = markdownFootnoteLabel(from: paragraphs[index]) {
+            return "Footnote#\(label)"
+        }
+        return "Paragraph \(index + 1)"
+    }
+
+    func isFootnoteParagraph(at index: Int) -> Bool {
+        let paragraphs = ocrParagraphs
+        guard paragraphs.indices.contains(index) else { return false }
+        return markdownFootnoteLabel(from: paragraphs[index]) != nil
+    }
+
+    private func markdownFootnoteLabel(from paragraph: String) -> String? {
+        guard let firstLine = paragraph.components(separatedBy: .newlines).first else { return nil }
+        let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("[^"),
+              let closeIndex = trimmed.firstIndex(of: "]") else {
+            return nil
+        }
+        let afterClose = trimmed[trimmed.index(after: closeIndex)...]
+        guard afterClose.hasPrefix(":") else { return nil }
+        let labelStart = trimmed.index(trimmed.startIndex, offsetBy: 2)
+        let label = String(trimmed[labelStart..<closeIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.isEmpty ? nil : label
+    }
+
+    private func markdownImageDescription(from paragraph: String) -> String {
+        var foundDescription = false
+        return paragraph.components(separatedBy: .newlines).dropFirst().compactMap { rawLine -> String? in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowercased = line.lowercased()
+            if lowercased.hasPrefix("caption:") {
+                foundDescription = true
+                return String(line.dropFirst("caption:".count)).trimmingCharacters(in: .whitespaces)
+            }
+            if lowercased.hasPrefix("description:") {
+                foundDescription = true
+                return String(line.dropFirst("description:".count)).trimmingCharacters(in: .whitespaces)
+            }
+            if foundDescription && (rawLine.hasPrefix("  ") || rawLine.hasPrefix("    ") || rawLine.hasPrefix("\t")) {
+                return line
+            }
+            return nil
+        }
+        .joined(separator: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func markdownFootnoteReferenceLabels(in paragraph: String) -> [String] {
+        let pattern = #"\[\^([A-Za-z0-9_-]+)\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(paragraph.startIndex..<paragraph.endIndex, in: paragraph)
+        return regex.matches(in: paragraph, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let labelRange = Range(match.range(at: 1), in: paragraph) else {
+                return nil
+            }
+            return String(paragraph[labelRange])
+        }
     }
 
     func moveParagraphUp(_ index: Int) {
@@ -1387,7 +1751,8 @@ final class AppState: ObservableObject {
     }
 
     func markdownImageURL(from paragraph: String) -> URL? {
-        let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let firstLine = paragraph.components(separatedBy: .newlines).first else { return nil }
+        let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("!["),
               let openParen = trimmed.firstIndex(of: "("),
               let closeParen = trimmed.lastIndex(of: ")"),
@@ -3007,6 +3372,12 @@ struct StepOneLoadPDFView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
+                        Button("Apply CSS") {
+                            appState.applyStylesheet()
+                        }
+                        .controlSize(.large)
+                        .disabled(appState.selectedFolderPath.isEmpty)
+
                         Button(appState.isOCRRunning ? "Building EPUB..." : "Build EPUB") {
                             appState.buildBookEPUB()
                         }
@@ -3040,6 +3411,7 @@ struct StepOneLoadPDFView: View {
 
                         Spacer()
                     }
+
                 }
                 .padding(12)
                 .background(Color(nsColor: .controlBackgroundColor))
@@ -3094,6 +3466,11 @@ struct StepOneLoadPDFView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(appState.builtEPUBPath)
+        }
+        .alert(appState.cssApplyAlertTitle, isPresented: $appState.isCSSAppliedAlertPresented) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(appState.cssApplyAlertMessage)
         }
     }
 }
@@ -3448,6 +3825,12 @@ struct StepTwoOCRView: View {
                                         .padding(.vertical, 3)
                                         .background(Color(nsColor: .quaternaryLabelColor))
                                         .clipShape(Capsule())
+                                    OCRMarkdownPresenceBadge(label: "Image", exists: appState.hasOCRMarkdownImages) {
+                                        appState.focusFirstOCRMarkdownImage()
+                                    }
+                                    OCRMarkdownPresenceBadge(label: "Footnote", exists: appState.hasOCRMarkdownFootnotes) {
+                                        appState.focusFirstOCRMarkdownFootnote()
+                                    }
                                     Spacer()
                                 }
                                 GeometryReader { proxy in
@@ -3641,6 +4024,7 @@ struct MarkdownSyntaxPopoverView: View {
         ("**bold text**", "Bold text"),
         ("*italic text*", "Italic text"),
         ("![Alt text](Images/example.png)", "Image"),
+        ("Caption:\\n  Image description", "Image description"),
         ("Text with a note.[^1]", "Footnote marker"),
         ("[^1]: Footnote text", "Footnote at bottom")
     ]
@@ -3680,7 +4064,7 @@ struct MarkdownSyntaxPopoverView: View {
                 }
             }
 
-            Text("Image paths are relative to the Markdown folder. Footnotes use matching labels, such as [^1] or [^a]. Other Markdown characters stay as normal text unless the converter supports them later.")
+            Text("Image paths are relative to the Markdown folder. Put Caption: or Description: directly below an image; following lines stay in the same caption until a blank line. Footnotes use matching labels, such as [^1] or [^a]. Other Markdown characters stay as normal text unless the converter supports them later.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3704,6 +4088,9 @@ struct OCRSearchGuidelinePopoverView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Type exactly Image to show only detected image paragraphs.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Type exactly Footnote to show paragraphs with footnote markers and footnote items.")
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Paragraph numbers and merge actions still use the real document position.")
@@ -3859,6 +4246,35 @@ struct PlainOCRTextEditorView: View {
     }
 }
 
+struct OCRMarkdownPresenceBadge: View {
+    let label: String
+    let exists: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            guard exists else { return }
+            action()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: exists ? "checkmark.circle.fill" : "xmark.circle")
+                    .font(.caption.weight(.semibold))
+                Text(label)
+                    .font(.caption.weight(.semibold))
+            }
+            .foregroundStyle(exists ? .green : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color(nsColor: .quaternaryLabelColor))
+            .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!exists)
+        .help(exists ? "Show first \(label.lowercased()) in Markdown" : "\(label) not found in Markdown")
+        .accessibilityLabel("\(label) \(exists ? "exists" : "not found")")
+    }
+}
+
 struct HighlightingTextEditor: NSViewRepresentable {
     @Binding var text: String
     let searchText: String
@@ -3968,6 +4384,12 @@ struct ParagraphItemView: View {
     @State private var resizeStartHeight: CGFloat? = nil
 
     var body: some View {
+        let displayTitle = appState.paragraphDisplayTitle(at: index)
+        let isFootnote = appState.isFootnoteParagraph(at: index)
+        let isImage = appState.markdownImageURL(from: text) != nil
+        let canAddImageDescription = isImage && !appState.imageParagraphHasDescription(at: index)
+        let canRemove = appState.ocrParagraphs.count > 1 || isFootnote
+
         HStack(alignment: .top, spacing: 8) {
             Button {
                 appState.removeParagraph(index)
@@ -3977,14 +4399,14 @@ struct ParagraphItemView: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
-            .help("Remove paragraph")
-            .accessibilityLabel("Remove paragraph \(index + 1)")
-            .disabled(appState.ocrParagraphs.count <= 1)
+            .help("Remove \(isFootnote ? "footnote" : "paragraph")")
+            .accessibilityLabel("Remove \(displayTitle)")
+            .disabled(!canRemove)
             .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Text("Paragraph \(index + 1)")
+                    Text(displayTitle)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -3992,6 +4414,15 @@ struct ParagraphItemView: View {
                     Spacer()
 
                     Menu("Actions") {
+                        if isImage {
+                            Button("Add Image Description") {
+                                appState.addImageDescription(at: index)
+                            }
+                            .disabled(!canAddImageDescription)
+
+                            Divider()
+                        }
+
                         Button("Add Paragraph Before") {
                             appState.addParagraphBefore(index)
                         }
@@ -4014,17 +4445,31 @@ struct ParagraphItemView: View {
 
                         Divider()
 
-                        Button("Remove Paragraph", role: .destructive) {
+                        Button("Remove \(isFootnote ? "Footnote" : "Paragraph")", role: .destructive) {
                             appState.removeParagraph(index)
                         }
-                        .disabled(appState.ocrParagraphs.count <= 1)
+                        .disabled(!canRemove)
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                 }
 
                 if let imageURL = appState.markdownImageURL(from: text) {
-                    OCRMarkdownImagePreview(imageURL: imageURL, markdownText: text)
+                    OCRMarkdownImagePreview(imageURL: imageURL)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Image Markdown")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        HighlightingTextEditor(
+                            text: $text,
+                            searchText: appState.ocrSearchText
+                        )
+                            .frame(height: max(appState.ocrParagraphTextAreaMinHeight, 86))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                            )
+                    }
                 } else {
                     VStack(spacing: 0) {
                         HighlightingTextEditor(
@@ -4088,7 +4533,6 @@ struct ResizeHandleView: View {
 
 struct OCRMarkdownImagePreview: View {
     let imageURL: URL
-    let markdownText: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -4122,12 +4566,6 @@ struct OCRMarkdownImagePreview: View {
                 )
             }
 
-            Text(markdownText)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
         }
     }
 }

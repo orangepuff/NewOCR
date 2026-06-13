@@ -70,6 +70,7 @@ def stylesheet_links(assets, prefix=""):
 
 
 MARKDOWN_IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
+IMAGE_CAPTION_RE = re.compile(r"^(?:Caption|Description):\s*(.*)$", re.IGNORECASE)
 FOOTNOTE_DEF_RE = re.compile(r"^\[\^([A-Za-z0-9_-]+)\]:\s*(.*)$")
 FOOTNOTE_REF_RE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
 
@@ -215,7 +216,7 @@ def footnotes_to_html(footnote_state):
     return '<section class="footnotes">\n<ol>\n' + "\n".join(items) + "\n</ol>\n</section>"
 
 
-def markdown_image_to_html(stripped, source_path=None, image_map=None, image_prefix=""):
+def markdown_image_to_html(stripped, source_path=None, image_map=None, image_prefix="", caption=""):
     match = MARKDOWN_IMAGE_RE.match(stripped)
     if not match:
         return None
@@ -226,7 +227,45 @@ def markdown_image_to_html(stripped, source_path=None, image_map=None, image_pre
         href = image_map.get((str(source_path.resolve()), raw_target), raw_target)
     if image_map is not None and href == raw_target:
         href = next((value for (path_value, target), value in image_map.items() if target == raw_target), raw_target)
-    return f'<figure><img src="{html.escape(image_prefix + href)}" alt="{html.escape(alt)}"/></figure>'
+    caption_html = ""
+    if caption:
+        caption_lines = [markdown_inline_to_html(line) for line in caption.split("\n") if line.strip()]
+        caption_html = "\n<figcaption>" + "<br/>".join(caption_lines) + "</figcaption>"
+    return f'<figure class="image-figure"><img src="{html.escape(image_prefix + href)}" alt="{html.escape(alt)}"/>{caption_html}</figure>'
+
+
+def image_caption_from_lines(lines, start_index):
+    caption_parts = []
+    next_index = start_index + 1
+    found_caption = False
+    while next_index < len(lines):
+        raw_line = lines[next_index]
+        stripped = raw_line.strip()
+        caption_match = IMAGE_CAPTION_RE.match(stripped)
+        if caption_match:
+            found_caption = True
+            caption_parts.append(caption_match.group(1).strip())
+            next_index += 1
+            continue
+        if found_caption and (raw_line.startswith("  ") or raw_line.startswith("    ") or raw_line.startswith("\t")):
+            caption_parts.append(stripped)
+            next_index += 1
+            continue
+        if found_caption and not stripped:
+            break
+        if found_caption and (
+            MARKDOWN_IMAGE_RE.match(stripped)
+            or FOOTNOTE_DEF_RE.match(stripped)
+            or re.match(r"^#{1,6}\s+.+", stripped)
+        ):
+            break
+        if found_caption:
+            caption_parts.append(stripped)
+            next_index += 1
+            continue
+        if not caption_match:
+            break
+    return "\n".join(part for part in caption_parts if part).strip(), next_index
 
 
 def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=None, image_prefix=""):
@@ -246,16 +285,21 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
             body_parts.append(f"<p>{markdown_inline_to_html(paragraph_text, footnote_state)}</p>")
         paragraph_lines.clear()
 
-    for line in lines:
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         stripped = line.strip()
         if not stripped:
             flush_paragraph()
+            index += 1
             continue
 
-        image_html = markdown_image_to_html(stripped, source_path, image_map, image_prefix)
+        caption, next_index = image_caption_from_lines(lines, index)
+        image_html = markdown_image_to_html(stripped, source_path, image_map, image_prefix, caption)
         if image_html:
             flush_paragraph()
             body_parts.append(image_html)
+            index = next_index
             continue
 
         heading_match = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
@@ -269,6 +313,7 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
             body_parts.append(f'<h{level} id="{anchor}">{markdown_inline_to_html(title, footnote_state)}</h{level}>')
         else:
             paragraph_lines.append(stripped)
+        index += 1
 
     flush_paragraph()
     footnotes_html = footnotes_to_html(footnote_state)
