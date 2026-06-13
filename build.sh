@@ -24,6 +24,11 @@ else
 fi
 iconutil -c icns "$APP_DIR/Assets/NewOCR.iconset" -o "$RESOURCES_DIR/NewOCR.icns"
 
+cp "$APP_DIR/Sources/apple_vision_convert.py" "$RESOURCES_DIR/apple_vision_convert.py"
+rm -rf "$RESOURCES_DIR/Fonts" "$RESOURCES_DIR/Styles"
+cp -R "$APP_DIR/Fonts" "$RESOURCES_DIR/Fonts"
+cp -R "$APP_DIR/Styles" "$RESOURCES_DIR/Styles"
+
 swiftc \
   -parse-as-library \
   "$APP_DIR/Sources/NewOCRApp.swift" \

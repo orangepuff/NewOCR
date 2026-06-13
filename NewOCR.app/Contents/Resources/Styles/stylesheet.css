@@ -1,0 +1,487 @@
+/*
+  Standard EPUB stylesheet for Sigil
+  Font setup assumes this file is in Styles/ and the font is in Fonts/.
+
+  This stylesheet uses the PK Nakhon Sawan font family from Fonts/.
+*/
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun Italic.ttf") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun Bold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun BoldItalic.ttf") format("truetype");
+  font-weight: 600;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun BoldItalic.ttf") format("truetype");
+  font-weight: 700;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/HSarabun.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun Italic.ttf") format("truetype");
+  font-weight: normal;
+  font-style: italic;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun Bold.ttf") format("truetype");
+  font-weight: bold;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "PKNakhonSawanEPUB";
+  src: url("../Fonts/THSarabun BoldItalic.ttf") format("truetype");
+  font-weight: bold;
+  font-style: italic;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  margin: 0;
+  padding: 0;
+  line-break: auto;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  padding: 0 1em;
+  font-family: "PKNakhonSawanEPUB", serif;
+  font-size: 1.3em;
+  font-weight: 400;
+  line-height: 1.65;
+  text-align: left;
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
+  -epub-hyphens: none;
+  -webkit-hyphens: none;
+  adobe-hyphenate: none;
+  letter-spacing: normal;
+  word-spacing: normal;
+  widows: 2;
+  orphans: 2;
+}
+
+html:lang(th),
+body:lang(th),
+.thai {
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-break: auto;
+  hyphens: none;
+  -epub-hyphens: none;
+  -webkit-hyphens: none;
+  adobe-hyphenate: none;
+}
+
+/* Basic text */
+p {
+  margin: 0;
+  padding: 0;
+  text-indent: 1.5em;
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
+  -epub-hyphens: none;
+  -webkit-hyphens: none;
+  adobe-hyphenate: none;
+}
+
+p + p {
+  margin-top: 0.15em;
+}
+
+.no-indent,
+blockquote p,
+.quote p,
+.remark p,
+.caption,
+.toc p {
+  text-indent: 0;
+}
+
+.center {
+  text-align: center;
+  text-indent: 0;
+}
+
+.right {
+  text-align: right;
+  text-indent: 0;
+}
+
+.small {
+  font-size: 0.9em;
+}
+
+.large {
+  font-size: 1.15em;
+}
+
+strong,
+b {
+  font-weight: bold;
+}
+
+em,
+i {
+  font-style: italic;
+}
+
+/* Headings */
+h1,
+h2,
+h3,
+h4 {
+  font-family: "PKNakhonSawanEPUB", serif;
+  font-weight: bold;
+  line-height: 1.4;
+  text-indent: 0;
+  text-align: center;
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
+  -epub-hyphens: none;
+  -webkit-hyphens: none;
+  adobe-hyphenate: none;
+  break-after: avoid;
+  page-break-after: avoid;
+}
+
+h1 {
+  margin: 2.5em 0 1.2em;
+  font-size: 1.6em;
+  text-align: center;
+}
+
+h2 {
+  margin: 2em 0 0.9em;
+  font-size: 1.35em;
+}
+
+h3 {
+  margin: 1.5em 0 0.7em;
+  font-size: 1.15em;
+}
+
+h4 {
+  margin: 1.2em 0 0.5em;
+  font-size: 1em;
+}
+
+.subtitle,
+.sub-header {
+  margin: -0.6em 0 1.5em;
+  font-size: 1.05em;
+  text-align: center;
+  text-indent: 0;
+}
+
+/* Chapter and section helpers */
+.chapter-title {
+  margin-top: 30%;
+  text-align: center;
+  font-size: 1.7em;
+  text-indent: 0;
+}
+
+.chapter-subtitle {
+  margin: 0.5em 0 2em;
+  text-align: center;
+  font-size: 1.05em;
+  text-indent: 0;
+}
+
+.section-break {
+  margin: 1.5em 0;
+  text-align: center;
+  text-indent: 0;
+}
+
+/* Quotes */
+blockquote,
+.quote {
+  margin: 1.2em 1.5em;
+  padding: 0;
+  font-style: italic;
+  line-height: 1.65;
+}
+
+blockquote p,
+.quote p {
+  margin: 0.4em 0;
+}
+
+.quote-source {
+  margin-top: 0.4em;
+  text-align: right;
+  font-style: normal;
+  text-indent: 0;
+}
+
+/* Footnotes */
+.noteref {
+  vertical-align: super;
+  font-size: 0.75em;
+  line-height: 0;
+  text-decoration: none;
+}
+
+.footnote {
+  margin: 1.2em 0;
+  padding-top: 0.6em;
+  border-top: 1px solid #999;
+  font-size: 0.9em;
+  line-height: 1.6;
+}
+
+.footnote p {
+  margin: 0.35em 0;
+  text-indent: 0;
+}
+
+.fn-back {
+  text-decoration: none;
+}
+
+
+/* Images */
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+.image-figure {
+  margin: 1.25em 0;
+  text-align: center;
+}
+
+.image-figure img {
+  max-width: 100%;
+  height: auto;
+}
+
+.image-figure figcaption {
+  margin-top: 0.5em;
+  line-height: 1.45;
+  text-align: center;
+  color: #555;
+}
+
+/* Lists */
+ul,
+ol {
+  margin: 0.8em 0 0.8em 1.5em;
+  padding: 0;
+}
+
+li {
+  margin: 0.25em 0;
+  padding: 0;
+  text-indent: 0;
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
+  -epub-hyphens: none;
+  -webkit-hyphens: none;
+  adobe-hyphenate: none;
+}
+
+/* Tables */
+table {
+  width: 100%;
+  margin: 1em 0;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.35em 0.45em;
+  border: 1px solid #999;
+  vertical-align: top;
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: none;
+  -epub-hyphens: none;
+  -webkit-hyphens: none;
+  adobe-hyphenate: none;
+}
+
+th {
+  font-weight: bold;
+  text-align: left;
+}
+
+/* Links */
+a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+/* Page-break helpers */
+.page-break,
+.new-page {
+  break-before: page;
+  page-break-before: always;
+}
+
+.avoid-break {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.keep-with-next {
+  break-after: avoid;
+  page-break-after: avoid;
+}
+
+/* Part pages */
+.part-page {
+  margin-top: 35%;
+  text-align: center;
+  text-indent: 0;
+  break-before: page;
+  page-break-before: always;
+}
+
+.part-title {
+  margin: 0 0 0.5em;
+  font-size: 1.8em;
+  line-height: 1.25;
+  text-align: center;
+  text-indent: 0;
+}
+
+.part-subtitle {
+  margin: 0;
+  font-size: 1.1em;
+  text-align: center;
+  text-indent: 0;
+}
+
+/* Front/back matter */
+.title-page {
+  margin-top: 30%;
+  text-align: center;
+  text-indent: 0;
+}
+
+.book-title {
+  margin: 0 0 0.6em;
+  font-size: 1.8em;
+  line-height: 1.25;
+  text-align: center;
+  text-indent: 0;
+}
+
+.author {
+  margin: 0;
+  font-size: 1.1em;
+  text-align: center;
+  text-indent: 0;
+}
+
+.copyright,
+.dedication {
+  margin-top: 20%;
+  text-align: center;
+  text-indent: 0;
+}
+
+.toc {
+  margin: 0;
+  padding: 0;
+}
+
+.toc a {
+  text-decoration: none;
+}
+
+/* Superscript / footnote reference */
+sup,
+.fn-ref {
+  font-size: 0.7em;
+  vertical-align: super;
+  line-height: 0;
+}
+
+/* เชิงอรรถท้ายบท */
+.footnotes {
+  margin-top: 2em;
+  padding-top: 0.75em;
+  border-top: 1px solid #aaa;
+  font-size: 0.88em;
+  line-height: 1.6;
+}
+
+/* Thai line-breaking helpers */
+.thai-no-break {
+  white-space: nowrap;
+}
+
+.thai-break-anywhere {
+  overflow-wrap: anywhere;
+}
+
+.footnotes p {
+  text-indent: 0;
+  margin: 0.3em 0;
+}
+
+/* Utility spacing */
+.space-before {
+  margin-top: 1em;
+}
+
+.space-after {
+  margin-bottom: 1em;
+}
+
+.no-space {
+  margin-top: 0;
+  margin-bottom: 0;
+}
