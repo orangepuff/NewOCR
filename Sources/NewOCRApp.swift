@@ -1486,18 +1486,22 @@ final class AppState: ObservableObject {
             let footnoteResult = upsertingFootnoteStyles(in: imageResult.css)
             let blockquoteResult = upsertingBlockquoteStyles(in: footnoteResult.css)
             let alignmentResult = upsertingAlignmentStyles(in: blockquoteResult.css)
-            let updatedCSS = alignmentResult.css
+            let pageBreakResult = upsertingPageBreakStyles(in: alignmentResult.css)
+            let updatedCSS = pageBreakResult.css
             let progressLines = [
                 "Image CSS: \(imageResult.status)",
                 "Footnote CSS: \(footnoteResult.status)",
                 "Blockquote CSS: \(blockquoteResult.status)",
-                "Alignment CSS: \(alignmentResult.status)",
+                "Left/Center/Right CSS: \(alignmentResult.status)",
+                "Page break CSS: \(pageBreakResult.status)",
             ]
             if updatedCSS == existingCSS {
                 epubStatus = "CSS already up to date."
                 let message = """
                 Stylesheet already matches NewOCR CSS:
                 \(stylesheetURL.path)
+
+                Included CSS blocks: images, footnotes, blockquotes, Left/Center/Right alignment, and page breaks.
 
                 \(progressLines.joined(separator: "\n"))
                 """
@@ -1512,6 +1516,8 @@ final class AppState: ObservableObject {
             let message = """
             Updated stylesheet:
             \(stylesheetURL.path)
+
+            Included CSS blocks: images, footnotes, blockquotes, Left/Center/Right alignment, and page breaks.
 
             \(progressLines.joined(separator: "\n"))
             """
@@ -1615,6 +1621,27 @@ final class AppState: ObservableObject {
             #"(?s)\n*\.center\s*\{.*?\}\s*"#,
             #"(?s)\n*\.right\s*\{.*?\}\s*"#,
             #"(?s)\n*\.left\s*\{.*?\}\s*"#,
+        ] {
+            cleanedCSS = cleanedCSS.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
+        }
+
+        let status = cleanedCSS == css ? "added" : "replaced legacy rules"
+        return (cleanedCSS.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + block + "\n", status)
+    }
+
+    private func upsertingPageBreakStyles(in css: String) -> (css: String, status: String) {
+        let block = pageBreakStylesheetBlock.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markerPattern = #"(?s)/\* NewOCR page break stylesheet: begin \*/.*?/\* NewOCR page break stylesheet: end \*/"#
+
+        if css.range(of: markerPattern, options: .regularExpression) != nil {
+            let updatedCSS = css.replacingOccurrences(of: markerPattern, with: block, options: .regularExpression)
+            return (updatedCSS, updatedCSS == css ? "already up to date" : "replaced")
+        }
+
+        var cleanedCSS = css
+        for pattern in [
+            #"(?s)\n*\.page-break-before\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.page-break-after\s*\{.*?\}\s*"#,
         ] {
             cleanedCSS = cleanedCSS.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
         }
@@ -1747,6 +1774,28 @@ final class AppState: ObservableObject {
         """
     }
 
+    private var pageBreakStylesheetBlock: String {
+        """
+        /* NewOCR page break stylesheet: begin */
+        .page-break-before {
+          break-before: page;
+          page-break-before: always;
+          height: 0;
+          margin: 0;
+          padding: 0;
+        }
+
+        .page-break-after {
+          break-after: page;
+          page-break-after: always;
+          height: 0;
+          margin: 0;
+          padding: 0;
+        }
+        /* NewOCR page break stylesheet: end */
+        """
+    }
+
     private func epubPathFromBuilderOutput(_ output: String) -> String? {
         guard let data = output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1835,6 +1884,9 @@ final class AppState: ObservableObject {
         .center { text-align: center; text-indent: 0; }
         .right { text-align: right; text-indent: 0; }
         .left { text-align: left; text-indent: 0; }
+        .page-break-before, .page-break-after { border-top: 1px solid #b8b8b8; height: 0; margin: 1.4em 0; position: relative; break-before: auto; break-after: auto; page-break-before: auto; page-break-after: auto; }
+        .page-break-before::after { content: "Page break before"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
+        .page-break-after::after { content: "Page break after"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
         </style>
         """
         }
@@ -1855,6 +1907,9 @@ final class AppState: ObservableObject {
         .center { text-align: center; text-indent: 0; }
         .right { text-align: right; text-indent: 0; }
         .left { text-align: left; text-indent: 0; }
+        .page-break-before, .page-break-after { border-top: 1px solid #b8b8b8; height: 0; margin: 1.4em 0; position: relative; }
+        .page-break-before::after { content: "Page break before"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
+        .page-break-after::after { content: "Page break after"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
         .footnote-ref { font-size: 0.75em; line-height: 0; vertical-align: super; }
         .footnote-ref a { color: inherit; text-decoration: none; }
         .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #d0d0d0; font-size: 0.9em; }
@@ -1873,6 +1928,11 @@ final class AppState: ObservableObject {
         for paragraph in paragraphs {
             let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
+
+            if let pageBreak = markdownPageBreakPreviewHTML(from: trimmed) {
+                parts.append(pageBreak)
+                continue
+            }
 
             if let imageHTML = markdownImagePreviewHTML(from: trimmed) {
                 parts.append(imageHTML)
@@ -1949,6 +2009,17 @@ final class AppState: ObservableObject {
         }
         let content = parsed.content.replacingOccurrences(of: "\n", with: "<br/>")
         return "<p class=\"\(parsed.alignment)\">\(markdownInlinePreviewHTML(content, usedFootnotes: &usedFootnotes))</p>"
+    }
+
+    private func markdownPageBreakPreviewHTML(from text: String) -> String? {
+        switch text {
+        case "<!-- page-break-before -->", "[[page-break-before]]":
+            return "<div class=\"page-break-before\" aria-label=\"Page break before\"></div>"
+        case "<!-- page-break-after -->", "[[page-break-after]]":
+            return "<div class=\"page-break-after\" aria-label=\"Page break after\"></div>"
+        default:
+            return nil
+        }
     }
 
     private func markdownAlignedParagraphParts(from text: String) -> (alignment: String, content: String)? {

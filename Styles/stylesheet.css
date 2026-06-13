@@ -374,6 +374,22 @@ a {
   page-break-before: always;
 }
 
+.page-break-before {
+  break-before: page;
+  page-break-before: always;
+  height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.page-break-after {
+  break-after: page;
+  page-break-after: always;
+  height: 0;
+  margin: 0;
+  padding: 0;
+}
+
 .avoid-break {
   break-inside: avoid;
   page-break-inside: avoid;

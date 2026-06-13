@@ -485,6 +485,18 @@ Page breaks:
 <!-- page-break-after -->
 ```
 
+Preview should not show these comments as raw text. Preview renders them as a
+subtle horizontal page-break separator so the user can see where the marker is.
+EPUB build converts them into real page-break helper elements:
+
+```html
+<div class="page-break-before"></div>
+<div class="page-break-after"></div>
+```
+
+Apply CSS/default CSS must define these classes so EPUB readers treat them as
+real page breaks, not visible text.
+
 Line break:
 
 ```md
@@ -571,11 +583,14 @@ It upserts NewOCR-managed CSS blocks for:
 - footnotes
 - blockquotes
 - alignment classes
+- page-break helpers
 
 It should preserve unrelated user CSS where possible and replace only NewOCR
 managed legacy/marked blocks.
 
 The app reports whether each block was added, replaced, or already up to date.
+The Apply CSS popup should explicitly mention that the included CSS blocks cover
+images, footnotes, blockquotes, Left/Center/Right alignment, and page breaks.
 
 ## EPUB Build
 
