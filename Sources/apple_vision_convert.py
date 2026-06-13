@@ -16,7 +16,7 @@ def apple_vision_output_folder(pdf_path):
 
 
 def apple_vision_epub_folder(pdf_path):
-    return pdf_path.parent / "AppleVision" / "EPUB"
+    return pdf_path.parent / "EPUB"
 
 
 def media_type_for_path(path):
@@ -555,7 +555,7 @@ def build_epub_from_chapter_manifest(manifest_path):
         chapter["imagePrefix"] = "../"
 
     documents, toc = chapters_to_xhtml_documents(chapters, book_title)
-    output_folder = book_folder / "AppleVision" / "EPUB"
+    output_folder = book_folder / "EPUB"
     output_folder.mkdir(parents=True, exist_ok=True)
     epub_path = output_folder / f"{output_stem}.epub"
     identifier = f"urn:uuid:{uuid4()}"

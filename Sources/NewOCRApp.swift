@@ -169,6 +169,8 @@ final class AppState: ObservableObject {
     }
 
     @Published var ocrSearchText: String = ""
+    @Published var paragraphScrollTargetIndex: Int = 0
+    @Published var paragraphScrollRequestID: Int = 0
 
     @Published var pdfTitles: [String: String] = [:] {
         didSet {
@@ -269,7 +271,6 @@ final class AppState: ObservableObject {
         guard !selectedFolderPath.isEmpty else { return nil }
         let folderURL = URL(fileURLWithPath: selectedFolderPath)
         return folderURL
-            .appendingPathComponent("AppleVision", isDirectory: true)
             .appendingPathComponent("EPUB", isDirectory: true)
             .appendingPathComponent(folderURL.lastPathComponent + ".epub")
     }
@@ -382,18 +383,18 @@ final class AppState: ObservableObject {
     }
 
     func chooseFrontCoverImage() {
-        chooseCoverImage(title: "Select Front Cover Image") { path in
+        chooseCoverImage(title: "Select Front Cover Image", outputStem: "front-cover") { path in
             self.frontCoverImagePath = path
         }
     }
 
     func chooseBackCoverImage() {
-        chooseCoverImage(title: "Select Back Cover Image") { path in
+        chooseCoverImage(title: "Select Back Cover Image", outputStem: "back-cover") { path in
             self.backCoverImagePath = path
         }
     }
 
-    private func chooseCoverImage(title: String, assign: (String) -> Void) {
+    private func chooseCoverImage(title: String, outputStem: String, assign: (String) -> Void) {
         let panel = NSOpenPanel()
         panel.title = title
         panel.prompt = "Select Image"
@@ -410,7 +411,37 @@ final class AppState: ObservableObject {
             return
         }
 
-        assign(url.path)
+        do {
+            let copiedURL = try copyCoverImageToSelectedFolder(url, outputStem: outputStem)
+            assign(copiedURL.path)
+        } catch {
+            configStatus = "Could not copy cover image: \(error.localizedDescription)"
+            assign(url.path)
+        }
+    }
+
+    private func copyCoverImageToSelectedFolder(_ sourceURL: URL, outputStem: String) throws -> URL {
+        guard !selectedFolderPath.isEmpty else {
+            return sourceURL
+        }
+
+        let folderURL = URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("CoverImage", isDirectory: true)
+        try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+
+        let fileExtension = sourceURL.pathExtension.isEmpty ? "png" : sourceURL.pathExtension
+        let destinationURL = folderURL.appendingPathComponent("\(outputStem).\(fileExtension)")
+        if sourceURL.standardizedFileURL.path == destinationURL.standardizedFileURL.path {
+            return destinationURL
+        }
+
+        let existingCoverFiles = (try? FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)) ?? []
+        for fileURL in existingCoverFiles where fileURL.deletingPathExtension().lastPathComponent == outputStem {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        return destinationURL
     }
 
     private var coverPanelDirectoryURL: URL? {
@@ -739,7 +770,6 @@ final class AppState: ObservableObject {
         let backCoverPath = backCoverImagePath.trimmingCharacters(in: .whitespacesAndNewlines)
         let bookTitle = folderURL.lastPathComponent
         let manifestURL = folderURL
-            .appendingPathComponent("AppleVision", isDirectory: true)
             .appendingPathComponent("EPUB", isDirectory: true)
             .appendingPathComponent("book-epub-manifest.json")
 
@@ -786,11 +816,9 @@ final class AppState: ObservableObject {
                         let epubPath = self.epubPathFromBuilderOutput(output) ?? self.bookEPUBFileURL?.path ?? ""
                         self.ocrStatus = "EPUB built from Markdown."
                         self.builtEPUBPath = epubPath
-                        self.epubStatus = epubPath.isEmpty
-                            ? "EPUB built from \(chapters.count) chapters."
-                            : "EPUB built: \(epubPath)"
+                        self.epubStatus = ""
                         self.logOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                        self.isEPUBBuiltAlertPresented = !epubPath.isEmpty
+                        self.isEPUBBuiltAlertPresented = false
                     } else {
                         self.ocrStatus = "Could not build EPUB."
                         self.epubStatus = "Could not build EPUB."
@@ -819,10 +847,11 @@ final class AppState: ObservableObject {
     }
 
     func openBuiltEPUBFile() {
-        guard !builtEPUBPath.isEmpty else {
+        let path = !builtEPUBPath.isEmpty ? builtEPUBPath : (bookEPUBFilePathIfExists ?? "")
+        guard !path.isEmpty else {
             return
         }
-        NSWorkspace.shared.open(URL(fileURLWithPath: builtEPUBPath))
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
     func appleVisionMarkdownExists(for item: PDFFileItem) -> Bool {
@@ -926,13 +955,21 @@ final class AppState: ObservableObject {
         ocrText.count > 80_000
     }
 
+    var shouldFilterOCRImagesOnly: Bool {
+        ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Image") == .orderedSame
+    }
+
     var ocrSearchResultText: String {
         let query = ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return "" }
 
-        let matches = ocrParagraphs.enumerated().compactMap { index, paragraph -> (Int, Int)? in
-            let count = countOccurrences(of: query, in: paragraph)
-            return count > 0 ? (index + 1, count) : nil
+        if shouldFilterOCRImagesOnly {
+            let count = ocrParagraphs.filter { markdownImageURL(from: $0) != nil }.count
+            return count == 0 ? "Found 0 image paragraphs" : "Showing \(count) image paragraphs"
+        }
+
+        let matches = ocrParagraphSearchMatches(query: query).map { match -> (Int, Int) in
+            (match.index + 1, match.count)
         }
         let total = matches.reduce(0) { $0 + $1.1 }
 
@@ -942,6 +979,27 @@ final class AppState: ObservableObject {
 
         let paragraphList = matches.map { "\($0.0)" }.joined(separator: ", ")
         return "Found \(total) times in p#\(paragraphList)"
+    }
+
+    var visibleOCRParagraphIndexes: [Int] {
+        let query = ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            return Array(ocrParagraphs.indices)
+        }
+        if shouldFilterOCRImagesOnly {
+            return ocrParagraphs.indices.filter { markdownImageURL(from: ocrParagraphs[$0]) != nil }
+        }
+        return ocrParagraphSearchMatches(query: query).map(\.index)
+    }
+
+    private func ocrParagraphSearchMatches(query: String) -> [(index: Int, count: Int)] {
+        ocrParagraphs.enumerated().compactMap { index, paragraph -> (index: Int, count: Int)? in
+            guard markdownImageURL(from: paragraph) == nil else {
+                return nil
+            }
+            let count = countOccurrences(of: query, in: paragraph)
+            return count > 0 ? (index: index, count: count) : nil
+        }
     }
 
     func paragraphBinding(at index: Int) -> Binding<String> {
@@ -965,6 +1023,7 @@ final class AppState: ObservableObject {
         let insertIndex = max(0, min(index, paragraphs.count))
         paragraphs.insert("", at: insertIndex)
         setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: insertIndex)
     }
 
     func addParagraphAfter(_ index: Int) {
@@ -972,6 +1031,7 @@ final class AppState: ObservableObject {
         let insertIndex = max(0, min(index + 1, paragraphs.count))
         paragraphs.insert("", at: insertIndex)
         setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: insertIndex)
     }
 
     func mergeParagraphBefore(_ index: Int) {
@@ -980,6 +1040,7 @@ final class AppState: ObservableObject {
         paragraphs[index - 1] = mergeParagraphText(paragraphs[index - 1], paragraphs[index])
         paragraphs.remove(at: index)
         setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: index - 1)
     }
 
     func mergeParagraphAfter(_ index: Int) {
@@ -988,6 +1049,7 @@ final class AppState: ObservableObject {
         paragraphs[index] = mergeParagraphText(paragraphs[index], paragraphs[index + 1])
         paragraphs.remove(at: index + 1)
         setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: index)
     }
 
     func removeParagraph(_ index: Int) {
@@ -995,6 +1057,7 @@ final class AppState: ObservableObject {
         guard paragraphs.indices.contains(index) else { return }
         paragraphs.remove(at: index)
         setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: min(index, max(0, paragraphs.count - 1)))
     }
 
     func moveParagraphUp(_ index: Int) {
@@ -1002,6 +1065,7 @@ final class AppState: ObservableObject {
         guard index > 0, paragraphs.indices.contains(index) else { return }
         paragraphs.swapAt(index, index - 1)
         setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: index - 1)
     }
 
     func moveParagraphDown(_ index: Int) {
@@ -1009,6 +1073,15 @@ final class AppState: ObservableObject {
         guard paragraphs.indices.contains(index), index + 1 < paragraphs.count else { return }
         paragraphs.swapAt(index, index + 1)
         setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: index + 1)
+    }
+
+    private func finishParagraphAction(focusIndex: Int) {
+        let paragraphs = ocrParagraphs
+        let clampedIndex = max(0, min(focusIndex, max(0, paragraphs.count - 1)))
+        ocrSearchText = ""
+        paragraphScrollTargetIndex = clampedIndex
+        paragraphScrollRequestID += 1
     }
 
     func replaceAllOCRSearchMatches(with replacement: String) -> Int {
@@ -2703,40 +2776,33 @@ struct StepOneLoadPDFView: View {
                         }
                         .controlSize(.large)
                         .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
+
+                        if appState.bookEPUBFilePathIfExists != nil {
+                            Button("View EPUB") {
+                                appState.openBuiltEPUBFile()
+                            }
+                            .controlSize(.large)
+                        }
                     }
 
-                    HStack(spacing: 18) {
+                    HStack(spacing: 24) {
                         HStack(spacing: 10) {
                             Button("Front Cover") {
                                 appState.chooseFrontCoverImage()
                             }
 
-                            Text(appState.frontCoverImagePath.isEmpty ? "No front cover selected" : appState.frontCoverImagePath)
-                                .foregroundStyle(appState.frontCoverImagePath.isEmpty ? .secondary : .primary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            CoverThumbnailView(path: appState.frontCoverImagePath)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
 
                         HStack(spacing: 10) {
                             Button("Back Cover") {
                                 appState.chooseBackCoverImage()
                             }
 
-                            Text(appState.backCoverImagePath.isEmpty ? "No back cover selected" : appState.backCoverImagePath)
-                                .foregroundStyle(appState.backCoverImagePath.isEmpty ? .secondary : .primary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            CoverThumbnailView(path: appState.backCoverImagePath)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
 
-                    if !appState.epubStatus.isEmpty {
-                        Text(appState.epubStatus)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Spacer()
                     }
                 }
                 .padding(12)
@@ -2904,57 +2970,78 @@ struct PDFListView: View {
             } else if appState.pdfFiles.isEmpty {
                 EmptyStateView(title: "No PDF files found in this folder.")
             } else {
-                List(appState.pdfFiles) { item in
+                VStack(spacing: 0) {
                     HStack(spacing: 12) {
-                        Image(systemName: "doc.richtext")
-                            .foregroundStyle(.red)
-
-                        if appState.appleVisionMarkdownExists(for: item) {
-                            Text("MD")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.green)
-                        }
-
-                        Button {
-                            NSWorkspace.shared.open(item.url)
-                        } label: {
-                            Text(item.fileName)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.link)
-                        .help("Open PDF")
-
+                        Text("PDF")
+                            .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
                         Text("Title")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-
-                        TextField("Title", text: appState.titleBinding(for: item))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 220)
-
-                        if appState.headerFooterScanned(for: item) {
-                            Text("Scanned")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.green)
-                        }
-
-                        Button(appState.isScanningHeaderFooter(for: item) ? "Scanning..." : "Scan Header") {
-                            appState.scanHeaderFooterSample(for: item)
-                        }
-                        .disabled(appState.isScanningHeaderFooter(for: item))
-
-                        Button("Process") {
-                            appState.beginOCR(for: item)
-                        }
-                        .disabled(!appState.headerFooterScanned(for: item) || appState.isScanningHeaderFooter(for: item))
-
+                            .frame(width: 260, alignment: .leading)
+                        Text("Scanned")
+                            .frame(width: 76, alignment: .center)
+                        Text("Command")
+                            .frame(width: 220, alignment: .leading)
                     }
-                    .padding(.vertical, 5)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(nsColor: .controlBackgroundColor))
+
+                    Divider()
+
+                    List(appState.pdfFiles) { item in
+                        HStack(spacing: 12) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "doc.richtext")
+                                    .foregroundStyle(.red)
+
+                                if appState.appleVisionMarkdownExists(for: item) {
+                                    Text("MD")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.green)
+                                }
+
+                                Button {
+                                    NSWorkspace.shared.open(item.url)
+                                } label: {
+                                    Text(item.fileName)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.link)
+                                .help("Open PDF")
+                            }
+                            .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
+
+                            TextField("Title", text: appState.titleBinding(for: item))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 260)
+
+                            Image(systemName: appState.headerFooterScanned(for: item) ? "checkmark.circle.fill" : "xmark.circle")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(appState.headerFooterScanned(for: item) ? .green : .secondary)
+                                .frame(width: 76, alignment: .center)
+                                .help(appState.headerFooterScanned(for: item) ? "Scanned" : "Not scanned")
+
+                            HStack(spacing: 8) {
+                                Button(appState.isScanningHeaderFooter(for: item) ? "Scanning..." : "Scan Header") {
+                                    appState.scanHeaderFooterSample(for: item)
+                                }
+                                .disabled(appState.isScanningHeaderFooter(for: item))
+
+                                Button("Process") {
+                                    appState.beginOCR(for: item)
+                                }
+                                .disabled(!appState.headerFooterScanned(for: item) || appState.isScanningHeaderFooter(for: item))
+                            }
+                            .frame(width: 220, alignment: .leading)
+                        }
+                        .padding(.vertical, 5)
+                    }
+                    .listStyle(.inset)
                 }
-                .listStyle(.inset)
             }
         }
         .frame(maxWidth: .infinity, minHeight: appState.pdfListMinHeight, maxHeight: .infinity)
@@ -2964,6 +3051,83 @@ struct PDFListView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
         )
+    }
+}
+
+struct CoverThumbnailView: View {
+    let path: String
+
+    var body: some View {
+        Group {
+            if !path.isEmpty, let image = NSImage(contentsOfFile: path) {
+                Button {
+                    openImagePreviewWindow(path: path)
+                } label: {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 34, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Open cover image")
+            } else {
+                Image(systemName: "photo")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, height: 44)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    )
+            }
+        }
+    }
+
+    private func openImagePreviewWindow(path: String) {
+        guard let image = NSImage(contentsOfFile: path) else { return }
+        let imageSize = image.size
+        let maxWidth: CGFloat = 900
+        let maxHeight: CGFloat = 900
+        let scale = min(maxWidth / max(1, imageSize.width), maxHeight / max(1, imageSize.height), 1)
+        let windowSize = NSSize(width: max(360, imageSize.width * scale), height: max(360, imageSize.height * scale))
+
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: windowSize),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = URL(fileURLWithPath: path).lastPathComponent
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: CoverImagePreviewView(path: path))
+        window.makeKeyAndOrderFront(nil)
+    }
+}
+
+struct CoverImagePreviewView: View {
+    let path: String
+
+    var body: some View {
+        if let image = NSImage(contentsOfFile: path) {
+            ScrollView([.horizontal, .vertical]) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
+        } else {
+            EmptyStateView(title: "Image file not found.")
+                .frame(minWidth: 360, minHeight: 360)
+        }
     }
 }
 
@@ -2986,6 +3150,7 @@ struct StepTwoOCRView: View {
     @EnvironmentObject private var appState: AppState
     @State private var isFilesPopoverPresented = false
     @State private var isMarkdownInfoPopoverPresented = false
+    @State private var isSearchInfoPopoverPresented = false
     @State private var isReplacePopoverPresented = false
     @State private var replacementText = ""
 
@@ -3015,7 +3180,7 @@ struct StepTwoOCRView: View {
                         MarkdownSyntaxPopoverView()
                     }
 
-                    Button("Close Window") {
+                    Button("Close") {
                         NSApp.keyWindow?.close()
                     }
                     .controlSize(.large)
@@ -3041,47 +3206,62 @@ struct StepTwoOCRView: View {
                                     }
                                     .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty)
                                 }
-                                HStack(spacing: 10) {
-                                    TextField("Search Markdown", text: $appState.ocrSearchText)
-                                        .textFieldStyle(.roundedBorder)
-                                        .frame(width: 260)
-                                        .disabled(appState.ocrText.isEmpty)
-                                    Button("Replace All") {
-                                        replacementText = ""
-                                        isReplacePopoverPresented = true
-                                    }
-                                    .frame(width: 140)
-                                    .disabled(appState.ocrText.isEmpty || appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                    .popover(isPresented: $isReplacePopoverPresented) {
-                                        VStack(alignment: .leading, spacing: 12) {
-                                            Text("Replace All")
-                                                .font(.headline)
-
-                                            HStack(spacing: 8) {
-                                                Text("Replace To:")
-                                                    .font(.subheadline.weight(.semibold))
-                                                TextField("Replacement text", text: $replacementText)
-                                                    .textFieldStyle(.roundedBorder)
-                                                    .frame(width: 260)
-                                            }
-
-                                            HStack {
-                                                Spacer()
-                                                Button("Cancel") {
-                                                    isReplacePopoverPresented = false
-                                                }
-                                                Button("Replace") {
-                                                    _ = appState.replaceAllOCRSearchMatches(with: replacementText)
-                                                    isReplacePopoverPresented = false
-                                                }
-                                                .keyboardShortcut(.defaultAction)
-                                            }
+                                GeometryReader { proxy in
+                                    HStack(spacing: 10) {
+                                        TextField("Search Markdown", text: $appState.ocrSearchText)
+                                            .textFieldStyle(.roundedBorder)
+                                            .frame(width: max(260, proxy.size.width * 0.8))
+                                            .disabled(appState.ocrText.isEmpty)
+                                        Button("Replace All") {
+                                            replacementText = ""
+                                            isReplacePopoverPresented = true
                                         }
-                                        .padding(16)
-                                        .frame(width: 420)
+                                        .frame(width: 140)
+                                        .disabled(appState.ocrText.isEmpty || appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                        .popover(isPresented: $isReplacePopoverPresented) {
+                                            VStack(alignment: .leading, spacing: 12) {
+                                                Text("Replace All")
+                                                    .font(.headline)
+
+                                                HStack(spacing: 8) {
+                                                    Text("Replace To:")
+                                                        .font(.subheadline.weight(.semibold))
+                                                    TextField("Replacement text", text: $replacementText)
+                                                        .textFieldStyle(.roundedBorder)
+                                                        .frame(width: 260)
+                                                }
+
+                                                HStack {
+                                                    Spacer()
+                                                    Button("Cancel") {
+                                                        isReplacePopoverPresented = false
+                                                    }
+                                                    Button("Replace") {
+                                                        _ = appState.replaceAllOCRSearchMatches(with: replacementText)
+                                                        isReplacePopoverPresented = false
+                                                    }
+                                                    .keyboardShortcut(.defaultAction)
+                                                }
+                                            }
+                                            .padding(16)
+                                            .frame(width: 420)
+                                        }
+                                        Button {
+                                            isSearchInfoPopoverPresented.toggle()
+                                        } label: {
+                                            Image(systemName: "info.circle")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .foregroundStyle(.secondary)
+                                        .help("Search help")
+                                        .accessibilityLabel("Search help")
+                                        .popover(isPresented: $isSearchInfoPopoverPresented) {
+                                            OCRSearchGuidelinePopoverView()
+                                        }
+                                        Spacer(minLength: 0)
                                     }
-                                    Spacer()
                                 }
+                                .frame(height: 28)
                                 Text(appState.ocrSearchResultText.isEmpty ? " " : appState.ocrSearchResultText)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -3264,6 +3444,32 @@ struct MarkdownSyntaxPopoverView: View {
     }
 }
 
+struct OCRSearchGuidelinePopoverView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.accentColor)
+                Text("Search")
+                    .font(.headline)
+            }
+
+            Text("Type normal text to show only paragraphs containing that text. Matching text stays highlighted.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Type exactly Image to show only detected image paragraphs.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Paragraph numbers and merge actions still use the real document position.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 360, alignment: .leading)
+    }
+}
+
 struct PathRow: View {
     let label: String
     let value: String
@@ -3313,19 +3519,35 @@ struct ParagraphEditorView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        let paragraphs = appState.ocrParagraphs
+        let visibleIndexes = appState.visibleOCRParagraphIndexes
 
-        ScrollView(.vertical) {
-            LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(paragraphs.indices), id: \.self) { index in
-                    ParagraphItemView(
-                        index: index,
-                        text: appState.paragraphBinding(at: index)
-                    )
-                    .environmentObject(appState)
+        ScrollViewReader { proxy in
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(visibleIndexes, id: \.self) { index in
+                        ParagraphItemView(
+                            index: index,
+                            text: appState.paragraphBinding(at: index)
+                        )
+                        .environmentObject(appState)
+                        .id(index)
+                    }
+
+                    if visibleIndexes.isEmpty {
+                        EmptyStateView(title: "No matching paragraphs found.")
+                            .frame(minHeight: 220)
+                    }
+                }
+                .padding(10)
+            }
+            .onReceive(appState.$paragraphScrollRequestID) { requestID in
+                guard requestID > 0 else { return }
+                DispatchQueue.main.async {
+                    withAnimation {
+                        proxy.scrollTo(appState.paragraphScrollTargetIndex, anchor: .center)
+                    }
                 }
             }
-            .padding(10)
         }
         .background(Color(nsColor: .textBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -3461,60 +3683,76 @@ struct ParagraphItemView: View {
     @Binding var text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Paragraph \(index + 1)")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        HStack(alignment: .top, spacing: 8) {
+            Button {
+                appState.removeParagraph(index)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Remove paragraph")
+            .accessibilityLabel("Remove paragraph \(index + 1)")
+            .disabled(appState.ocrParagraphs.count <= 1)
+            .padding(.top, 2)
 
-                Spacer()
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Paragraph \(index + 1)")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
 
-                Menu("Actions") {
-                    Button("Add Paragraph Before") {
-                        appState.addParagraphBefore(index)
+                    Spacer()
+
+                    Menu("Actions") {
+                        Button("Add Paragraph Before") {
+                            appState.addParagraphBefore(index)
+                        }
+
+                        Button("Add Paragraph After") {
+                            appState.addParagraphAfter(index)
+                        }
+
+                        Divider()
+
+                        Button("Merge With Paragraph Above") {
+                            appState.mergeParagraphBefore(index)
+                        }
+                        .disabled(index == 0)
+
+                        Button("Merge With Paragraph Below") {
+                            appState.mergeParagraphAfter(index)
+                        }
+                        .disabled(index + 1 >= appState.ocrParagraphs.count)
+
+                        Divider()
+
+                        Button("Remove Paragraph", role: .destructive) {
+                            appState.removeParagraph(index)
+                        }
+                        .disabled(appState.ocrParagraphs.count <= 1)
                     }
-
-                    Button("Add Paragraph After") {
-                        appState.addParagraphAfter(index)
-                    }
-
-                    Divider()
-
-                    Button("Merge With Paragraph Above") {
-                        appState.mergeParagraphBefore(index)
-                    }
-                    .disabled(index == 0)
-
-                    Button("Merge With Paragraph Below") {
-                        appState.mergeParagraphAfter(index)
-                    }
-                    .disabled(index + 1 >= appState.ocrParagraphs.count)
-
-                    Divider()
-
-                    Button("Remove Paragraph", role: .destructive) {
-                        appState.removeParagraph(index)
-                    }
-                    .disabled(appState.ocrParagraphs.count <= 1)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-            }
 
-            if let imageURL = appState.markdownImageURL(from: text) {
-                OCRMarkdownImagePreview(imageURL: imageURL, markdownText: text)
-            } else {
-                HighlightingTextEditor(
-                    text: $text,
-                    searchText: appState.ocrSearchText
-                )
-                    .frame(minHeight: appState.ocrParagraphTextAreaMinHeight)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                if let imageURL = appState.markdownImageURL(from: text) {
+                    OCRMarkdownImagePreview(imageURL: imageURL, markdownText: text)
+                } else {
+                    HighlightingTextEditor(
+                        text: $text,
+                        searchText: appState.ocrSearchText
                     )
+                        .frame(minHeight: appState.ocrParagraphTextAreaMinHeight)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        )
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor))
