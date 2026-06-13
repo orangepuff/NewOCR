@@ -197,6 +197,12 @@ def markdown_inline_to_html(text, footnote_state=None):
     return escaped
 
 
+def page_break_html(kind):
+    if kind == "before":
+        return '<div class="page-break-before"></div>'
+    return '<div class="page-break-after"></div>'
+
+
 def footnotes_to_html(footnote_state):
     items = []
     for index, label in enumerate(footnote_state["used"], start=1):
@@ -315,6 +321,18 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
         stripped = line.strip()
         if not stripped:
             flush_paragraph()
+            index += 1
+            continue
+
+        if stripped in {"<!-- page-break-before -->", "[[page-break-before]]"}:
+            flush_paragraph()
+            body_parts.append(page_break_html("before"))
+            index += 1
+            continue
+
+        if stripped in {"<!-- page-break-after -->", "[[page-break-after]]"}:
+            flush_paragraph()
+            body_parts.append(page_break_html("after"))
             index += 1
             continue
 

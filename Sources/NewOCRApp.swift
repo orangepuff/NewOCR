@@ -1716,6 +1716,22 @@ final class AppState: ObservableObject {
         finishParagraphAction(focusIndex: insertIndex)
     }
 
+    func addPageBreakBefore(_ index: Int) {
+        var paragraphs = ocrParagraphs
+        let insertIndex = max(0, min(index, paragraphs.count))
+        paragraphs.insert("<!-- page-break-before -->", at: insertIndex)
+        setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: insertIndex)
+    }
+
+    func addPageBreakAfter(_ index: Int) {
+        var paragraphs = ocrParagraphs
+        let insertIndex = max(0, min(index + 1, paragraphs.count))
+        paragraphs.insert("<!-- page-break-after -->", at: insertIndex)
+        setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: insertIndex)
+    }
+
     func mergeParagraphBefore(_ index: Int) {
         var paragraphs = ocrParagraphs
         guard index > 0, paragraphs.indices.contains(index) else { return }
@@ -4755,6 +4771,7 @@ struct ParagraphItemView: View {
     @Binding var text: String
     @State private var editorHeight: CGFloat? = nil
     @State private var resizeStartHeight: CGFloat? = nil
+    @State private var editorWidth: CGFloat = 640
 
     var body: some View {
         let displayTitle = appState.paragraphDisplayTitle(at: index)
@@ -4815,6 +4832,14 @@ struct ParagraphItemView: View {
                             appState.addLineBreakAfter(index)
                         }
 
+                        Button("Page Break Before") {
+                            appState.addPageBreakBefore(index)
+                        }
+
+                        Button("Page Break After") {
+                            appState.addPageBreakAfter(index)
+                        }
+
                         Divider()
 
                         Button("Merge With Paragraph Above") {
@@ -4861,6 +4886,11 @@ struct ParagraphItemView: View {
                             searchText: appState.ocrSearchText
                         )
                             .frame(height: currentEditorHeight)
+                            .background(
+                                GeometryReader { proxy in
+                                    Color.clear.preference(key: ParagraphEditorWidthPreferenceKey.self, value: proxy.size.width)
+                                }
+                            )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8)
                                     .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
@@ -4888,15 +4918,58 @@ struct ParagraphItemView: View {
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .onAppear {
-            if editorHeight == nil {
-                editorHeight = appState.ocrParagraphTextAreaMinHeight
-            }
+        .onPreferenceChange(ParagraphEditorWidthPreferenceKey.self) { width in
+            guard width > 0 else { return }
+            editorWidth = width
         }
     }
 
     private var currentEditorHeight: CGFloat {
-        max(appState.ocrParagraphTextAreaMinHeight, editorHeight ?? appState.ocrParagraphTextAreaMinHeight)
+        max(appState.ocrParagraphTextAreaMinHeight, automaticEditorHeight, editorHeight ?? automaticEditorHeight)
+    }
+
+    private var automaticEditorHeight: CGFloat {
+        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let lineHeight = max(font.ascender - font.descender + font.leading, 17)
+        let usableWidth = max(editorWidth - 18, 180)
+        let alphabetWidth = ("abcdefghijklmnopqrstuvwxyz" as NSString).size(withAttributes: [.font: font]).width
+        let averageCharacterWidth = max(alphabetWidth / 26, 7)
+        let charactersPerLine = max(Int(usableWidth / averageCharacterWidth), 18)
+
+        var estimatedLineCount = 0
+        for line in text.components(separatedBy: .newlines) {
+            let count = max(line.count, 1)
+            let wrappedLineCount = Int(ceil(Double(count) / Double(charactersPerLine)))
+            estimatedLineCount += max(1, wrappedLineCount)
+        }
+
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byWordWrapping
+        let measuredRect = NSAttributedString(
+            string: text.isEmpty ? " " : text,
+            attributes: [
+                .font: font,
+                .paragraphStyle: style,
+            ]
+        )
+            .boundingRect(
+                with: NSSize(width: usableWidth, height: CGFloat.greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]
+            )
+
+        let measuredHeight = max(measuredRect.height, CGFloat(max(estimatedLineCount, 1)) * lineHeight)
+        return ceil(max(appState.ocrParagraphTextAreaMinHeight, measuredHeight + 28))
+    }
+}
+
+private struct ParagraphEditorWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 640
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 {
+            value = next
+        }
     }
 }
 
