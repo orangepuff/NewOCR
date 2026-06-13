@@ -37,7 +37,7 @@ def media_type_for_path(path):
 def collect_epub_assets(pdf_path):
     assets = []
     asset_specs = [
-        (pdf_path.parent / "Styles", "Styles/OEBPStyles", {".css"}),
+        (pdf_path.parent / "Styles", "Styles", {".css"}),
         (pdf_path.parent / "Fonts", "Fonts", {".ttf", ".otf", ".woff", ".woff2"}),
     ]
 
@@ -69,6 +69,65 @@ def stylesheet_links(assets, prefix=""):
     )
 
 
+MARKDOWN_IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
+
+
+def clean_markdown_link_target(value):
+    value = value.strip()
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        value = value[1:-1].strip()
+    return value
+
+
+def safe_asset_name(value, fallback):
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(value).stem).strip("-").lower() or fallback
+    suffix = Path(value).suffix.lower()
+    return f"{stem}{suffix}"
+
+
+def collect_markdown_image_assets(markdown_paths, prefix=""):
+    assets = []
+    image_map = {}
+    used_hrefs = set()
+
+    for path in markdown_paths:
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", text):
+            raw_target = clean_markdown_link_target(match.group(1))
+            if not raw_target or raw_target.lower().startswith(("http://", "https://", "data:")):
+                continue
+
+            image_path = Path(raw_target)
+            if not image_path.is_absolute():
+                image_path = path.parent / image_path
+            image_path = image_path.resolve()
+            if not image_path.exists() or not image_path.is_file():
+                continue
+
+            media_type = media_type_for_path(image_path)
+            if not media_type.startswith("image/"):
+                continue
+
+            asset_name = safe_asset_name(raw_target, f"image-{len(assets) + 1}")
+            href = f"Images/{prefix}{asset_name}"
+            counter = 2
+            while href in used_hrefs:
+                href = f"Images/{prefix}{Path(asset_name).stem}-{counter}{Path(asset_name).suffix}"
+                counter += 1
+            used_hrefs.add(href)
+
+            image_map[(str(path.resolve()), raw_target)] = href
+            assets.append({
+                "id": re.sub(r"[^A-Za-z0-9_-]+", "-", href).strip("-").lower() or f"image-{len(assets) + 1}",
+                "href": href,
+                "media_type": media_type,
+                "path": image_path,
+                "kind": "Images",
+            })
+
+    return assets, image_map
+
+
 def page_number_from_path(path):
     match = re.search(r"page(\d+)$", path.stem, re.IGNORECASE)
     return int(match.group(1)) if match else 10**9
@@ -86,7 +145,21 @@ def markdown_inline_to_html(text):
     return escaped
 
 
-def markdown_to_xhtml_body(text, fallback_title):
+def markdown_image_to_html(stripped, source_path=None, image_map=None, image_prefix=""):
+    match = MARKDOWN_IMAGE_RE.match(stripped)
+    if not match:
+        return None
+    alt = match.group(1).strip()
+    raw_target = clean_markdown_link_target(match.group(2))
+    href = raw_target
+    if image_map is not None and source_path is not None:
+        href = image_map.get((str(source_path.resolve()), raw_target), raw_target)
+    if image_map is not None and href == raw_target:
+        href = next((value for (path_value, target), value in image_map.items() if target == raw_target), raw_target)
+    return f'<figure><img src="{html.escape(image_prefix + href)}" alt="{html.escape(alt)}"/></figure>'
+
+
+def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=None, image_prefix=""):
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     body_parts = []
     toc = []
@@ -105,6 +178,12 @@ def markdown_to_xhtml_body(text, fallback_title):
         stripped = line.strip()
         if not stripped:
             flush_paragraph()
+            continue
+
+        image_html = markdown_image_to_html(stripped, source_path, image_map, image_prefix)
+        if image_html:
+            flush_paragraph()
+            body_parts.append(image_html)
             continue
 
         heading_match = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
@@ -131,8 +210,8 @@ def markdown_to_xhtml_body(text, fallback_title):
     return "\n".join(body_parts), toc
 
 
-def markdown_to_body_without_toc(text):
-    body_html, _ = markdown_to_xhtml_body(text, "")
+def markdown_to_body_without_toc(text, source_path=None, image_map=None, image_prefix=""):
+    body_html, _ = markdown_to_xhtml_body(text, "", source_path, image_map, image_prefix)
     return body_html
 
 
@@ -148,7 +227,12 @@ def chapters_to_xhtml_body(chapters, fallback_title):
         body_parts.append(f'<section id="{anchor}">')
         chapter_text = chapter["markdown"].strip()
         if chapter_text:
-            body_parts.append(markdown_to_body_without_toc(chapter_text))
+            body_parts.append(markdown_to_body_without_toc(
+                chapter_text,
+                chapter.get("sourcePath"),
+                chapter.get("imageMap"),
+                chapter.get("imagePrefix", ""),
+            ))
         body_parts.append("</section>")
 
     if not body_parts:
@@ -168,7 +252,12 @@ def chapters_to_xhtml_documents(chapters, fallback_title):
             anchor = f"{anchor}-{index}"
         href = f"Text/chapter-{index:03d}.xhtml"
         toc.append({"id": anchor, "title": title, "level": 2, "href": href})
-        chapter_body = markdown_to_body_without_toc(chapter["markdown"].strip()) if chapter["markdown"].strip() else ""
+        chapter_body = markdown_to_body_without_toc(
+            chapter["markdown"].strip(),
+            chapter.get("sourcePath"),
+            chapter.get("imageMap"),
+            chapter.get("imagePrefix", ""),
+        ) if chapter["markdown"].strip() else ""
         body_html = f'<section id="{anchor}">\n{chapter_body}\n</section>'
         documents.append({
             "id": f"chapter-{index:03d}",
@@ -359,12 +448,6 @@ def checked_image_path(value, label):
 
 def write_epub_asset(archive, asset):
     target = f"OEBPS/{asset['href']}"
-    if asset["kind"].startswith("Styles") and asset["href"].lower().endswith(".css"):
-        css = asset["path"].read_text(encoding="utf-8")
-        css = css.replace('url("../Fonts/', 'url("../../Fonts/')
-        css = css.replace("url('../Fonts/", "url('../../Fonts/")
-        archive.writestr(target, css, compress_type=zipfile.ZIP_DEFLATED)
-        return
     archive.write(asset["path"], target, compress_type=zipfile.ZIP_DEFLATED)
 
 
@@ -375,7 +458,8 @@ def build_epub_from_apple_vision_markdown(pdf_path, title="", front_cover="", ba
         raise RuntimeError(f"AppleVision Markdown files are empty: {markdown_folder}")
 
     fallback_title = title.strip() or pdf_path.stem
-    body_html, toc = markdown_to_xhtml_body(text, fallback_title)
+    markdown_image_assets, markdown_image_map = collect_markdown_image_assets(markdown_paths)
+    body_html, toc = markdown_to_xhtml_body(text, fallback_title, markdown_paths[0], markdown_image_map)
     book_title = toc[0]["title"] if toc else fallback_title
     output_folder = apple_vision_epub_folder(pdf_path)
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -385,7 +469,7 @@ def build_epub_from_apple_vision_markdown(pdf_path, title="", front_cover="", ba
         checked_image_path(front_cover, "Front cover"),
         checked_image_path(back_cover, "Back cover"),
     )
-    assets = collect_epub_assets(pdf_path)
+    assets = collect_epub_assets(pdf_path) + markdown_image_assets
 
     container_xml = """<?xml version="1.0" encoding="utf-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -422,6 +506,7 @@ def build_epub_from_apple_vision_markdown(pdf_path, title="", front_cover="", ba
         "characters": len(text),
         "stylesheets": [asset["href"] for asset in assets if asset["kind"] == "Styles"],
         "fonts": [asset["href"] for asset in assets if asset["kind"] == "Fonts"],
+        "images": [asset["href"] for asset in assets if asset["kind"] == "Images"],
         "frontCover": str(covers[0]["path"]) if covers and covers[0]["xhtml_id"] == "front-cover" else "",
         "backCover": next((str(cover["path"]) for cover in covers if cover["xhtml_id"] == "back-cover"), ""),
         "message": "EPUB built from AppleVision Markdown files.",
@@ -433,14 +518,16 @@ def read_manifest_chapters(manifest):
     for chapter in manifest.get("chapters", []):
         title = str(chapter.get("title", "")).strip()
         markdown_parts = []
+        markdown_paths = []
         for value in chapter.get("markdownFiles", []):
             path = Path(value).expanduser()
             if not path.exists() or not path.is_file():
                 raise RuntimeError(f"Markdown file not found: {path}")
+            markdown_paths.append(path)
             markdown_parts.append(path.read_text(encoding="utf-8").strip())
         markdown = "\n\n".join(part for part in markdown_parts if part)
         if markdown:
-            chapters.append({"title": title, "markdown": markdown})
+            chapters.append({"title": title, "markdown": markdown, "markdownPaths": markdown_paths, "sourcePath": markdown_paths[0] if markdown_paths else None})
     return chapters
 
 
@@ -460,6 +547,13 @@ def build_epub_from_chapter_manifest(manifest_path):
     if not chapters:
         raise RuntimeError("No Markdown chapters found for EPUB.")
 
+    markdown_image_assets = []
+    for index, chapter in enumerate(chapters, start=1):
+        chapter_assets, chapter_image_map = collect_markdown_image_assets(chapter.get("markdownPaths", []), prefix=f"chapter-{index:03d}-")
+        markdown_image_assets.extend(chapter_assets)
+        chapter["imageMap"] = chapter_image_map
+        chapter["imagePrefix"] = "../"
+
     documents, toc = chapters_to_xhtml_documents(chapters, book_title)
     output_folder = book_folder / "AppleVision" / "EPUB"
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -469,7 +563,7 @@ def build_epub_from_chapter_manifest(manifest_path):
         checked_image_path(manifest.get("frontCover", ""), "Front cover"),
         checked_image_path(manifest.get("backCover", ""), "Back cover"),
     )
-    assets = collect_epub_assets(book_folder / "__book__.pdf")
+    assets = collect_epub_assets(book_folder / "__book__.pdf") + markdown_image_assets
 
     container_xml = """<?xml version="1.0" encoding="utf-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -510,6 +604,7 @@ def build_epub_from_chapter_manifest(manifest_path):
         "tocItems": len(toc),
         "stylesheets": [asset["href"] for asset in assets if asset["kind"] == "Styles"],
         "fonts": [asset["href"] for asset in assets if asset["kind"] == "Fonts"],
+        "images": [asset["href"] for asset in assets if asset["kind"] == "Images"],
         "frontCover": str(covers[0]["path"]) if covers and covers[0]["xhtml_id"] == "front-cover" else "",
         "backCover": next((str(cover["path"]) for cover in covers if cover["xhtml_id"] == "back-cover"), ""),
         "message": "EPUB built from Markdown chapter manifest.",

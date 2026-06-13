@@ -47,6 +47,22 @@ private struct HeaderFooterGroup {
     var displayKey: String = ""
 }
 
+private struct OCRImageRegion {
+    let markdown: String
+    let imageURL: URL
+    let left: CGFloat
+    let right: CGFloat
+    let bottom: CGFloat
+    let top: CGFloat
+}
+
+private struct OCRPageMarkdown {
+    let pageNumber: Int
+    var text: String
+    let firstTextLineContinuesPreviousPage: Bool
+    let lastTextLineCanContinueNextPage: Bool
+}
+
 private extension String {
     func trimmingLeadingCharacters(in characterSet: CharacterSet) -> String {
         guard let index = firstIndex(where: { character in
@@ -184,6 +200,8 @@ final class AppState: ObservableObject {
 
     @Published var pdfListMinHeight: CGFloat = 420
     @Published var ocrParagraphTextAreaMinHeight: CGFloat = 58
+    @Published var ocrWindowWidth: CGFloat = 820
+    @Published var ocrWindowHeight: CGFloat = 620
 
     @Published private(set) var pdfFiles: [PDFFileItem] = []
 
@@ -313,7 +331,7 @@ final class AppState: ObservableObject {
 
     func openOCRWindow() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: ocrWindowWidth, height: ocrWindowHeight),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -1044,6 +1062,33 @@ final class AppState: ObservableObject {
         ocrText = paragraphs.joined(separator: "\n\n")
     }
 
+    func markdownImageURL(from paragraph: String) -> URL? {
+        let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("!["),
+              let openParen = trimmed.firstIndex(of: "("),
+              let closeParen = trimmed.lastIndex(of: ")"),
+              openParen < closeParen else {
+            return nil
+        }
+
+        let pathText = String(trimmed[trimmed.index(after: openParen)..<closeParen])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pathText.isEmpty,
+              !pathText.lowercased().hasPrefix("http://"),
+              !pathText.lowercased().hasPrefix("https://") else {
+            return nil
+        }
+
+        if pathText.hasPrefix("/") {
+            return URL(fileURLWithPath: pathText)
+        }
+
+        guard let folderURL = localAppleVisionOutputFolderURL else {
+            return nil
+        }
+        return folderURL.appendingPathComponent(pathText)
+    }
+
     private func countOccurrences(of query: String, in text: String) -> Int {
         var count = 0
         var searchRange = text.startIndex..<text.endIndex
@@ -1159,7 +1204,9 @@ final class AppState: ObservableObject {
         let bottomCount = parseLineCount(filterBottomLines, defaultValue: 1)
         let filterValues = parseFilterValues(filteredText)
         var rawPages: [[OCRLine]] = []
+        var pageImageRegions: [[OCRImageRegion]] = []
         var allPageLines: [OCRLine] = []
+        var allPageImageRegions: [OCRImageRegion] = []
 
         for pageIndex in 0..<pageCount {
             if isOCRCancelling {
@@ -1172,7 +1219,14 @@ final class AppState: ObservableObject {
 
             let image = try renderPDFPageToCGImage(page)
             let rawLines = try recognizeTextWithAppleVision(in: image)
+            let imageRegions = try detectImageRegions(
+                in: image,
+                textLines: rawLines,
+                pageNumber: pageIndex + 1,
+                outputFolder: mdFolder
+            )
             rawPages.append(rawLines)
+            pageImageRegions.append(imageRegions)
 
             DispatchQueue.main.async {
                 let percent = (Double(pageIndex + 1) / Double(pageCount)) * 50
@@ -1184,6 +1238,7 @@ final class AppState: ObservableObject {
         try updateAppleVisionLineCache(pdfURL: pdfURL, rawPages: rawPages)
         let repeatedHeaderFooterKeys = repeatedHeaderFooterKeys(for: pdfURL)
         var removedLines = 0
+        var pageMarkdownItems: [OCRPageMarkdown] = []
 
         for (pageIndex, rawLines) in rawPages.enumerated() {
             let filteredLines = removeTopBottomLines(
@@ -1193,25 +1248,45 @@ final class AppState: ObservableObject {
                 filterValues: filterValues,
                 repeatedHeaderFooterKeys: repeatedHeaderFooterKeys
             )
-            removedLines += rawLines.count - filteredLines.count
-            let builtPageText = buildContinuousParagraphs(from: filteredLines)
+            let imageRegions = pageImageRegions.indices.contains(pageIndex) ? pageImageRegions[pageIndex] : []
+            let filteredTextLines = filteredLines.filter { line in
+                !imageRegions.contains { imageRegion in
+                    normalizedOverlapArea(line, imageRegion) >= 0.18
+                }
+            }
+            removedLines += rawLines.count - filteredTextLines.count
+            let builtPageText = buildMarkdownPage(from: filteredTextLines, imageRegions: imageRegions)
             let pageText = pageIndex == 0
                 ? applyMarkdownTitle(documentTitle, to: builtPageText, replaceExistingHeading: true)
                 : builtPageText
 
             let pageNumber = pageIndex + 1
-            let pageURL = mdFolder.appendingPathComponent("page\(pageNumber).md")
-            try pageText.write(to: pageURL, atomically: true, encoding: .utf8)
-            allPageLines.append(contentsOf: filteredLines)
+            pageMarkdownItems.append(
+                OCRPageMarkdown(
+                    pageNumber: pageNumber,
+                    text: pageText,
+                    firstTextLineContinuesPreviousPage: firstTextLineContinuesPreviousPage(filteredTextLines),
+                    lastTextLineCanContinueNextPage: lastTextLineCanContinueNextPage(filteredTextLines)
+                )
+            )
+            allPageLines.append(contentsOf: filteredTextLines)
+            allPageImageRegions.append(contentsOf: imageRegions)
 
             DispatchQueue.main.async {
                 let percent = 50 + (Double(pageNumber) / Double(pageCount)) * 50
                 self.ocrProgressPercent = percent
-                self.ocrStatus = "AppleVision writing page \(pageNumber): \(pageNumber)/\(pageCount) (\(Int(percent))%)"
+                self.ocrStatus = "AppleVision preparing page \(pageNumber): \(pageNumber)/\(pageCount) (\(Int(percent))%)"
             }
         }
 
-        let fullText = applyMarkdownTitle(documentTitle, to: buildContinuousParagraphs(from: allPageLines), replaceExistingHeading: true)
+        mergePageBoundaryContinuations(in: &pageMarkdownItems)
+
+        for pageMarkdown in pageMarkdownItems {
+            let pageURL = mdFolder.appendingPathComponent("page\(pageMarkdown.pageNumber).md")
+            try pageMarkdown.text.write(to: pageURL, atomically: true, encoding: .utf8)
+        }
+
+        let fullText = applyMarkdownTitle(documentTitle, to: buildMarkdownPage(from: allPageLines, imageRegions: allPageImageRegions), replaceExistingHeading: true)
 
         return (mdFolder.path, pageCount, fullText.count, removedLines)
     }
@@ -1279,6 +1354,200 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func detectImageRegions(
+        in image: CGImage,
+        textLines: [OCRLine],
+        pageNumber: Int,
+        outputFolder: URL
+    ) throws -> [OCRImageRegion] {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return [] }
+
+        guard let dataProvider = image.dataProvider,
+              let data = dataProvider.data,
+              let bytes = CFDataGetBytePtr(data) else {
+            return []
+        }
+
+        let bytesPerRow = image.bytesPerRow
+        let bitsPerPixel = image.bitsPerPixel
+        let bytesPerPixel = max(1, bitsPerPixel / 8)
+        guard bytesPerPixel >= 3 else { return [] }
+
+        let cellSize = max(8, min(width, height) / 160)
+        let gridWidth = max(1, Int(ceil(Double(width) / Double(cellSize))))
+        let gridHeight = max(1, Int(ceil(Double(height) / Double(cellSize))))
+        var active = Array(repeating: false, count: gridWidth * gridHeight)
+
+        func isTextMasked(pixelX: Int, pixelY: Int) -> Bool {
+            let normalizedX = CGFloat(pixelX) / CGFloat(width)
+            let normalizedY = 1 - (CGFloat(pixelY) / CGFloat(height))
+            return textLines.contains { line in
+                let horizontalPadding = max(0.006, line.width * 0.10)
+                let verticalPadding = max(0.006, line.height * 0.80)
+                return normalizedX >= line.left - horizontalPadding
+                    && normalizedX <= line.right + horizontalPadding
+                    && normalizedY >= line.bottom - verticalPadding
+                    && normalizedY <= line.top + verticalPadding
+            }
+        }
+
+        for gridY in 0..<gridHeight {
+            for gridX in 0..<gridWidth {
+                let startX = gridX * cellSize
+                let startY = gridY * cellSize
+                let endX = min(width, startX + cellSize)
+                let endY = min(height, startY + cellSize)
+                var sampleCount = 0
+                var visualCount = 0
+                var darkLineCount = 0
+                let stride = max(2, cellSize / 4)
+
+                var y = startY
+                while y < endY {
+                    var x = startX
+                    while x < endX {
+                        sampleCount += 1
+                        if !isTextMasked(pixelX: x, pixelY: y) {
+                            let offset = y * bytesPerRow + x * bytesPerPixel
+                            let red = Int(bytes[offset])
+                            let green = Int(bytes[offset + 1])
+                            let blue = Int(bytes[offset + 2])
+                            let brightness = (red + green + blue) / 3
+                            let channelSpread = max(red, green, blue) - min(red, green, blue)
+                            if brightness < 238 || channelSpread > 22 {
+                                visualCount += 1
+                            }
+                            if brightness < 180 {
+                                darkLineCount += 1
+                            }
+                        }
+                        x += stride
+                    }
+                    y += stride
+                }
+
+                if sampleCount > 0 {
+                    let visualRatio = Double(visualCount) / Double(sampleCount)
+                    let darkLineRatio = Double(darkLineCount) / Double(sampleCount)
+                    if visualRatio >= 0.18 || darkLineRatio >= 0.08 {
+                        active[gridY * gridWidth + gridX] = true
+                    }
+                }
+            }
+        }
+
+        var visited = Array(repeating: false, count: active.count)
+        var regions: [CGRect] = []
+
+        for startIndex in active.indices where active[startIndex] && !visited[startIndex] {
+            var queue = [startIndex]
+            visited[startIndex] = true
+            var minX = startIndex % gridWidth
+            var maxX = minX
+            var minY = startIndex / gridWidth
+            var maxY = minY
+            var activeCellCount = 0
+
+            while let index = queue.popLast() {
+                activeCellCount += 1
+                let x = index % gridWidth
+                let y = index / gridWidth
+                minX = min(minX, x)
+                maxX = max(maxX, x)
+                minY = min(minY, y)
+                maxY = max(maxY, y)
+
+                for (nextX, nextY) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                    guard nextX >= 0, nextX < gridWidth, nextY >= 0, nextY < gridHeight else { continue }
+                    let nextIndex = nextY * gridWidth + nextX
+                    if active[nextIndex] && !visited[nextIndex] {
+                        visited[nextIndex] = true
+                        queue.append(nextIndex)
+                    }
+                }
+            }
+
+            let pixelRect = CGRect(
+                x: max(0, minX * cellSize - cellSize),
+                y: max(0, minY * cellSize - cellSize),
+                width: min(width, (maxX + 2) * cellSize) - max(0, minX * cellSize - cellSize),
+                height: min(height, (maxY + 2) * cellSize) - max(0, minY * cellSize - cellSize)
+            )
+            let pageArea = CGFloat(width * height)
+            let regionArea = pixelRect.width * pixelRect.height
+            let isLargeEnough = pixelRect.width >= CGFloat(width) * 0.15
+                && pixelRect.height >= CGFloat(height) * 0.08
+                && regionArea >= pageArea * 0.018
+                && activeCellCount >= 8
+            if isLargeEnough {
+                regions.append(pixelRect)
+            }
+        }
+
+        let mergedRegions = mergeOverlappingPixelRegions(regions)
+        guard !mergedRegions.isEmpty else { return [] }
+
+        let imagesFolder = outputFolder.appendingPathComponent("Images", isDirectory: true)
+        try FileManager.default.createDirectory(at: imagesFolder, withIntermediateDirectories: true)
+
+        return try mergedRegions.enumerated().compactMap { index, pixelRect in
+            let cropRect = CGRect(
+                x: max(0, floor(pixelRect.minX)),
+                y: max(0, floor(pixelRect.minY)),
+                width: min(CGFloat(width) - floor(pixelRect.minX), ceil(pixelRect.width)),
+                height: min(CGFloat(height) - floor(pixelRect.minY), ceil(pixelRect.height))
+            )
+            guard cropRect.width > 1, cropRect.height > 1,
+                  let croppedImage = image.cropping(to: cropRect) else {
+                return nil
+            }
+
+            let fileName = "page\(pageNumber)-image\(index + 1).png"
+            let imageURL = imagesFolder.appendingPathComponent(fileName)
+            try writePNG(croppedImage, to: imageURL)
+
+            let left = cropRect.minX / CGFloat(width)
+            let right = cropRect.maxX / CGFloat(width)
+            let top = 1 - (cropRect.minY / CGFloat(height))
+            let bottom = 1 - (cropRect.maxY / CGFloat(height))
+            return OCRImageRegion(
+                markdown: "![Page \(pageNumber) image \(index + 1)](Images/\(fileName))",
+                imageURL: imageURL,
+                left: left,
+                right: right,
+                bottom: bottom,
+                top: top
+            )
+        }
+    }
+
+    private func mergeOverlappingPixelRegions(_ regions: [CGRect]) -> [CGRect] {
+        var merged: [CGRect] = []
+        for region in regions.sorted(by: { $0.minY < $1.minY }) {
+            if let index = merged.firstIndex(where: { $0.intersects(region) || $0.insetBy(dx: -16, dy: -16).intersects(region) }) {
+                merged[index] = merged[index].union(region)
+            } else {
+                merged.append(region)
+            }
+        }
+        return merged.sorted {
+            if abs($0.minY - $1.minY) > 12 {
+                return $0.minY < $1.minY
+            }
+            return $0.minX < $1.minX
+        }
+    }
+
+    private func writePNG(_ image: CGImage, to url: URL) throws {
+        let representation = NSBitmapImageRep(cgImage: image)
+        guard let data = representation.representation(using: .png, properties: [:]) else {
+            throw NSError(domain: "NewOCR", code: 6, userInfo: [NSLocalizedDescriptionKey: "Could not encode image: \(url.path)"])
+        }
+        try data.write(to: url, options: .atomic)
+    }
+
     private func parseLineCount(_ value: String, defaultValue: Int) -> Int {
         guard let count = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             return defaultValue
@@ -1326,7 +1595,7 @@ final class AppState: ObservableObject {
     }
 
     private func shouldAutoRemoveHeaderFooterLine(_ line: OCRLine, repeatedHeaderFooterKeys: Set<String>) -> Bool {
-        if isPageNumberLine(line.text) {
+        if isBottomPageNumberLine(line) {
             return true
         }
         guard isPlausibleHeaderFooterText(line.text) else {
@@ -1351,6 +1620,10 @@ final class AppState: ObservableObject {
         let digits = normalized.filter { $0.isNumber }
         let letters = normalized.filter { $0.isLetter }
         return !digits.isEmpty && letters.isEmpty && normalized.count <= 6
+    }
+
+    private func isBottomPageNumberLine(_ line: OCRLine) -> Bool {
+        isPageNumberLine(line.text) && line.bottom < 0.50
     }
 
     private func normalizedHeaderFooterKey(_ text: String) -> String? {
@@ -1485,7 +1758,7 @@ final class AppState: ObservableObject {
     }
 
     private func isLikelySmallHeaderFooterLine(_ line: OCRLine, bodyHeight: CGFloat) -> Bool {
-        if isPageNumberLine(line.text) {
+        if isBottomPageNumberLine(line) {
             return true
         }
         return line.height <= bodyHeight * 0.82
@@ -1534,7 +1807,11 @@ final class AppState: ObservableObject {
                 normalWidth: normalWidth,
                 blockCenter: blockCenter,
                 averageHeight: averageHeight
-            ) || isChapterNumberHeadingLine(
+            ) {
+                return line.text
+            }
+
+            if isChapterNumberHeadingLine(
                 line,
                 index: index,
                 lines: lines,
@@ -1688,6 +1965,198 @@ final class AppState: ObservableObject {
             .appendingPathComponent("header-footer-review.txt")
     }
 
+    private enum OCRMarkdownBlock {
+        case text(OCRLine)
+        case image(OCRImageRegion)
+
+        var top: CGFloat {
+            switch self {
+            case .text(let line):
+                return line.top
+            case .image(let imageRegion):
+                return imageRegion.top
+            }
+        }
+
+        var left: CGFloat {
+            switch self {
+            case .text(let line):
+                return line.left
+            case .image(let imageRegion):
+                return imageRegion.left
+            }
+        }
+    }
+
+    private func buildMarkdownPage(from lines: [OCRLine], imageRegions: [OCRImageRegion]) -> String {
+        if imageRegions.isEmpty {
+            return buildContinuousParagraphs(from: lines)
+        }
+
+        var blocks: [OCRMarkdownBlock] = lines.map { .text($0) } + imageRegions.map { .image($0) }
+        blocks.sort {
+            if abs($0.top - $1.top) > 0.01 {
+                return $0.top > $1.top
+            }
+            return $0.left < $1.left
+        }
+
+        var rendered: [String] = []
+        var pendingTextLines: [OCRLine] = []
+
+        func flushText() {
+            let text = buildContinuousParagraphs(from: pendingTextLines)
+            if !text.isEmpty {
+                rendered.append(text)
+            }
+            pendingTextLines.removeAll()
+        }
+
+        for block in blocks {
+            switch block {
+            case .text(let line):
+                pendingTextLines.append(line)
+            case .image(let imageRegion):
+                flushText()
+                rendered.append(imageRegion.markdown)
+            }
+        }
+        flushText()
+
+        return rendered.joined(separator: "\n\n")
+    }
+
+    private func normalizedOverlapArea(_ line: OCRLine, _ imageRegion: OCRImageRegion) -> CGFloat {
+        let left = max(line.left, imageRegion.left)
+        let right = min(line.right, imageRegion.right)
+        let bottom = max(line.bottom, imageRegion.bottom)
+        let top = min(line.top, imageRegion.top)
+        guard right > left, top > bottom else { return 0 }
+        let overlap = (right - left) * (top - bottom)
+        let lineArea = max(0.0001, line.width * line.height)
+        return overlap / lineArea
+    }
+
+    private func firstTextLineContinuesPreviousPage(_ lines: [OCRLine]) -> Bool {
+        guard let firstLine = lines.first else { return false }
+        let normalLeft = lines.map(\.left).min() ?? firstLine.left
+        let normalRight = lines.map(\.right).max() ?? firstLine.right
+        let normalWidth = max(0.0001, normalRight - normalLeft)
+        let blockCenter = (normalLeft + normalRight) / 2
+        let averageHeight = lines.map(\.height).reduce(0, +) / CGFloat(max(1, lines.count))
+        let indentThreshold = max(0.025, normalWidth * 0.08)
+
+        if isHeadingLine(firstLine, index: 0, lines: lines, normalWidth: normalWidth, blockCenter: blockCenter, averageHeight: averageHeight)
+            || isChapterNumberHeadingLine(firstLine, index: 0, lines: lines, normalWidth: normalWidth, blockCenter: blockCenter, averageHeight: averageHeight) {
+            return false
+        }
+
+        return (firstLine.left - normalLeft) < indentThreshold
+    }
+
+    private func lastTextLineCanContinueNextPage(_ lines: [OCRLine]) -> Bool {
+        guard let lastLine = lines.last else { return false }
+        let normalLeft = lines.map(\.left).min() ?? lastLine.left
+        let normalRight = lines.map(\.right).max() ?? lastLine.right
+        let normalWidth = max(0.0001, normalRight - normalLeft)
+        let blockCenter = (normalLeft + normalRight) / 2
+        let averageHeight = lines.map(\.height).reduce(0, +) / CGFloat(max(1, lines.count))
+        let rightEdgeThreshold = max(0.025, normalWidth * 0.08)
+
+        if isHeadingLine(lastLine, index: max(0, lines.count - 1), lines: lines, normalWidth: normalWidth, blockCenter: blockCenter, averageHeight: averageHeight)
+            || isChapterNumberHeadingLine(lastLine, index: max(0, lines.count - 1), lines: lines, normalWidth: normalWidth, blockCenter: blockCenter, averageHeight: averageHeight) {
+            return false
+        }
+
+        return (normalRight - lastLine.right) <= rightEdgeThreshold
+    }
+
+    private func mergePageBoundaryContinuations(in pages: inout [OCRPageMarkdown]) {
+        guard pages.count > 1 else { return }
+
+        for index in 1..<pages.count {
+            guard pages[index - 1].lastTextLineCanContinueNextPage,
+                  pages[index].firstTextLineContinuesPreviousPage else {
+                continue
+            }
+            let previousLast = lastMarkdownParagraph(in: pages[index - 1].text)
+            let currentFirst = firstMarkdownParagraph(in: pages[index].text)
+            guard let previousLast,
+                  let currentFirst,
+                  canMergePageBoundaryParagraph(previousLast, currentFirst) else {
+                continue
+            }
+
+            pages[index - 1].text = replacingLastMarkdownParagraph(
+                in: pages[index - 1].text,
+                with: joinContinuousLine(previousLast, currentFirst)
+            )
+            pages[index].text = removingFirstMarkdownParagraph(from: pages[index].text)
+        }
+    }
+
+    private func canMergePageBoundaryParagraph(_ previous: String, _ current: String) -> Bool {
+        let previous = previous.trimmingCharacters(in: .whitespacesAndNewlines)
+        let current = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !previous.isEmpty, !current.isEmpty else { return false }
+        guard !previous.hasPrefix("#"), !previous.hasPrefix("!["),
+              !current.hasPrefix("#"), !current.hasPrefix("![") else {
+            return false
+        }
+        return true
+    }
+
+    private func markdownParagraphsWithRanges(in text: String) -> [(text: String, range: Range<String.Index>)] {
+        var result: [(String, Range<String.Index>)] = []
+        var start: String.Index?
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            let lineEnd = text[index...].firstIndex(of: "\n") ?? text.endIndex
+            let nextIndex = lineEnd == text.endIndex ? text.endIndex : text.index(after: lineEnd)
+            let line = String(text[index..<lineEnd])
+
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if let paragraphStart = start {
+                    result.append((String(text[paragraphStart..<index]).trimmingCharacters(in: .whitespacesAndNewlines), paragraphStart..<index))
+                    start = nil
+                }
+            } else if start == nil {
+                start = index
+            }
+
+            index = nextIndex
+        }
+
+        if let paragraphStart = start {
+            result.append((String(text[paragraphStart..<text.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines), paragraphStart..<text.endIndex))
+        }
+
+        return result
+    }
+
+    private func firstMarkdownParagraph(in text: String) -> String? {
+        markdownParagraphsWithRanges(in: text).first?.text
+    }
+
+    private func lastMarkdownParagraph(in text: String) -> String? {
+        markdownParagraphsWithRanges(in: text).last?.text
+    }
+
+    private func replacingLastMarkdownParagraph(in text: String, with replacement: String) -> String {
+        guard let last = markdownParagraphsWithRanges(in: text).last else { return text }
+        var updated = text
+        updated.replaceSubrange(last.range, with: replacement)
+        return updated.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func removingFirstMarkdownParagraph(from text: String) -> String {
+        guard let first = markdownParagraphsWithRanges(in: text).first else { return text }
+        var updated = text
+        updated.removeSubrange(first.range)
+        return updated.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func buildContinuousParagraphs(from lines: [OCRLine]) -> String {
         guard !lines.isEmpty else { return "" }
 
@@ -1711,7 +2180,24 @@ final class AppState: ObservableObject {
                 normalWidth: normalWidth,
                 blockCenter: blockCenter,
                 averageHeight: averageHeight
-            ) || isChapterNumberHeadingLine(
+            ) {
+                if !current.isEmpty {
+                    paragraphs.append(current)
+                    current = ""
+                }
+                paragraphs.append("# \(line.text)")
+                previousLine = nil
+                centeredBodyMode = isCenteredBodyPage(
+                    lines: Array(lines.dropFirst(index + 1)),
+                    normalLeft: normalLeft,
+                    normalWidth: normalWidth,
+                    blockCenter: blockCenter,
+                    indentThreshold: indentThreshold
+                )
+                continue
+            }
+
+            if isChapterNumberHeadingLine(
                 line,
                 index: index,
                 lines: lines,
@@ -1771,6 +2257,12 @@ final class AppState: ObservableObject {
 
         var lines = trimmedMarkdown.components(separatedBy: .newlines)
         let firstLine = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if replaceExistingHeading,
+           firstLine.hasPrefix("#"),
+           isNumericMarkdownTitle(cleanTitle) {
+            return trimmedMarkdown
+        }
+
         if replaceExistingHeading, firstLine.hasPrefix("#") {
             lines[0] = heading
             return lines.joined(separator: "\n")
@@ -1789,6 +2281,14 @@ final class AppState: ObservableObject {
             cleanTitle.removeFirst()
         }
         return cleanTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isNumericMarkdownTitle(_ title: String) -> Bool {
+        let normalized = title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .map { thaiDigitValue($0).map(String.init) ?? String($0) }
+            .joined()
+        return !normalized.isEmpty && normalized.allSatisfy { $0.isNumber }
     }
 
     private func isCenteredBodyPage(
@@ -1828,9 +2328,27 @@ final class AppState: ObservableObject {
         let isShort = line.width <= normalWidth * 0.65
         let isCentered = abs(line.centerX - blockCenter) <= max(0.04, normalWidth * 0.12)
         let nextLine = lines.indices.contains(index + 1) ? lines[index + 1] : nil
+        let previousLine = lines.indices.contains(index - 1) ? lines[index - 1] : nil
+        let followsChapterNumber = previousLine.map {
+            isChapterNumberHeadingLine(
+                $0,
+                index: index - 1,
+                lines: lines,
+                normalWidth: normalWidth,
+                blockCenter: blockCenter,
+                averageHeight: averageHeight
+            )
+        } ?? false
+        let followsCenteredTitleLine = previousLine.map {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !isPageNumberLine($0.text)
+                && $0.width <= normalWidth * 0.65
+                && abs($0.centerX - blockCenter) <= max(0.04, normalWidth * 0.12)
+                && $0.bottom >= 0.42
+        } ?? false
         let hasLargeGapBelow = nextLine.map { (line.bottom - $0.top) >= max(averageHeight * 1.8, 0.035) } ?? true
 
-        return isNearTop && isShort && isCentered && (index == 0 || hasLargeGapBelow)
+        return isNearTop && isShort && isCentered && (index == 0 || hasLargeGapBelow || followsChapterNumber || followsCenteredTitleLine)
     }
 
     private func isChapterNumberHeadingLine(
@@ -1855,7 +2373,7 @@ final class AppState: ObservableObject {
             return false
         }
 
-        let isContentZone = line.top < 0.86 && line.bottom > 0.18
+        let isContentZone = line.top < 0.94 && line.bottom > 0.18
         let isShort = line.width <= max(normalWidth * 0.22, 0.08)
         let isCentered = abs(line.centerX - blockCenter) <= max(0.04, normalWidth * 0.12)
         let nextLine = lines.indices.contains(index + 1) ? lines[index + 1] : nil
@@ -2008,6 +2526,8 @@ final class AppState: ObservableObject {
         let values = readKeyValueConfig(from: configFileURL)
         pdfListMinHeight = CGFloat(parseDouble(values["PDF_LIST_MIN_HEIGHT"], defaultValue: 420, minimum: 200))
         ocrParagraphTextAreaMinHeight = CGFloat(parseDouble(values["OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT"], defaultValue: 58, minimum: 40))
+        ocrWindowWidth = CGFloat(parseDouble(values["OCR_WINDOW_WIDTH"], defaultValue: 820, minimum: 640))
+        ocrWindowHeight = CGFloat(parseDouble(values["OCR_WINDOW_HEIGHT"], defaultValue: 620, minimum: 480))
     }
 
     private func readKeyValueConfig(from url: URL) -> [String: String] {
@@ -2040,6 +2560,8 @@ final class AppState: ObservableObject {
     private func defaultConfigText() -> String {
         """
         PDF_LIST_MIN_HEIGHT=420
+        OCR_WINDOW_WIDTH=820
+        OCR_WINDOW_HEIGHT=620
         OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
 
         """
@@ -2255,6 +2777,13 @@ struct ConfigEditorView: View {
 
                 Spacer()
 
+                if !appState.isHeaderFooterReviewOpen {
+                    Button("Save") {
+                        appState.saveConfigFile()
+                    }
+                    .keyboardShortcut("s", modifiers: [.command])
+                }
+
                 Button("Close") {
                     dismiss()
                 }
@@ -2286,13 +2815,6 @@ struct ConfigEditorView: View {
                     .truncationMode(.middle)
 
                 Spacer()
-
-                if !appState.isHeaderFooterReviewOpen {
-                    Button("Save Config") {
-                        appState.saveConfigFile()
-                    }
-                    .keyboardShortcut("s", modifiers: [.command])
-                }
             }
         }
         .padding(20)
@@ -2355,10 +2877,17 @@ struct PDFListView: View {
                                 .foregroundStyle(.green)
                         }
 
-                        Text(item.fileName)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            NSWorkspace.shared.open(item.url)
+                        } label: {
+                            Text(item.fileName)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.link)
+                        .help("Open PDF")
 
                         Text("Title")
                             .font(.subheadline.weight(.semibold))
@@ -2418,6 +2947,7 @@ struct EmptyStateView: View {
 struct StepTwoOCRView: View {
     @EnvironmentObject private var appState: AppState
     @State private var isFilesPopoverPresented = false
+    @State private var isMarkdownInfoPopoverPresented = false
     @State private var isReplacePopoverPresented = false
     @State private var replacementText = ""
 
@@ -2433,62 +2963,24 @@ struct StepTwoOCRView: View {
 
                     Spacer()
 
+                    Button {
+                        isMarkdownInfoPopoverPresented.toggle()
+                    } label: {
+                        Image(systemName: "info.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .help("Show Markdown syntax")
+                    .accessibilityLabel("Show Markdown syntax")
+                    .popover(isPresented: $isMarkdownInfoPopoverPresented) {
+                        MarkdownSyntaxPopoverView()
+                    }
+
                     Button("Close Window") {
                         NSApp.keyWindow?.close()
                     }
                     .controlSize(.large)
-                }
-
-                HStack(alignment: .top, spacing: 14) {
-                    Button("Files") {
-                        isFilesPopoverPresented.toggle()
-                    }
-                    .controlSize(.large)
-                    .popover(isPresented: $isFilesPopoverPresented) {
-                        FilesPopoverView()
-                            .environmentObject(appState)
-                    }
-
-                    Spacer()
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 12) {
-                        Text("Ready for OCR: \(appState.selectedPDFName)")
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    HStack(spacing: 10) {
-                        Button(appState.isOCRRunning ? "Processing..." : "Run OCR") {
-                            appState.sendSelectedPDFToOCREngine()
-                        }
-                        .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty)
-
-                        Button("Load Markdown") {
-                            appState.loadExistingMarkdownAsync()
-                        }
-                        .disabled(appState.isOCRRunning || appState.localAppleVisionOutputFolderPathIfExists == nil)
-
-                        Spacer()
-                    }
-                }
-
-                if appState.isOCRRunning {
-                    HStack(spacing: 10) {
-                        ProgressView(value: appState.ocrProgressPercent ?? 0, total: 100)
-                            .frame(maxWidth: .infinity)
-                        Text("\(Int(appState.ocrProgressPercent ?? 0))%")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 42, alignment: .trailing)
-                        Button(appState.isOCRCancelling ? "Cancelling..." : "Cancel") {
-                            appState.cancelOCR()
-                        }
-                        .disabled(appState.isOCRCancelling)
-                    }
                 }
 
                 HStack(alignment: .top, spacing: 14) {
@@ -2583,34 +3075,154 @@ struct StepTwoOCRView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Log")
-                            .font(.headline)
+                    VStack(alignment: .leading, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Log")
+                                .font(.headline)
 
-                        HStack(spacing: 10) {
-                            if appState.isOCRRunning {
-                                ProgressView()
-                                    .controlSize(.small)
+                            HStack(spacing: 10) {
+                                if appState.isOCRRunning {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+
+                                Text(appState.ocrStatus)
+                                    .font(.caption)
+                                    .foregroundStyle(appState.isOCRRunning ? .secondary : .primary)
+                                    .lineLimit(2)
                             }
 
-                            Text(appState.ocrStatus)
-                                .foregroundStyle(appState.isOCRRunning ? .secondary : .primary)
+                            TextEditor(text: $appState.logOutput)
+                                .font(.body.monospaced())
+                                .frame(height: 220)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                                )
                         }
 
-                        TextEditor(text: $appState.logOutput)
-                            .font(.body.monospaced())
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                            )
+                        VStack(alignment: .leading, spacing: 10) {
+                            Button("Files") {
+                                isFilesPopoverPresented.toggle()
+                            }
+                            .controlSize(.large)
+                            .popover(isPresented: $isFilesPopoverPresented) {
+                                FilesPopoverView()
+                                    .environmentObject(appState)
+                            }
+
+                            Text("Ready for OCR")
+                                .font(.headline)
+
+                            Button {
+                                if !appState.selectedPDFPath.isEmpty {
+                                    NSWorkspace.shared.open(URL(fileURLWithPath: appState.selectedPDFPath))
+                                }
+                            } label: {
+                                Text(appState.selectedPDFName)
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.link)
+                            .help("Open PDF")
+                            .disabled(appState.selectedPDFPath.isEmpty)
+
+                            HStack(spacing: 10) {
+                                Button(appState.isOCRRunning ? "Processing..." : "Run OCR") {
+                                    appState.sendSelectedPDFToOCREngine()
+                                }
+                                .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty)
+
+                                Button("Load Markdown") {
+                                    appState.loadExistingMarkdownAsync()
+                                }
+                                .disabled(appState.isOCRRunning || appState.localAppleVisionOutputFolderPathIfExists == nil)
+                            }
+
+                            if appState.isOCRRunning {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack(spacing: 8) {
+                                        ProgressView(value: appState.ocrProgressPercent ?? 0, total: 100)
+                                            .frame(maxWidth: .infinity)
+                                        Text("\(Int(appState.ocrProgressPercent ?? 0))%")
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 42, alignment: .trailing)
+                                    }
+
+                                    Button(appState.isOCRCancelling ? "Cancelling..." : "Cancel") {
+                                        appState.cancelOCR()
+                                    }
+                                    .disabled(appState.isOCRCancelling)
+                                }
+                            }
+                        }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .frame(minWidth: 320, idealWidth: 320, maxWidth: 320, alignment: .topLeading)
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .padding(22)
+    }
+}
+
+struct MarkdownSyntaxPopoverView: View {
+    private let examples: [(syntax: String, result: String)] = [
+        ("# Chapter title", "Heading 1"),
+        ("## Section title", "Heading 2"),
+        ("### Subsection title", "Heading 3"),
+        ("A blank line", "Starts a new paragraph"),
+        ("**bold text**", "Bold text"),
+        ("*italic text*", "Italic text"),
+        ("![Alt text](Images/example.png)", "Image")
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.accentColor)
+                Text("Markdown (.md) Syntax")
+                    .font(.headline)
+            }
+
+            Text("The OCR editor saves Markdown text. EPUB export currently supports these common forms:")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                GridRow {
+                    Text("Type")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text("Meaning")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                ForEach(examples, id: \.syntax) { example in
+                    GridRow {
+                        Text(example.syntax)
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                        Text(example.result)
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+
+            Text("Image paths are relative to the Markdown folder. Other Markdown characters stay as normal text unless the converter supports them later.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 430, alignment: .leading)
     }
 }
 
@@ -2852,19 +3464,69 @@ struct ParagraphItemView: View {
                 .fixedSize()
             }
 
-            HighlightingTextEditor(
-                text: $text,
-                searchText: appState.ocrSearchText
-            )
-                .frame(minHeight: appState.ocrParagraphTextAreaMinHeight)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            if let imageURL = appState.markdownImageURL(from: text) {
+                OCRMarkdownImagePreview(imageURL: imageURL, markdownText: text)
+            } else {
+                HighlightingTextEditor(
+                    text: $text,
+                    searchText: appState.ocrSearchText
                 )
+                    .frame(minHeight: appState.ocrParagraphTextAreaMinHeight)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    )
+            }
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct OCRMarkdownImagePreview: View {
+    let imageURL: URL
+    let markdownText: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let image = NSImage(contentsOf: imageURL) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: 360, alignment: .leading)
+                    .padding(8)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    )
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "photo")
+                        .foregroundStyle(.secondary)
+                    Text("Image file not found")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+            }
+
+            Text(markdownText)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
     }
 }
 
