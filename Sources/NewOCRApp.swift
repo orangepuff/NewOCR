@@ -2651,6 +2651,12 @@ struct StepOneLoadPDFView: View {
                         .controlSize(.large)
                         .keyboardShortcut("o", modifiers: [.command])
 
+                        Text(appState.selectedFolderPath.isEmpty ? "No folder selected yet" : appState.selectedFolderPath)
+                            .foregroundStyle(appState.selectedFolderPath.isEmpty ? .secondary : .primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(minWidth: 220, maxWidth: 520, alignment: .leading)
+
                         Button("Refresh") {
                             appState.reloadSelectedFolder()
                         }
@@ -2682,43 +2688,49 @@ struct StepOneLoadPDFView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("EPUB Covers")
-                        .font(.headline)
-
                     HStack(spacing: 10) {
-                        Button("Front Cover") {
-                            appState.chooseFrontCoverImage()
-                        }
+                        Text("EPUB Covers")
+                            .font(.headline)
 
-                        Text(appState.frontCoverImagePath.isEmpty ? "No front cover selected" : appState.frontCoverImagePath)
-                            .foregroundStyle(appState.frontCoverImagePath.isEmpty ? .secondary : .primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                        Spacer()
 
-                    HStack(spacing: 10) {
-                        Button("Back Cover") {
-                            appState.chooseBackCoverImage()
-                        }
+                        Text("\(appState.markdownChapterCount) Markdown chapters")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
 
-                        Text(appState.backCoverImagePath.isEmpty ? "No back cover selected" : appState.backCoverImagePath)
-                            .foregroundStyle(appState.backCoverImagePath.isEmpty ? .secondary : .primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    HStack(spacing: 10) {
                         Button(appState.isOCRRunning ? "Building EPUB..." : "Build EPUB") {
                             appState.buildBookEPUB()
                         }
                         .controlSize(.large)
                         .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
+                    }
 
-                        Text("\(appState.markdownChapterCount) Markdown chapters")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    HStack(spacing: 18) {
+                        HStack(spacing: 10) {
+                            Button("Front Cover") {
+                                appState.chooseFrontCoverImage()
+                            }
+
+                            Text(appState.frontCoverImagePath.isEmpty ? "No front cover selected" : appState.frontCoverImagePath)
+                                .foregroundStyle(appState.frontCoverImagePath.isEmpty ? .secondary : .primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        HStack(spacing: 10) {
+                            Button("Back Cover") {
+                                appState.chooseBackCoverImage()
+                            }
+
+                            Text(appState.backCoverImagePath.isEmpty ? "No back cover selected" : appState.backCoverImagePath)
+                                .foregroundStyle(appState.backCoverImagePath.isEmpty ? .secondary : .primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     if !appState.epubStatus.isEmpty {
@@ -2730,25 +2742,6 @@ struct StepOneLoadPDFView: View {
                 .padding(12)
                 .background(Color(nsColor: .controlBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Selected Folder")
-                            .font(.headline)
-
-                        HStack(spacing: 10) {
-                            Text(appState.selectedFolderPath.isEmpty ? "No folder selected yet" : appState.selectedFolderPath)
-                                .foregroundStyle(appState.selectedFolderPath.isEmpty ? .secondary : .primary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(12)
-                        .background(Color(nsColor: .controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
