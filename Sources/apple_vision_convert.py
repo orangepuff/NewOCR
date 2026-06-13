@@ -298,6 +298,15 @@ def markdown_blockquote_lines(lines, start_index):
     return quote_lines, next_index
 
 
+def markdown_aligned_paragraph_parts(stripped):
+    match = re.match(r"(?is)^<p\s+class\s*=\s*['\"](left|right|center)['\"]\s*>(.*?)</p>$", stripped)
+    if not match:
+        return None
+    alignment = match.group(1).lower()
+    content = match.group(2).strip()
+    return (alignment, content) if content else None
+
+
 def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=None, image_prefix=""):
     text, footnote_definitions = extract_markdown_footnotes(text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -351,6 +360,15 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
             if quote_text:
                 body_parts.append(f'<blockquote class="blockquote"><p>{quote_text}</p></blockquote>')
             index = next_index
+            continue
+
+        aligned_parts = markdown_aligned_paragraph_parts(stripped)
+        if aligned_parts:
+            flush_paragraph()
+            alignment, content = aligned_parts
+            aligned_text = content.replace("\n", "<br/>")
+            body_parts.append(f'<p class="{alignment}">{markdown_inline_to_html(aligned_text, footnote_state)}</p>')
+            index += 1
             continue
 
         heading_parts = markdown_heading_parts(stripped)

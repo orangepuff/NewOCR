@@ -1485,11 +1485,13 @@ final class AppState: ObservableObject {
             let imageResult = upsertingImagePageStyles(in: existingCSS)
             let footnoteResult = upsertingFootnoteStyles(in: imageResult.css)
             let blockquoteResult = upsertingBlockquoteStyles(in: footnoteResult.css)
-            let updatedCSS = blockquoteResult.css
+            let alignmentResult = upsertingAlignmentStyles(in: blockquoteResult.css)
+            let updatedCSS = alignmentResult.css
             let progressLines = [
                 "Image CSS: \(imageResult.status)",
                 "Footnote CSS: \(footnoteResult.status)",
                 "Blockquote CSS: \(blockquoteResult.status)",
+                "Alignment CSS: \(alignmentResult.status)",
             ]
             if updatedCSS == existingCSS {
                 epubStatus = "CSS already up to date."
@@ -1591,6 +1593,28 @@ final class AppState: ObservableObject {
             #"(?s)\n*\.blockquote\s*\{.*?\}\s*"#,
             #"(?s)\n*blockquote\s*\{.*?\}\s*"#,
             #"(?s)\n*blockquote\s+p\s*\{.*?\}\s*"#,
+        ] {
+            cleanedCSS = cleanedCSS.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
+        }
+
+        let status = cleanedCSS == css ? "added" : "replaced legacy rules"
+        return (cleanedCSS.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + block + "\n", status)
+    }
+
+    private func upsertingAlignmentStyles(in css: String) -> (css: String, status: String) {
+        let block = alignmentStylesheetBlock.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markerPattern = #"(?s)/\* NewOCR alignment stylesheet: begin \*/.*?/\* NewOCR alignment stylesheet: end \*/"#
+
+        if css.range(of: markerPattern, options: .regularExpression) != nil {
+            let updatedCSS = css.replacingOccurrences(of: markerPattern, with: block, options: .regularExpression)
+            return (updatedCSS, updatedCSS == css ? "already up to date" : "replaced")
+        }
+
+        var cleanedCSS = css
+        for pattern in [
+            #"(?s)\n*\.center\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.right\s*\{.*?\}\s*"#,
+            #"(?s)\n*\.left\s*\{.*?\}\s*"#,
         ] {
             cleanedCSS = cleanedCSS.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
         }
@@ -1702,6 +1726,27 @@ final class AppState: ObservableObject {
         """
     }
 
+    private var alignmentStylesheetBlock: String {
+        """
+        /* NewOCR alignment stylesheet: begin */
+        .center {
+          text-align: center;
+          text-indent: 0;
+        }
+
+        .right {
+          text-align: right;
+          text-indent: 0;
+        }
+
+        .left {
+          text-align: left;
+          text-indent: 0;
+        }
+        /* NewOCR alignment stylesheet: end */
+        """
+    }
+
     private func epubPathFromBuilderOutput(_ output: String) -> String? {
         guard let data = output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1787,6 +1832,9 @@ final class AppState: ObservableObject {
         figcaption { margin-top: 0.5em; }
         blockquote, .blockquote { margin: 1em 1.5em; padding: 0.6em 1em; border-left: 3px solid #999; font-style: italic; }
         blockquote p, .blockquote p { margin: 0; text-indent: 0; }
+        .center { text-align: center; text-indent: 0; }
+        .right { text-align: right; text-indent: 0; }
+        .left { text-align: left; text-indent: 0; }
         </style>
         """
         }
@@ -1804,6 +1852,9 @@ final class AppState: ObservableObject {
         figcaption { margin-top: 0.5em; font-size: 0.9em; color: #555; }
         blockquote, .blockquote { margin: 1em 1.5em; padding: 0.6em 1em; border-left: 3px solid #999; font-style: italic; }
         blockquote p, .blockquote p { margin: 0; text-indent: 0; }
+        .center { text-align: center; text-indent: 0; }
+        .right { text-align: right; text-indent: 0; }
+        .left { text-align: left; text-indent: 0; }
         .footnote-ref { font-size: 0.75em; line-height: 0; vertical-align: super; }
         .footnote-ref a { color: inherit; text-decoration: none; }
         .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #d0d0d0; font-size: 0.9em; }
@@ -1835,6 +1886,11 @@ final class AppState: ObservableObject {
 
             if let blockquote = markdownBlockquotePreviewHTML(from: trimmed, usedFootnotes: &usedFootnotes) {
                 parts.append(blockquote)
+                continue
+            }
+
+            if let aligned = markdownAlignedParagraphPreviewHTML(from: trimmed, usedFootnotes: &usedFootnotes) {
+                parts.append(aligned)
                 continue
             }
 
@@ -1885,6 +1941,27 @@ final class AppState: ObservableObject {
         guard !quoteLines.isEmpty else { return nil }
         let quoteHTML = quoteLines.map { markdownInlinePreviewHTML($0, usedFootnotes: &usedFootnotes) }.joined(separator: "<br>")
         return "<blockquote class=\"blockquote\"><p>\(quoteHTML)</p></blockquote>"
+    }
+
+    private func markdownAlignedParagraphPreviewHTML(from text: String, usedFootnotes: inout [String]) -> String? {
+        guard let parsed = markdownAlignedParagraphParts(from: text) else {
+            return nil
+        }
+        let content = parsed.content.replacingOccurrences(of: "\n", with: "<br/>")
+        return "<p class=\"\(parsed.alignment)\">\(markdownInlinePreviewHTML(content, usedFootnotes: &usedFootnotes))</p>"
+    }
+
+    private func markdownAlignedParagraphParts(from text: String) -> (alignment: String, content: String)? {
+        let pattern = #"(?is)^<p\s+class\s*=\s*["'](left|right|center)["']\s*>(.*?)</p>$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)),
+              let alignmentRange = Range(match.range(at: 1), in: text),
+              let contentRange = Range(match.range(at: 2), in: text) else {
+            return nil
+        }
+        let alignment = String(text[alignmentRange]).lowercased()
+        let content = String(text[contentRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return content.isEmpty ? nil : (alignment, content)
     }
 
     private func markdownImagePreviewHTML(from text: String) -> String? {
@@ -5590,7 +5667,10 @@ struct MarkdownSyntaxPopoverView: View {
         ("![Alt text](Images/example.png)", "Image"),
         ("Caption:\\n  Image description", "Image description"),
         ("Text with a note.[^1]", "Footnote marker"),
-        ("[^1]: Footnote text", "Footnote at bottom")
+        ("[^1]: Footnote text", "Footnote at bottom"),
+        ("<p class=\"left\">Text</p>", "Left aligned paragraph"),
+        ("<p class=\"center\">Text</p>", "Center aligned paragraph"),
+        ("<p class=\"right\">Text</p>", "Right aligned paragraph")
     ]
 
     var body: some View {
@@ -5606,6 +5686,18 @@ struct MarkdownSyntaxPopoverView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Highlight commands")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("Select text, then choose LEFT, CENTER, or RIGHT. NewOCR writes the selected paragraph as <p class=\"left\">Text</p>, <p class=\"center\">Text</p>, or <p class=\"right\">Text</p>. Apply CSS adds these classes for Preview and EPUB.")
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             ScrollView {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
@@ -5631,7 +5723,7 @@ struct MarkdownSyntaxPopoverView: View {
             }
             .frame(maxHeight: 280)
 
-            Text("Image paths are relative to the Markdown folder. Put Caption: or Description: directly below an image; following lines stay in the same caption until a blank line. Use > for blockquotes. Footnotes use matching labels, such as [^1] or [^a]. Other Markdown characters stay as normal text unless the converter supports them later.")
+            Text("Image paths are relative to the Markdown folder. Put Caption: or Description: directly below an image; following lines stay in the same caption until a blank line. Use > for blockquotes. Footnotes use matching labels, such as [^1] or [^a]. Alignment classes are supported only on paragraph tags with class left, center, or right.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -5933,7 +6025,7 @@ struct HighlightingTextEditor: NSViewRepresentable {
 
             let popover = NSPopover()
             popover.behavior = .transient
-            popover.contentSize = NSSize(width: 428, height: 42)
+            popover.contentSize = NSSize(width: 690, height: 42)
             popover.contentViewController = NSHostingController(
                 rootView: MarkdownStylePopoverView(
                     applyBold: { [weak self] in self?.applyMarkdownWrapper("**") },
@@ -5941,7 +6033,10 @@ struct HighlightingTextEditor: NSViewRepresentable {
                     applyBlockquote: { [weak self] in self?.applyBlockquote() },
                     applyHeading1: { [weak self] in self?.applyHeading(level: 1) },
                     applyHeading2: { [weak self] in self?.applyHeading(level: 2) },
-                    applyHeading3: { [weak self] in self?.applyHeading(level: 3) }
+                    applyHeading3: { [weak self] in self?.applyHeading(level: 3) },
+                    applyLeft: { [weak self] in self?.applyAlignment("left") },
+                    applyCenter: { [weak self] in self?.applyAlignment("center") },
+                    applyRight: { [weak self] in self?.applyAlignment("right") }
                 )
             )
             markdownPopover = popover
@@ -5999,6 +6094,26 @@ struct HighlightingTextEditor: NSViewRepresentable {
                         return cleanLine.isEmpty ? "" : "\(marker) \(cleanLine) \(marker)"
                     }
                     .joined(separator: "\n")
+            }
+        }
+
+        private func applyAlignment(_ alignment: String) {
+            let cleanAlignment = ["left", "right", "center"].contains(alignment) ? alignment : "left"
+            applyMarkdownTransform { selectedText in
+                selectedText
+                    .components(separatedBy: "\n\n")
+                    .map { block in
+                        let cleanBlock = block
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .replacingOccurrences(
+                                of: #"(?is)^<p\s+class\s*=\s*["'](?:left|right|center)["']\s*>(.*?)</p>$"#,
+                                with: "$1",
+                                options: .regularExpression
+                            )
+                            .replacingOccurrences(of: "\n", with: "<br/>")
+                        return cleanBlock.isEmpty ? "" : "<p class=\"\(cleanAlignment)\">\(cleanBlock)</p>"
+                    }
+                    .joined(separator: "\n\n")
             }
         }
 
@@ -6065,6 +6180,11 @@ struct MarkdownStylePopoverView: View {
     let applyHeading1: () -> Void
     let applyHeading2: () -> Void
     let applyHeading3: () -> Void
+    let applyLeft: () -> Void
+    let applyCenter: () -> Void
+    let applyRight: () -> Void
+    private let commandButtonHeight: CGFloat = 30
+    private let compactCommandButtonWidth: CGFloat = 38
 
     var body: some View {
         HStack(spacing: 8) {
@@ -6073,7 +6193,7 @@ struct MarkdownStylePopoverView: View {
             } label: {
                 Text("B")
                     .font(.body.weight(.bold))
-                    .frame(width: 42)
+                    .frame(width: compactCommandButtonWidth, height: commandButtonHeight)
             }
             .help("Bold")
 
@@ -6082,35 +6202,64 @@ struct MarkdownStylePopoverView: View {
             } label: {
                 Text("I")
                     .font(.body.italic())
-                    .frame(width: 42)
+                    .frame(width: compactCommandButtonWidth, height: commandButtonHeight)
             }
             .help("Italic")
 
-            Button("Quote") {
+            Button {
                 applyBlockquote()
+            } label: {
+                Text("Quote")
+                    .frame(height: commandButtonHeight)
             }
-            .frame(width: 74)
             .help("BlockQuote")
 
-            Button("H1") {
+            Button {
                 applyHeading1()
+            } label: {
+                Text("H1")
+                    .frame(height: commandButtonHeight)
             }
-            .frame(width: 44)
             .help("Heading 1")
 
-            Button("H2") {
+            Button {
                 applyHeading2()
+            } label: {
+                Text("H2")
+                    .frame(height: commandButtonHeight)
             }
-            .frame(width: 44)
             .help("Heading 2")
 
-            Button("H3") {
+            Button {
                 applyHeading3()
+            } label: {
+                Text("H3")
+                    .frame(height: commandButtonHeight)
             }
-            .frame(width: 44)
             .help("Heading 3")
+
+            Divider()
+                .frame(height: 24)
+
+            alignmentButton(title: "Left", systemImage: "text.alignleft", action: applyLeft)
+                .help("Align left")
+
+            alignmentButton(title: "Center", systemImage: "text.aligncenter", action: applyCenter)
+                .help("Align center")
+
+            alignmentButton(title: "Right", systemImage: "text.alignright", action: applyRight)
+                .help("Align right")
         }
         .padding(8)
+    }
+
+    private func alignmentButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: compactCommandButtonWidth, height: commandButtonHeight)
+        }
+        .accessibilityLabel(title)
     }
 }
 

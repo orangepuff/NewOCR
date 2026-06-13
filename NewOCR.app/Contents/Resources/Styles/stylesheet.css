@@ -154,6 +154,11 @@ blockquote p,
   text-indent: 0;
 }
 
+.left {
+  text-align: left;
+  text-indent: 0;
+}
+
 .small {
   font-size: 0.9em;
 }
