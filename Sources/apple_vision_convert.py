@@ -176,6 +176,7 @@ def extract_markdown_footnotes(text):
 
 def markdown_inline_to_html(text, footnote_state=None):
     escaped = html.escape(text)
+    escaped = re.sub(r"&lt;br\s*/?&gt;", "<br/>", escaped, flags=re.IGNORECASE)
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
     escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", escaped)
 
@@ -268,6 +269,29 @@ def image_caption_from_lines(lines, start_index):
     return "\n".join(part for part in caption_parts if part).strip(), next_index
 
 
+def markdown_heading_parts(stripped):
+    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
+    if not match:
+        return None
+    level = min(len(match.group(1)), 6)
+    title = re.sub(r"\s+#{1,6}\s*$", "", match.group(2).strip()).strip()
+    return (level, title) if title else None
+
+
+def markdown_blockquote_lines(lines, start_index):
+    quote_lines = []
+    next_index = start_index
+    while next_index < len(lines):
+        stripped = lines[next_index].strip()
+        if not stripped:
+            break
+        if not stripped.startswith(">"):
+            break
+        quote_lines.append(stripped[1:].strip())
+        next_index += 1
+    return quote_lines, next_index
+
+
 def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=None, image_prefix=""):
     text, footnote_definitions = extract_markdown_footnotes(text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -302,15 +326,36 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
             index = next_index
             continue
 
-        heading_match = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
-        if heading_match:
+        blockquote_lines, next_index = markdown_blockquote_lines(lines, index)
+        if blockquote_lines:
             flush_paragraph()
-            level = min(len(heading_match.group(1)), 6)
-            title = heading_match.group(2).strip()
+            quote_text = "<br/>".join(markdown_inline_to_html(part, footnote_state) for part in blockquote_lines if part)
+            if quote_text:
+                body_parts.append(f'<blockquote class="blockquote"><p>{quote_text}</p></blockquote>')
+            index = next_index
+            continue
+
+        heading_parts = markdown_heading_parts(stripped)
+        if heading_parts:
+            flush_paragraph()
+            level, first_title = heading_parts
+            title_parts = [first_title]
+            next_index = index + 1
+            while next_index < len(lines):
+                next_heading_parts = markdown_heading_parts(lines[next_index].strip())
+                if not next_heading_parts or next_heading_parts[0] != level:
+                    break
+                title_parts.append(next_heading_parts[1])
+                next_index += 1
+            title = "<br/>".join(markdown_inline_to_html(part, footnote_state) for part in title_parts)
+            toc_title = " ".join(re.sub(r"[*_`]+", "", part).strip() for part in title_parts).strip()
             heading_count += 1
-            anchor = slugify_epub_id(title, f"heading-{heading_count}")
-            toc.append({"id": anchor, "title": re.sub(r"[*_`]+", "", title).strip() or fallback_title, "level": level})
-            body_parts.append(f'<h{level} id="{anchor}">{markdown_inline_to_html(title, footnote_state)}</h{level}>')
+            anchor = slugify_epub_id(" ".join(title_parts), f"heading-{heading_count}")
+            if level == 1:
+                toc.append({"id": anchor, "title": toc_title or fallback_title, "level": level})
+            body_parts.append(f'<h{level} id="{anchor}">{title}</h{level}>')
+            index = next_index
+            continue
         else:
             paragraph_lines.append(stripped)
         index += 1

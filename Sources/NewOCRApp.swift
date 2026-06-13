@@ -96,6 +96,7 @@ final class AppState: ObservableObject {
     @Published var selectedFolderPath: String = "" {
         didSet {
             loadPDFFiles()
+            refreshCoverImagePathsForSelectedFolder()
             if !isRestoring {
                 save()
             }
@@ -370,11 +371,14 @@ final class AppState: ObservableObject {
     func reloadSelectedFolder() {
         pdfTitles = [:]
         loadPDFFiles()
+        refreshCoverImagePathsForSelectedFolder()
     }
 
     func clearSelectedFolder() {
         selectedFolderPath = ""
         selectedPDFPath = ""
+        frontCoverImagePath = ""
+        backCoverImagePath = ""
         currentStep = 1
     }
 
@@ -459,6 +463,36 @@ final class AppState: ObservableObject {
             return URL(fileURLWithPath: selectedFolderPath)
         }
         return nil
+    }
+
+    private func refreshCoverImagePathsForSelectedFolder() {
+        guard !selectedFolderPath.isEmpty else {
+            frontCoverImagePath = ""
+            backCoverImagePath = ""
+            return
+        }
+
+        let coverFolderURL = URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("CoverImage", isDirectory: true)
+        frontCoverImagePath = existingCoverImagePath(in: coverFolderURL, stem: "front-cover") ?? ""
+        backCoverImagePath = existingCoverImagePath(in: coverFolderURL, stem: "back-cover") ?? ""
+    }
+
+    private func existingCoverImagePath(in folderURL: URL, stem: String) -> String? {
+        let files = (try? FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        let preferredExtensions = ["jpg", "jpeg", "png", "webp", "tif", "tiff", "gif"]
+        return files
+            .filter { $0.deletingPathExtension().lastPathComponent.localizedCaseInsensitiveCompare(stem) == .orderedSame }
+            .sorted { left, right in
+                let leftRank = preferredExtensions.firstIndex(of: left.pathExtension.lowercased()) ?? preferredExtensions.count
+                let rightRank = preferredExtensions.firstIndex(of: right.pathExtension.lowercased()) ?? preferredExtensions.count
+                if leftRank != rightRank {
+                    return leftRank < rightRank
+                }
+                return left.lastPathComponent.localizedStandardCompare(right.lastPathComponent) == .orderedAscending
+            }
+            .first?
+            .path
     }
 
     func scanHeaderFooterSampleFiles() {
@@ -858,10 +892,12 @@ final class AppState: ObservableObject {
             let existingCSS = (try? String(contentsOf: stylesheetURL, encoding: .utf8)) ?? ""
             let imageResult = upsertingImagePageStyles(in: existingCSS)
             let footnoteResult = upsertingFootnoteStyles(in: imageResult.css)
-            let updatedCSS = footnoteResult.css
+            let blockquoteResult = upsertingBlockquoteStyles(in: footnoteResult.css)
+            let updatedCSS = blockquoteResult.css
             let progressLines = [
                 "Image CSS: \(imageResult.status)",
                 "Footnote CSS: \(footnoteResult.status)",
+                "Blockquote CSS: \(blockquoteResult.status)",
             ]
             if updatedCSS == existingCSS {
                 epubStatus = "CSS already up to date."
@@ -949,6 +985,28 @@ final class AppState: ObservableObject {
         return (cleanedCSS.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + block + "\n", status)
     }
 
+    private func upsertingBlockquoteStyles(in css: String) -> (css: String, status: String) {
+        let block = blockquoteStylesheetBlock.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markerPattern = #"(?s)/\* NewOCR blockquote stylesheet: begin \*/.*?/\* NewOCR blockquote stylesheet: end \*/"#
+
+        if css.range(of: markerPattern, options: .regularExpression) != nil {
+            let updatedCSS = css.replacingOccurrences(of: markerPattern, with: block, options: .regularExpression)
+            return (updatedCSS, updatedCSS == css ? "already up to date" : "replaced")
+        }
+
+        var cleanedCSS = css
+        for pattern in [
+            #"(?s)\n*\.blockquote\s*\{.*?\}\s*"#,
+            #"(?s)\n*blockquote\s*\{.*?\}\s*"#,
+            #"(?s)\n*blockquote\s+p\s*\{.*?\}\s*"#,
+        ] {
+            cleanedCSS = cleanedCSS.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
+        }
+
+        let status = cleanedCSS == css ? "added" : "replaced legacy rules"
+        return (cleanedCSS.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + block + "\n", status)
+    }
+
     private var imagePageStylesheetBlock: String {
         """
         /* NewOCR image page stylesheet: begin */
@@ -1025,6 +1083,30 @@ final class AppState: ObservableObject {
           text-decoration: none;
         }
         /* NewOCR footnote stylesheet: end */
+        """
+    }
+
+    private var blockquoteStylesheetBlock: String {
+        """
+        /* NewOCR blockquote stylesheet: begin */
+        .blockquote,
+        blockquote {
+          margin: 1em 1.5em;
+          padding: 0.6em 1em;
+          border-left: 0.18em solid #999;
+          font-style: italic;
+          line-height: 1.55;
+          text-indent: 0;
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+
+        .blockquote p,
+        blockquote p {
+          margin: 0;
+          text-indent: 0;
+        }
+        /* NewOCR blockquote stylesheet: end */
         """
     }
 
@@ -1107,12 +1189,14 @@ final class AppState: ObservableObject {
         if FileManager.default.fileExists(atPath: stylesheetURL.path) {
             return """
             <link rel="stylesheet" type="text/css" href="../../../Styles/stylesheet.css">
-            <style>
-            img { max-width: 100%; height: auto; }
-            figure { margin: 1em 0; }
-            figcaption { margin-top: 0.5em; }
-            </style>
-            """
+        <style>
+        img { max-width: 100%; height: auto; }
+        figure { margin: 1em 0; }
+        figcaption { margin-top: 0.5em; }
+        blockquote, .blockquote { margin: 1em 1.5em; padding: 0.6em 1em; border-left: 3px solid #999; font-style: italic; }
+        blockquote p, .blockquote p { margin: 0; text-indent: 0; }
+        </style>
+        """
         }
 
         return fallbackPreviewStyleHTML()
@@ -1126,6 +1210,8 @@ final class AppState: ObservableObject {
         img { max-width: 100%; height: auto; }
         figure { margin: 1em 0; }
         figcaption { margin-top: 0.5em; font-size: 0.9em; color: #555; }
+        blockquote, .blockquote { margin: 1em 1.5em; padding: 0.6em 1em; border-left: 3px solid #999; font-style: italic; }
+        blockquote p, .blockquote p { margin: 0; text-indent: 0; }
         .footnote-ref { font-size: 0.75em; line-height: 0; vertical-align: super; }
         .footnote-ref a { color: inherit; text-decoration: none; }
         .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #d0d0d0; font-size: 0.9em; }
@@ -1155,6 +1241,11 @@ final class AppState: ObservableObject {
                 continue
             }
 
+            if let blockquote = markdownBlockquotePreviewHTML(from: trimmed, usedFootnotes: &usedFootnotes) {
+                parts.append(blockquote)
+                continue
+            }
+
             parts.append("<p>\(markdownInlinePreviewHTML(trimmed.replacingOccurrences(of: "\n", with: " "), usedFootnotes: &usedFootnotes))</p>")
         }
         if let footnotesHTML = footnotesPreviewHTML(definitions: extracted.footnotes, usedLabels: usedFootnotes) {
@@ -1164,13 +1255,44 @@ final class AppState: ObservableObject {
     }
 
     private func markdownHeadingHTML(from text: String, usedFootnotes: inout [String]) -> String? {
-        guard let firstLine = text.components(separatedBy: .newlines).first else { return nil }
-        let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = text.components(separatedBy: .newlines)
+        guard let firstHeading = markdownHeadingParts(from: lines.first ?? "") else { return nil }
+        let level = firstHeading.level
+        var titleParts = [firstHeading.title]
+
+        for line in lines.dropFirst() {
+            guard let heading = markdownHeadingParts(from: line),
+                  heading.level == level else {
+                break
+            }
+            titleParts.append(heading.title)
+        }
+
+        let titleHTML = titleParts.map { markdownInlinePreviewHTML($0, usedFootnotes: &usedFootnotes) }.joined(separator: "<br>")
+        return "<h\(level)>\(titleHTML)</h\(level)>"
+    }
+
+    private func markdownHeadingParts(from text: String) -> (level: Int, title: String)? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("#") else { return nil }
         let level = min(trimmed.prefix(while: { $0 == "#" }).count, 6)
-        let title = trimmed.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else { return nil }
-        return "<h\(level)>\(markdownInlinePreviewHTML(title, usedFootnotes: &usedFootnotes))</h\(level)>"
+        var title = trimmed.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespacesAndNewlines)
+        while title.hasSuffix("#") {
+            title = title.dropLast().trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return title.isEmpty ? nil : (level, title)
+    }
+
+    private func markdownBlockquotePreviewHTML(from text: String, usedFootnotes: inout [String]) -> String? {
+        let quoteLines = text.components(separatedBy: .newlines).compactMap { rawLine -> String? in
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix(">") else { return nil }
+            let quote = trimmed.dropFirst().trimmingCharacters(in: .whitespacesAndNewlines)
+            return quote.isEmpty ? nil : String(quote)
+        }
+        guard !quoteLines.isEmpty else { return nil }
+        let quoteHTML = quoteLines.map { markdownInlinePreviewHTML($0, usedFootnotes: &usedFootnotes) }.joined(separator: "<br>")
+        return "<blockquote class=\"blockquote\"><p>\(quoteHTML)</p></blockquote>"
     }
 
     private func markdownImagePreviewHTML(from text: String) -> String? {
@@ -1286,6 +1408,7 @@ final class AppState: ObservableObject {
 
     private func markdownInlinePreviewHTML(_ text: String, usedFootnotes: inout [String]) -> String {
         var escaped = htmlEscaped(text)
+        escaped = escaped.replacingOccurrences(of: #"&lt;br\s*/?&gt;"#, with: "<br>", options: [.regularExpression, .caseInsensitive])
         escaped = escaped.replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
         escaped = escaped.replacingOccurrences(of: #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#, with: "<em>$1</em>", options: .regularExpression)
         let pattern = #"\[\^([A-Za-z0-9_-]+)\]"#
@@ -1430,12 +1553,20 @@ final class AppState: ObservableObject {
         ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Footnote") == .orderedSame
     }
 
+    var shouldFilterOCRBlockquotesOnly: Bool {
+        ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Blockquote") == .orderedSame
+    }
+
     var hasOCRMarkdownImages: Bool {
         ocrParagraphs.contains { markdownImageURL(from: $0) != nil }
     }
 
     var hasOCRMarkdownFootnotes: Bool {
         footnoteParagraphIndexes().isEmpty == false
+    }
+
+    var hasOCRMarkdownBlockquotes: Bool {
+        blockquoteParagraphIndexes().isEmpty == false
     }
 
     func focusFirstOCRMarkdownImage() {
@@ -1456,6 +1587,15 @@ final class AppState: ObservableObject {
         paragraphScrollRequestID += 1
     }
 
+    func focusFirstOCRMarkdownBlockquote() {
+        guard let index = blockquoteParagraphIndexes().first else {
+            return
+        }
+        ocrSearchText = "Blockquote"
+        paragraphScrollTargetIndex = index
+        paragraphScrollRequestID += 1
+    }
+
     var ocrSearchResultText: String {
         let query = ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return "" }
@@ -1468,6 +1608,11 @@ final class AppState: ObservableObject {
         if shouldFilterOCRFootnotesOnly {
             let count = footnoteParagraphIndexes().count
             return count == 0 ? "Found 0 footnote paragraphs" : "Showing \(count) footnote paragraphs"
+        }
+
+        if shouldFilterOCRBlockquotesOnly {
+            let count = blockquoteParagraphIndexes().count
+            return count == 0 ? "Found 0 blockquote paragraphs" : "Showing \(count) blockquote paragraphs"
         }
 
         let matches = ocrParagraphSearchMatches(query: query).map { match -> (Int, Int) in
@@ -1494,6 +1639,9 @@ final class AppState: ObservableObject {
         if shouldFilterOCRFootnotesOnly {
             return footnoteParagraphIndexes()
         }
+        if shouldFilterOCRBlockquotesOnly {
+            return blockquoteParagraphIndexes()
+        }
         return ocrParagraphSearchMatches(query: query).map(\.index)
     }
 
@@ -1501,6 +1649,12 @@ final class AppState: ObservableObject {
         ocrParagraphs.indices.filter { index in
             let paragraph = ocrParagraphs[index]
             return markdownFootnoteLabel(from: paragraph) != nil || markdownFootnoteReferenceLabels(in: paragraph).isEmpty == false
+        }
+    }
+
+    private func blockquoteParagraphIndexes() -> [Int] {
+        ocrParagraphs.indices.filter { index in
+            isMarkdownBlockquote(ocrParagraphs[index])
         }
     }
 
@@ -1542,6 +1696,22 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         let insertIndex = max(0, min(index + 1, paragraphs.count))
         paragraphs.insert("", at: insertIndex)
+        setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: insertIndex)
+    }
+
+    func addLineBreakBefore(_ index: Int) {
+        var paragraphs = ocrParagraphs
+        let insertIndex = max(0, min(index, paragraphs.count))
+        paragraphs.insert("<br/>", at: insertIndex)
+        setOCRParagraphs(paragraphs)
+        finishParagraphAction(focusIndex: insertIndex)
+    }
+
+    func addLineBreakAfter(_ index: Int) {
+        var paragraphs = ocrParagraphs
+        let insertIndex = max(0, min(index + 1, paragraphs.count))
+        paragraphs.insert("<br/>", at: insertIndex)
         setOCRParagraphs(paragraphs)
         finishParagraphAction(focusIndex: insertIndex)
     }
@@ -1602,6 +1772,9 @@ final class AppState: ObservableObject {
         if let label = markdownFootnoteLabel(from: paragraphs[index]) {
             return "Footnote#\(label)"
         }
+        if isMarkdownBlockquote(paragraphs[index]) {
+            return "Blockquote#\(index + 1)"
+        }
         return "Paragraph \(index + 1)"
     }
 
@@ -1609,6 +1782,20 @@ final class AppState: ObservableObject {
         let paragraphs = ocrParagraphs
         guard paragraphs.indices.contains(index) else { return false }
         return markdownFootnoteLabel(from: paragraphs[index]) != nil
+    }
+
+    func isBlockquoteParagraph(at index: Int) -> Bool {
+        let paragraphs = ocrParagraphs
+        guard paragraphs.indices.contains(index) else { return false }
+        return isMarkdownBlockquote(paragraphs[index])
+    }
+
+    private func isMarkdownBlockquote(_ paragraph: String) -> Bool {
+        let lines = paragraph.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return false }
+        return lines.allSatisfy { $0.hasPrefix(">") }
     }
 
     private func markdownFootnoteLabel(from paragraph: String) -> String? {
@@ -3147,6 +3334,7 @@ final class AppState: ObservableObject {
         ensureConfigFilesExist()
         loadAppConfigValues()
         loadPDFFiles()
+        refreshCoverImagePathsForSelectedFolder()
     }
 
     private func save() {
@@ -3168,6 +3356,8 @@ final class AppState: ObservableObject {
     private func loadPDFFiles() {
         guard !selectedFolderPath.isEmpty else {
             pdfFiles = []
+            frontCoverImagePath = ""
+            backCoverImagePath = ""
             return
         }
 
@@ -3831,13 +4021,16 @@ struct StepTwoOCRView: View {
                                     OCRMarkdownPresenceBadge(label: "Footnote", exists: appState.hasOCRMarkdownFootnotes) {
                                         appState.focusFirstOCRMarkdownFootnote()
                                     }
+                                    OCRMarkdownPresenceBadge(label: "Blockquote", exists: appState.hasOCRMarkdownBlockquotes) {
+                                        appState.focusFirstOCRMarkdownBlockquote()
+                                    }
                                     Spacer()
                                 }
                                 GeometryReader { proxy in
                                     HStack(spacing: 10) {
                                         TextField("Search Markdown", text: $appState.ocrSearchText)
                                             .textFieldStyle(.roundedBorder)
-                                            .frame(width: max(260, proxy.size.width * 0.8))
+                                            .frame(width: max(240, proxy.size.width * 0.68))
                                             .disabled(appState.ocrText.isEmpty)
                                         Button("Replace All") {
                                             replacementText = ""
@@ -3873,6 +4066,11 @@ struct StepTwoOCRView: View {
                                             .padding(16)
                                             .frame(width: 420)
                                         }
+                                        Button("Clear") {
+                                            appState.ocrSearchText = ""
+                                        }
+                                        .frame(width: 80)
+                                        .disabled(appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                         Button {
                                             isSearchInfoPopoverPresented.toggle()
                                         } label: {
@@ -4021,6 +4219,8 @@ struct MarkdownSyntaxPopoverView: View {
         ("## Section title", "Heading 2"),
         ("### Subsection title", "Heading 3"),
         ("A blank line", "Starts a new paragraph"),
+        ("Line one<br/>Line two", "Line break"),
+        ("> Quoted text", "Blockquote"),
         ("**bold text**", "Bold text"),
         ("*italic text*", "Italic text"),
         ("![Alt text](Images/example.png)", "Image"),
@@ -4043,34 +4243,37 @@ struct MarkdownSyntaxPopoverView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-                GridRow {
-                    Text("Type")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text("Meaning")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-
-                ForEach(examples, id: \.syntax) { example in
+            ScrollView {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
                     GridRow {
-                        Text(example.syntax)
-                            .font(.body.monospaced())
-                            .textSelection(.enabled)
-                        Text(example.result)
-                            .foregroundStyle(.primary)
+                        Text("Type")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text("Meaning")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ForEach(examples, id: \.syntax) { example in
+                        GridRow {
+                            Text(example.syntax)
+                                .font(.body.monospaced())
+                                .textSelection(.enabled)
+                            Text(example.result)
+                                .foregroundStyle(.primary)
+                        }
                     }
                 }
             }
+            .frame(maxHeight: 280)
 
-            Text("Image paths are relative to the Markdown folder. Put Caption: or Description: directly below an image; following lines stay in the same caption until a blank line. Footnotes use matching labels, such as [^1] or [^a]. Other Markdown characters stay as normal text unless the converter supports them later.")
+            Text("Image paths are relative to the Markdown folder. Put Caption: or Description: directly below an image; following lines stay in the same caption until a blank line. Use > for blockquotes. Footnotes use matching labels, such as [^1] or [^a]. Other Markdown characters stay as normal text unless the converter supports them later.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
-        .frame(width: 500, alignment: .leading)
+        .frame(width: 540, alignment: .leading)
     }
 }
 
@@ -4091,6 +4294,9 @@ struct OCRSearchGuidelinePopoverView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Type exactly Footnote to show paragraphs with footnote markers and footnote items.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("Type exactly Blockquote to show quote blocks.")
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Paragraph numbers and merge actions still use the real document position.")
@@ -4330,6 +4536,8 @@ struct HighlightingTextEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: HighlightingTextEditor
         weak var textView: NSTextView?
+        private var markdownPopover: NSPopover?
+        private var isApplyingMarkdownStyle = false
 
         init(_ parent: HighlightingTextEditor) {
             self.parent = parent
@@ -4339,6 +4547,115 @@ struct HighlightingTextEditor: NSViewRepresentable {
             guard let textView else { return }
             parent.text = textView.string
             applyHighlights(searchText: parent.searchText)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard !isApplyingMarkdownStyle else { return }
+            showMarkdownStylePopoverIfNeeded()
+        }
+
+        private func showMarkdownStylePopoverIfNeeded() {
+            guard let textView else { return }
+            let selection = textView.selectedRange()
+            guard selection.length > 0 else {
+                markdownPopover?.close()
+                return
+            }
+
+            if markdownPopover?.isShown == true {
+                return
+            }
+
+            let popover = NSPopover()
+            popover.behavior = .transient
+            popover.contentSize = NSSize(width: 428, height: 42)
+            popover.contentViewController = NSHostingController(
+                rootView: MarkdownStylePopoverView(
+                    applyBold: { [weak self] in self?.applyMarkdownWrapper("**") },
+                    applyItalic: { [weak self] in self?.applyMarkdownWrapper("*") },
+                    applyBlockquote: { [weak self] in self?.applyBlockquote() },
+                    applyHeading1: { [weak self] in self?.applyHeading(level: 1) },
+                    applyHeading2: { [weak self] in self?.applyHeading(level: 2) },
+                    applyHeading3: { [weak self] in self?.applyHeading(level: 3) }
+                )
+            )
+            markdownPopover = popover
+
+            let rect = textView.firstRect(forCharacterRange: selection, actualRange: nil)
+            let localRect = textView.convert(rect, from: nil)
+            let anchorRect = localRect == .zero ? textView.visibleRect : localRect
+            popover.show(relativeTo: anchorRect, of: textView, preferredEdge: .maxY)
+        }
+
+        private func applyMarkdownWrapper(_ marker: String) {
+            guard let textView else { return }
+            let selection = textView.selectedRange()
+            guard selection.length > 0 else { return }
+
+            let source = textView.string as NSString
+            let selectedText = source.substring(with: selection)
+            let replacement = "\(marker)\(selectedText)\(marker)"
+
+            isApplyingMarkdownStyle = true
+            textView.shouldChangeText(in: selection, replacementString: replacement)
+            textView.replaceCharacters(in: selection, with: replacement)
+            textView.didChangeText()
+            let newSelection = NSRange(location: selection.location + marker.count, length: selection.length)
+            textView.setSelectedRange(newSelection)
+            isApplyingMarkdownStyle = false
+
+            parent.text = textView.string
+            applyHighlights(searchText: parent.searchText)
+            markdownPopover?.close()
+        }
+
+        private func applyBlockquote() {
+            applyMarkdownTransform { selectedText in
+                selectedText
+                    .components(separatedBy: .newlines)
+                    .map { line in
+                        let trimmed = line.trimmingCharacters(in: .whitespaces)
+                        return trimmed.hasPrefix(">") ? line : "> \(line)"
+                    }
+                    .joined(separator: "\n")
+            }
+        }
+
+        private func applyHeading(level: Int) {
+            let marker = String(repeating: "#", count: max(1, min(level, 6)))
+            applyMarkdownTransform { selectedText in
+                selectedText
+                    .components(separatedBy: .newlines)
+                    .map { line in
+                        let cleanLine = line
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .replacingOccurrences(of: #"^#{1,6}\s*"#, with: "", options: .regularExpression)
+                            .replacingOccurrences(of: #"\s*#{1,6}$"#, with: "", options: .regularExpression)
+                        return cleanLine.isEmpty ? "" : "\(marker) \(cleanLine) \(marker)"
+                    }
+                    .joined(separator: "\n")
+            }
+        }
+
+        private func applyMarkdownTransform(_ transform: (String) -> String) {
+            guard let textView else { return }
+            let selection = textView.selectedRange()
+            guard selection.length > 0 else { return }
+
+            let source = textView.string as NSString
+            let selectedText = source.substring(with: selection)
+            let replacement = transform(selectedText)
+
+            isApplyingMarkdownStyle = true
+            textView.shouldChangeText(in: selection, replacementString: replacement)
+            textView.replaceCharacters(in: selection, with: replacement)
+            textView.didChangeText()
+            textView.setSelectedRange(NSRange(location: selection.location, length: replacement.count))
+            isApplyingMarkdownStyle = false
+
+            parent.text = textView.string
+            applyHighlights(searchText: parent.searchText)
+            markdownPopover?.close()
         }
 
         func applyHighlights(searchText: String) {
@@ -4376,6 +4693,62 @@ struct HighlightingTextEditor: NSViewRepresentable {
     }
 }
 
+struct MarkdownStylePopoverView: View {
+    let applyBold: () -> Void
+    let applyItalic: () -> Void
+    let applyBlockquote: () -> Void
+    let applyHeading1: () -> Void
+    let applyHeading2: () -> Void
+    let applyHeading3: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                applyBold()
+            } label: {
+                Text("B")
+                    .font(.body.weight(.bold))
+                    .frame(width: 42)
+            }
+            .help("Bold")
+
+            Button {
+                applyItalic()
+            } label: {
+                Text("I")
+                    .font(.body.italic())
+                    .frame(width: 42)
+            }
+            .help("Italic")
+
+            Button("Quote") {
+                applyBlockquote()
+            }
+            .frame(width: 74)
+            .help("BlockQuote")
+
+            Button("H1") {
+                applyHeading1()
+            }
+            .frame(width: 44)
+            .help("Heading 1")
+
+            Button("H2") {
+                applyHeading2()
+            }
+            .frame(width: 44)
+            .help("Heading 2")
+
+            Button("H3") {
+                applyHeading3()
+            }
+            .frame(width: 44)
+            .help("Heading 3")
+        }
+        .padding(8)
+    }
+}
+
 struct ParagraphItemView: View {
     @EnvironmentObject private var appState: AppState
     let index: Int
@@ -4386,9 +4759,12 @@ struct ParagraphItemView: View {
     var body: some View {
         let displayTitle = appState.paragraphDisplayTitle(at: index)
         let isFootnote = appState.isFootnoteParagraph(at: index)
+        let isBlockquote = appState.isBlockquoteParagraph(at: index)
         let isImage = appState.markdownImageURL(from: text) != nil
         let canAddImageDescription = isImage && !appState.imageParagraphHasDescription(at: index)
-        let canRemove = appState.ocrParagraphs.count > 1 || isFootnote
+        let canRemove = appState.ocrParagraphs.count > 1 || isFootnote || isBlockquote
+        let itemKind = isFootnote ? "footnote" : (isBlockquote ? "blockquote" : "paragraph")
+        let itemKindTitle = isFootnote ? "Footnote" : (isBlockquote ? "Blockquote" : "Paragraph")
 
         HStack(alignment: .top, spacing: 8) {
             Button {
@@ -4399,7 +4775,7 @@ struct ParagraphItemView: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
-            .help("Remove \(isFootnote ? "footnote" : "paragraph")")
+            .help("Remove \(itemKind)")
             .accessibilityLabel("Remove \(displayTitle)")
             .disabled(!canRemove)
             .padding(.top, 2)
@@ -4431,6 +4807,14 @@ struct ParagraphItemView: View {
                             appState.addParagraphAfter(index)
                         }
 
+                        Button("Line Break Before") {
+                            appState.addLineBreakBefore(index)
+                        }
+
+                        Button("Line Break After") {
+                            appState.addLineBreakAfter(index)
+                        }
+
                         Divider()
 
                         Button("Merge With Paragraph Above") {
@@ -4445,7 +4829,7 @@ struct ParagraphItemView: View {
 
                         Divider()
 
-                        Button("Remove \(isFootnote ? "Footnote" : "Paragraph")", role: .destructive) {
+                        Button("Remove \(itemKindTitle)", role: .destructive) {
                             appState.removeParagraph(index)
                         }
                         .disabled(!canRemove)
