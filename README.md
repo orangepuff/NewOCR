@@ -533,6 +533,8 @@ The window is a split editor:
   preview between pages
 - the PDF preview can be dragged with the mouse to pan around the zoomed page,
   in addition to normal scrolling
+- OCR PDF preview zoom is remembered per selected section PDF file, not as one
+  global app zoom value
 
 Features:
 
@@ -955,7 +957,9 @@ Width values may be numeric or `FULL` for full-screen opening.
   "Loaded existing AppleVision Markdown"; keep vertical space for the PDF
   itself. Up/down page navigation, `Page n / total` text, and Zoom In/Zoom Out
   controls live on one compact row. The PDF view should support hand-style drag
-  panning so the user can drag the zoomed page to inspect a specific area.
+  panning so the user can drag the zoomed page to inspect a specific area. Zoom
+  percent is stored per section PDF path so returning to a file restores that
+  file's last OCR preview zoom.
 - The OCR editor keeps an in-memory paragraph-to-source-page map when it loads
   `page*.md`. With an empty search field, paragraph-list scrolling may request a
   preview jump to the nearest visible source page. Paragraph focus/editing always

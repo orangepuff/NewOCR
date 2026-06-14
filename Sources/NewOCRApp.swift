@@ -266,6 +266,7 @@ final class AppState: ObservableObject {
     @Published var ocrParagraphHasOCRSourcePage: [Bool] = []
     @Published var ocrPDFPreviewPageRequestIndex: Int = 0
     @Published var ocrPDFPreviewPageRequestID: Int = 0
+    @Published var ocrPDFPreviewZoomPercents: [String: Double] = [:]
 
     @Published var pdfTitles: [String: String] = [:] {
         didSet {
@@ -3550,6 +3551,17 @@ final class AppState: ObservableObject {
         ocrPDFPreviewPageRequestID += 1
     }
 
+    func ocrPDFPreviewZoomPercent(for path: String) -> Double {
+        let stored = ocrPDFPreviewZoomPercents[path] ?? 145
+        return min(max(stored, 110), 220)
+    }
+
+    func setOCRPDFPreviewZoomPercent(_ value: Double, for path: String) {
+        guard !path.isEmpty else { return }
+        ocrPDFPreviewZoomPercents[path] = min(max(value, 110), 220)
+        defaults.set(ocrPDFPreviewZoomPercents, forKey: "ocrPDFPreviewZoomPercents")
+    }
+
     private func setOCRParagraphs(_ paragraphs: [String], sourcePages: [Int]? = nil, ocrSourcePageFlags: [Bool]? = nil) {
         let pages = sourcePages ?? currentOCRParagraphSourcePages(for: ocrParagraphs.count)
         let flags = ocrSourcePageFlags ?? currentOCRSourcePageFlags(for: ocrParagraphs.count)
@@ -5216,6 +5228,7 @@ final class AppState: ObservableObject {
         ocrStatus = defaults.string(forKey: "ocrStatus") ?? "No OCR job has been sent yet."
         logOutput = ""
         pdfTitles = defaults.dictionary(forKey: "pdfTitles") as? [String: String] ?? [:]
+        ocrPDFPreviewZoomPercents = defaults.dictionary(forKey: "ocrPDFPreviewZoomPercents") as? [String: Double] ?? [:]
         frontCoverImagePath = defaults.string(forKey: "frontCoverImagePath") ?? ""
         backCoverImagePath = defaults.string(forKey: "backCoverImagePath") ?? ""
         epubStatus = ""
@@ -5238,6 +5251,7 @@ final class AppState: ObservableObject {
         defaults.set(ocrStatus, forKey: "ocrStatus")
         defaults.removeObject(forKey: "cloudVisionOutput")
         defaults.set(pdfTitles, forKey: "pdfTitles")
+        defaults.set(ocrPDFPreviewZoomPercents, forKey: "ocrPDFPreviewZoomPercents")
         defaults.set(frontCoverImagePath, forKey: "frontCoverImagePath")
         defaults.set(backCoverImagePath, forKey: "backCoverImagePath")
     }
@@ -7280,7 +7294,6 @@ struct StepTwoOCRView: View {
 struct OCRPDFPreviewPanel: View {
     @EnvironmentObject private var appState: AppState
     @State private var pageIndex = 0
-    @State private var zoomPercent: Double = 145
 
     private var pdfURL: URL? {
         guard !appState.selectedPDFPath.isEmpty,
@@ -7301,6 +7314,14 @@ struct OCRPDFPreviewPanel: View {
 
     private var safePageIndex: Int {
         min(max(pageIndex, 0), max(pageCount - 1, 0))
+    }
+
+    private var zoomPercent: Double {
+        appState.ocrPDFPreviewZoomPercent(for: appState.selectedPDFPath)
+    }
+
+    private func setZoomPercent(_ value: Double) {
+        appState.setOCRPDFPreviewZoomPercent(value, for: appState.selectedPDFPath)
     }
 
     var body: some View {
@@ -7329,7 +7350,7 @@ struct OCRPDFPreviewPanel: View {
                 }
 
                 OCRIconButton(title: "Zoom Out", systemImage: "minus.magnifyingglass", backgroundColor: Color.white.opacity(0.92), size: 34) {
-                    zoomPercent = max(110, zoomPercent - 15)
+                    setZoomPercent(zoomPercent - 15)
                 }
                 .disabled(pdfURL == nil || zoomPercent <= 110)
 
@@ -7339,7 +7360,7 @@ struct OCRPDFPreviewPanel: View {
                     .frame(width: 44, alignment: .trailing)
 
                 OCRIconButton(title: "Zoom In", systemImage: "plus.magnifyingglass", backgroundColor: Color.white.opacity(0.92), size: 34) {
-                    zoomPercent = min(220, zoomPercent + 15)
+                    setZoomPercent(zoomPercent + 15)
                 }
                 .disabled(pdfURL == nil || zoomPercent >= 220)
             }
