@@ -1487,13 +1487,15 @@ final class AppState: ObservableObject {
             let blockquoteResult = upsertingBlockquoteStyles(in: footnoteResult.css)
             let alignmentResult = upsertingAlignmentStyles(in: blockquoteResult.css)
             let pageBreakResult = upsertingPageBreakStyles(in: alignmentResult.css)
-            let updatedCSS = pageBreakResult.css
+            let emptyParagraphResult = upsertingEmptyParagraphStyles(in: pageBreakResult.css)
+            let updatedCSS = emptyParagraphResult.css
             let progressLines = [
                 "Image CSS: \(imageResult.status)",
                 "Footnote CSS: \(footnoteResult.status)",
                 "Blockquote CSS: \(blockquoteResult.status)",
                 "Left/Center/Right CSS: \(alignmentResult.status)",
                 "Page break CSS: \(pageBreakResult.status)",
+                "Empty paragraph CSS: \(emptyParagraphResult.status)",
             ]
             if updatedCSS == existingCSS {
                 epubStatus = "CSS already up to date."
@@ -1501,7 +1503,7 @@ final class AppState: ObservableObject {
                 Stylesheet already matches NewOCR CSS:
                 \(stylesheetURL.path)
 
-                Included CSS blocks: images, footnotes, blockquotes, Left/Center/Right alignment, and page breaks.
+                Included CSS blocks: images, footnotes, blockquotes, Left/Center/Right alignment, page breaks, and empty paragraphs.
 
                 \(progressLines.joined(separator: "\n"))
                 """
@@ -1517,7 +1519,7 @@ final class AppState: ObservableObject {
             Updated stylesheet:
             \(stylesheetURL.path)
 
-            Included CSS blocks: images, footnotes, blockquotes, Left/Center/Right alignment, and page breaks.
+            Included CSS blocks: images, footnotes, blockquotes, Left/Center/Right alignment, page breaks, and empty paragraphs.
 
             \(progressLines.joined(separator: "\n"))
             """
@@ -1645,6 +1647,26 @@ final class AppState: ObservableObject {
         ] {
             cleanedCSS = cleanedCSS.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
         }
+
+        let status = cleanedCSS == css ? "added" : "replaced legacy rules"
+        return (cleanedCSS.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + block + "\n", status)
+    }
+
+    private func upsertingEmptyParagraphStyles(in css: String) -> (css: String, status: String) {
+        let block = emptyParagraphStylesheetBlock.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markerPattern = #"(?s)/\* NewOCR empty paragraph stylesheet: begin \*/.*?/\* NewOCR empty paragraph stylesheet: end \*/"#
+
+        if css.range(of: markerPattern, options: .regularExpression) != nil {
+            let updatedCSS = css.replacingOccurrences(of: markerPattern, with: block, options: .regularExpression)
+            return (updatedCSS, updatedCSS == css ? "already up to date" : "replaced")
+        }
+
+        var cleanedCSS = css
+        cleanedCSS = cleanedCSS.replacingOccurrences(
+            of: #"(?s)\n*\.empty-paragraph\s*\{.*?\}\s*"#,
+            with: "\n",
+            options: .regularExpression
+        )
 
         let status = cleanedCSS == css ? "added" : "replaced legacy rules"
         return (cleanedCSS.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + block + "\n", status)
@@ -1796,6 +1818,17 @@ final class AppState: ObservableObject {
         """
     }
 
+    private var emptyParagraphStylesheetBlock: String {
+        """
+        /* NewOCR empty paragraph stylesheet: begin */
+        .empty-paragraph {
+          min-height: 1.65em;
+          text-indent: 0;
+        }
+        /* NewOCR empty paragraph stylesheet: end */
+        """
+    }
+
     private func epubPathFromBuilderOutput(_ output: String) -> String? {
         guard let data = output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1887,6 +1920,7 @@ final class AppState: ObservableObject {
         .page-break-before, .page-break-after { border-top: 1px solid #b8b8b8; height: 0; margin: 1.4em 0; position: relative; break-before: auto; break-after: auto; page-break-before: auto; page-break-after: auto; }
         .page-break-before::after { content: "Page break before"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
         .page-break-after::after { content: "Page break after"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
+        .empty-paragraph { min-height: 1.65em; text-indent: 0; }
         </style>
         """
         }
@@ -1910,6 +1944,7 @@ final class AppState: ObservableObject {
         .page-break-before, .page-break-after { border-top: 1px solid #b8b8b8; height: 0; margin: 1.4em 0; position: relative; }
         .page-break-before::after { content: "Page break before"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
         .page-break-after::after { content: "Page break after"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
+        .empty-paragraph { min-height: 1.65em; text-indent: 0; }
         .footnote-ref { font-size: 0.75em; line-height: 0; vertical-align: super; }
         .footnote-ref a { color: inherit; text-decoration: none; }
         .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #d0d0d0; font-size: 0.9em; }
@@ -1927,7 +1962,10 @@ final class AppState: ObservableObject {
         let paragraphs = splitParagraphs(extracted.markdown)
         for paragraph in paragraphs {
             let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
+            if trimmed.isEmpty {
+                parts.append("<p class=\"empty-paragraph\"><br/></p>")
+                continue
+            }
 
             if let pageBreak = markdownPageBreakPreviewHTML(from: trimmed) {
                 parts.append(pageBreak)

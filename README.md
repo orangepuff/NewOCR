@@ -503,6 +503,22 @@ Line break:
 Line one<br/>Line two
 ```
 
+### Empty Paragraphs
+
+The paragraph editor can create an empty paragraph, for example by clicking
+**Add Paragraph After** and leaving it blank. NewOCR should preserve that empty
+paragraph in Preview and EPUB instead of dropping it.
+
+In saved Markdown this appears as extra blank paragraph spacing. Preview and
+EPUB build convert that editor-created empty slot into:
+
+```html
+<p class="empty-paragraph"><br/></p>
+```
+
+Apply CSS/default CSS must define `.empty-paragraph` so it has visible paragraph
+height and no text indent.
+
 ### Alignment
 
 Standard Markdown has no native syntax for left/right/center alignment. NewOCR
@@ -584,6 +600,7 @@ It upserts NewOCR-managed CSS blocks for:
 - blockquotes
 - alignment classes
 - page-break helpers
+- empty paragraphs
 
 It should preserve unrelated user CSS where possible and replace only NewOCR
 managed legacy/marked blocks.
@@ -632,6 +649,7 @@ The Python converter supports:
 - Markdown images and captions
 - footnotes
 - page break markers
+- empty paragraphs as `<p class="empty-paragraph"><br/></p>`
 - `<p class="left|center|right">...</p>`
 
 ## Covers
@@ -688,6 +706,8 @@ These are intentional and should not be changed casually:
 - Process OCR All deletes old Markdown/images/cache for each section before OCR.
 - Manual sections do not run OCR but can create/edit Markdown.
 - OCR must use section PDF paths, not the original PDF.
+- Empty paragraph slots from the paragraph editor should survive Preview and
+  EPUB build.
 - Header/footer removal requires `header-footer-review.txt` REMOVE entries.
 - Working folder changes clear filtered text and header/footer review state.
 - Full-page scanned text images should not replace recognized OCR text.

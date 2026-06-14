@@ -315,6 +315,7 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
     paragraph_lines = []
     heading_count = 0
     footnote_state = {"definitions": footnote_definitions, "used": []}
+    blank_line_count = 0
 
     def flush_paragraph():
         if not paragraph_lines:
@@ -324,14 +325,27 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
             body_parts.append(f"<p>{markdown_inline_to_html(paragraph_text, footnote_state)}</p>")
         paragraph_lines.clear()
 
+    def flush_empty_paragraphs():
+        nonlocal blank_line_count
+        if blank_line_count > 1:
+            for _ in range(blank_line_count // 2):
+                body_parts.append('<p class="empty-paragraph"><br/></p>')
+        blank_line_count = 0
+
     index = 0
     while index < len(lines):
         line = lines[index]
         stripped = line.strip()
         if not stripped:
-            flush_paragraph()
+            if paragraph_lines:
+                flush_paragraph()
+                blank_line_count = 1
+            else:
+                blank_line_count += 1
             index += 1
             continue
+
+        flush_empty_paragraphs()
 
         if stripped in {"<!-- page-break-before -->", "[[page-break-before]]"}:
             flush_paragraph()
@@ -397,6 +411,7 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
         index += 1
 
     flush_paragraph()
+    flush_empty_paragraphs()
     footnotes_html = footnotes_to_html(footnote_state)
     if footnotes_html:
         body_parts.append(footnotes_html)

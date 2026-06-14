@@ -159,6 +159,11 @@ blockquote p,
   text-indent: 0;
 }
 
+.empty-paragraph {
+  min-height: 1.65em;
+  text-indent: 0;
+}
+
 .small {
   font-size: 0.9em;
 }
