@@ -216,6 +216,10 @@ with `book-sections.json` as user memory. Checked rows are skipped by
 **Process OCR All** because the user has marked them complete, but the checkbox
 must not affect EPUB build logic.
 
+When an existing project opens with split PDF files, the section list should
+auto-scroll to the first row whose **Ready for EPUB** checkbox is not checked.
+This helps resume work at the next unfinished section.
+
 ### Removing Section Files
 
 For real section PDFs:
@@ -537,8 +541,8 @@ The window is a split editor:
   preview between pages
 - the PDF preview can be dragged with the mouse to pan around the zoomed page,
   in addition to normal scrolling
-- OCR PDF preview zoom is remembered per selected section PDF file, not as one
-  global app zoom value
+- OCR PDF preview zoom is remembered per selected section PDF file and persists
+  after closing and reopening the app, not as one global app zoom value
 
 Features:
 

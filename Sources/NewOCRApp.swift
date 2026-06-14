@@ -2491,6 +2491,10 @@ final class AppState: ObservableObject {
         }
     }
 
+    var firstNotReadySectionID: String? {
+        pdfFiles.first { !epubReadySectionIDs.contains($0.id) }?.id
+    }
+
     var canScanHeaderAllSections: Bool {
         !isHeaderFooterScanRunning && !isOCRRunning && pdfFiles.contains { !($0.isManualSection) && FileManager.default.fileExists(atPath: $0.url.path) }
     }
@@ -3559,7 +3563,8 @@ final class AppState: ObservableObject {
     func setOCRPDFPreviewZoomPercent(_ value: Double, for path: String) {
         guard !path.isEmpty else { return }
         ocrPDFPreviewZoomPercents[path] = min(max(value, 110), 220)
-        defaults.set(ocrPDFPreviewZoomPercents, forKey: "ocrPDFPreviewZoomPercents")
+        save()
+        defaults.synchronize()
     }
 
     private func setOCRParagraphs(_ paragraphs: [String], sourcePages: [Int]? = nil, ocrSourcePageFlags: [Bool]? = nil) {
@@ -5254,7 +5259,7 @@ final class AppState: ObservableObject {
         ocrStatus = defaults.string(forKey: "ocrStatus") ?? "No OCR job has been sent yet."
         logOutput = ""
         pdfTitles = defaults.dictionary(forKey: "pdfTitles") as? [String: String] ?? [:]
-        ocrPDFPreviewZoomPercents = defaults.dictionary(forKey: "ocrPDFPreviewZoomPercents") as? [String: Double] ?? [:]
+        ocrPDFPreviewZoomPercents = loadDoubleDictionary(forKey: "ocrPDFPreviewZoomPercents")
         frontCoverImagePath = defaults.string(forKey: "frontCoverImagePath") ?? ""
         backCoverImagePath = defaults.string(forKey: "backCoverImagePath") ?? ""
         epubStatus = ""
@@ -5280,6 +5285,22 @@ final class AppState: ObservableObject {
         defaults.set(ocrPDFPreviewZoomPercents, forKey: "ocrPDFPreviewZoomPercents")
         defaults.set(frontCoverImagePath, forKey: "frontCoverImagePath")
         defaults.set(backCoverImagePath, forKey: "backCoverImagePath")
+    }
+
+    private func loadDoubleDictionary(forKey key: String) -> [String: Double] {
+        guard let stored = defaults.dictionary(forKey: key) else {
+            return [:]
+        }
+        return stored.reduce(into: [String: Double]()) { result, item in
+            if let value = item.value as? Double {
+                result[item.key] = value
+            } else if let value = item.value as? NSNumber {
+                result[item.key] = value.doubleValue
+            } else if let value = item.value as? String,
+                      let doubleValue = Double(value) {
+                result[item.key] = doubleValue
+            }
+        }
     }
 
     private func loadPDFFiles() {
@@ -6634,11 +6655,29 @@ private struct PointingHandCursorModifier: ViewModifier {
 
 struct PDFListView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var autoScrolledFolderPath = ""
+    @State private var autoScrolledTargetID: String?
     private let sectionActionColumnWidth: CGFloat = 156
     private let sectionNameColumnWidth: CGFloat = 365
     private let sectionTitleColumnWidth: CGFloat = 295
     private let sectionCommandColumnWidth: CGFloat = 228
     private let sectionTableWidth: CGFloat = 1118
+
+    private var sectionIDsSignature: String {
+        appState.pdfFiles.map(\.id).joined(separator: "\n")
+    }
+
+    private func scrollToFirstNotReadySection(with proxy: ScrollViewProxy, force: Bool = false) {
+        guard let targetID = appState.firstNotReadySectionID else { return }
+        guard force || autoScrolledFolderPath != appState.selectedFolderPath || autoScrolledTargetID != targetID else { return }
+        autoScrolledFolderPath = appState.selectedFolderPath
+        autoScrolledTargetID = targetID
+        DispatchQueue.main.async {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(targetID, anchor: .top)
+            }
+        }
+    }
 
     var body: some View {
         Group {
@@ -6658,9 +6697,10 @@ struct PDFListView: View {
                 }
             } else {
                 VStack(spacing: 0) {
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(Array(appState.pdfFiles.enumerated()), id: \.element.id) { index, item in
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(Array(appState.pdfFiles.enumerated()), id: \.element.id) { index, item in
                                 HStack(spacing: 12) {
                                     HStack(spacing: 6) {
                                         SectionReadyCheckboxButton(isReady: appState.epubReadyBinding(for: item))
@@ -6811,21 +6851,33 @@ struct PDFListView: View {
                                 .frame(width: sectionTableWidth, alignment: .leading)
                                 .background(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
 
-                                if index < appState.pdfFiles.count - 1 {
-                                    Divider()
-                                        .overlay(NewOCRMainPalette.stroke)
-                                        .frame(width: sectionTableWidth)
+                                    if index < appState.pdfFiles.count - 1 {
+                                        Divider()
+                                            .overlay(NewOCRMainPalette.stroke)
+                                            .frame(width: sectionTableWidth)
+                                    }
                                 }
                             }
+                            .frame(width: sectionTableWidth)
+                            .background(NewOCRMainPalette.rowBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                            )
+                            .padding(8)
                         }
-                        .frame(width: sectionTableWidth)
-                        .background(NewOCRMainPalette.rowBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                        )
-                        .padding(8)
+                        .onAppear {
+                            scrollToFirstNotReadySection(with: proxy)
+                        }
+                        .onChange(of: appState.selectedFolderPath) { _, _ in
+                            autoScrolledFolderPath = ""
+                            autoScrolledTargetID = nil
+                            scrollToFirstNotReadySection(with: proxy, force: true)
+                        }
+                        .onChange(of: sectionIDsSignature) { _, _ in
+                            scrollToFirstNotReadySection(with: proxy)
+                        }
                     }
                 }
                 .frame(width: sectionTableWidth)
