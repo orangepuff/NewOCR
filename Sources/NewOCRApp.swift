@@ -514,7 +514,7 @@ final class AppState: ObservableObject {
 
             let alert = NSAlert()
             alert.messageText = "Revert to original PDF?"
-            alert.informativeText = "This will restore the working PDF from the _original file and remove split plan data, generated section PDFs, OCR Markdown, scan text, manual sections, and EPUB output."
+            alert.informativeText = "This will restore the working PDF from the _original file and remove split plan data, generated section PDFs, OCR Markdown, scan text, manual sections, cover images, and EPUB output."
             alert.alertStyle = .warning
             alert.addButton(withTitle: "Revert")
             alert.addButton(withTitle: "Cancel")
@@ -558,8 +558,10 @@ final class AppState: ObservableObject {
                         self.ocrText = ""
                     }
                     self.builtEPUBPath = ""
+                    self.frontCoverImagePath = ""
+                    self.backCoverImagePath = ""
                     self.loadPDFFiles()
-                    self.configStatus = "Reverted to original PDF and removed split plan data and generated output."
+                    self.configStatus = "Reverted to original PDF and removed split plan data, cover images, and generated output."
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -723,7 +725,7 @@ final class AppState: ObservableObject {
             try fileManager.removeItem(at: url)
         }
 
-        for folderName in ["AppleVision", "ManualSections", "EPUB"] {
+        for folderName in ["AppleVision", "ManualSections", "EPUB", "CoverImage"] {
             let url = projectFolderURL.appendingPathComponent(folderName, isDirectory: true)
             if fileManager.fileExists(atPath: url.path) {
                 try fileManager.removeItem(at: url)

@@ -153,6 +153,7 @@ Book Folder/
 - section PDFs
 - `AppleVision/`
 - `ManualSections/`
+- `CoverImage/`
 - `EPUB/`
 - `book-sections.json`
 - `split-plan.json`
