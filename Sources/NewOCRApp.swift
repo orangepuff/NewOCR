@@ -2483,7 +2483,11 @@ final class AppState: ObservableObject {
     }
 
     var canProcessOCRAllSections: Bool {
-        !isOCRRunning && pdfFiles.contains { !($0.isManualSection) && FileManager.default.fileExists(atPath: $0.url.path) }
+        !isOCRRunning && pdfFiles.contains {
+            !($0.isManualSection)
+                && !epubReadySectionIDs.contains($0.id)
+                && FileManager.default.fileExists(atPath: $0.url.path)
+        }
     }
 
     var canScanHeaderAllSections: Bool {
@@ -3681,10 +3685,14 @@ final class AppState: ObservableObject {
     }
 
     func processOCRAllSections() {
-        let sectionItems = pdfFiles.filter { !($0.isManualSection) && FileManager.default.fileExists(atPath: $0.url.path) }
+        let sectionItems = pdfFiles.filter {
+            !($0.isManualSection)
+                && !epubReadySectionIDs.contains($0.id)
+                && FileManager.default.fileExists(atPath: $0.url.path)
+        }
         guard !sectionItems.isEmpty else {
             ocrStatus = "No section PDF files to OCR."
-            logOutput = "Manual sections are skipped because they do not have PDF files."
+            logOutput = "Manual sections and Ready for EPUB checked sections are skipped."
             return
         }
         guard !isOCRRunning else { return }

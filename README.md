@@ -166,7 +166,8 @@ Important actions:
 - **Revert Original**: restore from `_original.pdf` and clear generated output.
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
 - **Build EPUB**: create EPUB from available section/manual Markdown.
-- **Process OCR All**: OCR all existing section PDF files.
+- **Process OCR All**: OCR existing section PDF files that are not checked
+  **Ready for EPUB**.
 - **Scan Header All**: scan header/footer candidates for all existing section
   PDF files and open the shared Header/Footer Review.
 
@@ -211,8 +212,9 @@ Section 008 (10 pages)
 Manual section rows use the manual title when available.
 
 The **Ready for EPUB** checkbox starts unchecked for new sections. It is saved
-with `book-sections.json` as user memory only and must not affect EPUB build
-logic.
+with `book-sections.json` as user memory. Checked rows are skipped by
+**Process OCR All** because the user has marked them complete, but the checkbox
+must not affect EPUB build logic.
 
 ### Removing Section Files
 
@@ -341,8 +343,10 @@ For real section PDFs:
 
 - clicking **Process** selects that section PDF path
 - clicking **Run OCR** runs OCR on that selected section PDF
-- `Process OCR All` runs OCR on all existing real section PDF files
-- manual sections are skipped by `Process OCR All`
+- `Process OCR All` runs OCR on existing real section PDF files that are not
+  checked **Ready for EPUB**
+- manual sections and **Ready for EPUB** checked sections are skipped by
+  `Process OCR All`
 
 The OCR source must be the section file path, not the original PDF.
 
@@ -384,8 +388,8 @@ Sections 34 [Process OCR All]
 Expected behavior:
 
 - show a progress popup with the file currently being processed
-- process only real section PDFs that exist
-- skip manual sections
+- process only real section PDFs that exist and are not checked **Ready for EPUB**
+- skip manual sections and **Ready for EPUB** checked sections
 - before each section OCR, remove existing resources for that section:
   - `AppleVision/MD/<section>/`
   - old `.md` files
@@ -1012,7 +1016,8 @@ These are intentional and should not be changed casually:
 - Add Split preview navigation updates From until Title is non-empty, then To.
 - Set From updates only From. Set To updates only To.
 - Split button remains clickable and validates title on click.
-- Process OCR All deletes old Markdown/images/cache for each section before OCR.
+- Process OCR All deletes old Markdown/images/cache for each unchecked section
+  before OCR. Sections checked **Ready for EPUB** are skipped.
 - Manual sections do not run OCR but can create/edit Markdown.
 - OCR must use section PDF paths, not the original PDF.
 - Empty paragraph slots from the paragraph editor should survive Preview and
