@@ -4811,50 +4811,27 @@ private struct SectionIconButton: View {
     var backgroundColor: Color = Color.white.opacity(0.92)
     var foregroundColor: Color = Color.black
     let action: () -> Void
-    @State private var isTooltipPresented = false
 
     var body: some View {
-        ZStack {
-            Button(action: action) {
-                Image(systemName: systemImage)
-                    .font(.system(size: MainTypography.smallSize, weight: .semibold))
-                    .foregroundStyle(isDisabled ? foregroundColor.opacity(0.34) : foregroundColor)
-                    .frame(width: 46, height: 36)
-                    .background(isDisabled ? backgroundColor.opacity(0.42) : backgroundColor)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(Color.black.opacity(isDisabled ? 0.10 : 0.18), lineWidth: 1)
-                    )
-            }
-            .buttonStyle(.plain)
-            .disabled(isDisabled)
-            .accessibilityLabel(title)
-
-            if isTooltipPresented {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.black)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
-                    )
-                    .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 3)
-                    .fixedSize()
-                    .offset(y: 44)
-                    .allowsHitTesting(false)
-                    .zIndex(100)
-            }
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: MainTypography.smallSize, weight: .semibold))
+                .foregroundStyle(isDisabled ? foregroundColor.opacity(0.34) : foregroundColor)
+                .frame(width: 46, height: 36)
+                .background(isDisabled ? backgroundColor.opacity(0.42) : backgroundColor)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color.black.opacity(isDisabled ? 0.10 : 0.18), lineWidth: 1)
+                )
         }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
         .frame(width: 46, height: 36)
-        .zIndex(isTooltipPresented ? 100 : 0)
+        .background(FloatingTooltip(title: title, isEnabled: !isDisabled))
+        .accessibilityLabel(title)
         .onHover { isHovering in
             guard !isDisabled else { return }
-            isTooltipPresented = isHovering
             if isHovering {
                 NSCursor.pointingHand.set()
             } else {
@@ -4873,19 +4850,26 @@ private struct SectionUtilityCircleButton: View {
     let title: String
     let systemImage: String
     let backgroundColor: Color
+    var foregroundColor: Color = Color.black
     let action: () -> Void
     @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Color.black)
-                .frame(width: 28, height: 28)
-                .background(backgroundColor)
-                .clipShape(Circle())
+                .font(.system(size: MainTypography.smallSize, weight: .semibold))
+                .foregroundStyle(foregroundColor)
+                .frame(width: 46, height: 36)
+                .background(isHovered ? backgroundColor.opacity(0.86) : backgroundColor)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(isHovered ? 0.13 : 0.06), radius: isHovered ? 6 : 3, x: 0, y: isHovered ? 2 : 1)
         }
         .buttonStyle(.plain)
+        .frame(width: 46, height: 36)
         .contentShape(Rectangle())
         .accessibilityLabel(title)
         .help(title)
@@ -5048,6 +5032,77 @@ private struct HoverArea: NSViewRepresentable {
         // Always update closures so they capture the freshest state bindings.
         nsView.onEnter = onEnter
         nsView.onExit = onExit
+    }
+}
+
+private class TooltipHostView: NSView {
+    var title: String = ""
+    var isEnabled: Bool = true {
+        didSet {
+            if !isEnabled {
+                closePopover()
+            }
+        }
+    }
+    private var trackingArea: NSTrackingArea?
+    private var popover: NSPopover?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let old = trackingArea { removeTrackingArea(old) }
+        let new = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(new)
+        trackingArea = new
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        showPopover()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        closePopover()
+    }
+
+    private func showPopover() {
+        guard isEnabled, !title.isEmpty, popover?.isShown != true else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = false
+        popover.contentViewController = NSHostingController(
+            rootView: Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.white)
+        )
+        popover.contentSize = NSSize(width: max(72, min(220, CGFloat(title.count * 8 + 24))), height: 32)
+        self.popover = popover
+        popover.show(relativeTo: bounds, of: self, preferredEdge: .minY)
+    }
+
+    private func closePopover() {
+        popover?.close()
+        popover = nil
+    }
+}
+
+private struct FloatingTooltip: NSViewRepresentable {
+    let title: String
+    let isEnabled: Bool
+
+    func makeNSView(context: Context) -> TooltipHostView {
+        TooltipHostView()
+    }
+
+    func updateNSView(_ nsView: TooltipHostView, context: Context) {
+        nsView.title = title
+        nsView.isEnabled = isEnabled
     }
 }
 
@@ -5351,10 +5406,10 @@ struct StepOneLoadPDFView: View {
                     .layoutPriority(1)
                 }
 
-                HStack(alignment: .top, spacing: 18) {
+                HStack(alignment: .top, spacing: 12) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("EPUB Covers")
-                            .font(.system(size: MainTypography.headingSize, weight: .semibold))
+                            .font(.system(size: MainTypography.bodySize, weight: .semibold))
                             .foregroundStyle(NewOCRMainPalette.headingText)
 
                         CoverSidebarView()
@@ -5654,11 +5709,11 @@ private struct PointingHandCursorModifier: ViewModifier {
 
 struct PDFListView: View {
     @EnvironmentObject private var appState: AppState
-    private let sectionActionColumnWidth: CGFloat = 68
-    private let sectionNameColumnWidth: CGFloat = 330
-    private let sectionTitleColumnWidth: CGFloat = 260
+    private let sectionActionColumnWidth: CGFloat = 104
+    private let sectionNameColumnWidth: CGFloat = 365
+    private let sectionTitleColumnWidth: CGFloat = 295
     private let sectionCommandColumnWidth: CGFloat = 174
-    private let sectionTableWidth: CGFloat = 906
+    private let sectionTableWidth: CGFloat = 1012
 
     var body: some View {
         Group {
@@ -5686,7 +5741,8 @@ struct PDFListView: View {
                                         SectionUtilityCircleButton(
                                             title: "Remove section",
                                             systemImage: "xmark",
-                                            backgroundColor: Color.red.opacity(0.92)
+                                            backgroundColor: Color.red.opacity(0.92),
+                                            foregroundColor: Color.white
                                         ) {
                                             appState.removeSectionItem(item)
                                         }
@@ -5703,17 +5759,27 @@ struct PDFListView: View {
 
                                     HStack(spacing: 8) {
                                         Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
-                                            .font(.system(size: 22, weight: .semibold))
+                                            .font(.system(size: 24, weight: .semibold))
                                             .foregroundStyle(item.isManualSection ? Color.blue : Color.orange)
+                                            .frame(width: 46, height: 36)
+                                            .background(Color.white.opacity(0.12))
+                                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                                            )
 
                                         if appState.appleVisionMarkdownExists(for: item) {
                                             Text("MD")
-                                                .font(.system(size: 14, weight: .semibold))
+                                                .font(.system(size: MainTypography.smallSize, weight: .semibold))
                                                 .foregroundStyle(Color.black)
-                                                .padding(.horizontal, 6)
-                                                .padding(.vertical, 3)
+                                                .frame(width: 46, height: 32)
                                                 .background(Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.84, alpha: 1)))
-                                                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                                        .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                                                )
                                         }
 
                                         if item.isManualSection {
@@ -5847,7 +5913,7 @@ struct CoverSidebarView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             CoverRowView(
                 title: "Front",
                 systemImage: "photo",
@@ -5866,8 +5932,8 @@ struct CoverSidebarView: View {
 
             Spacer(minLength: 0)
         }
-        .padding(14)
-        .frame(width: 205)
+        .padding(10)
+        .frame(width: 145)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -5885,11 +5951,11 @@ struct CoverRowView: View {
     let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 6) {
             Button(action: action) {
                 Label(title, systemImage: systemImage)
             }
-            .font(.system(size: MainTypography.buttonSize, weight: .semibold))
+            .font(.system(size: MainTypography.smallSize, weight: .semibold))
             .frame(maxWidth: .infinity, alignment: .leading)
             .pointingHandCursor()
 
@@ -5910,7 +5976,7 @@ struct CoverThumbnailView: View {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
-                        .frame(width: 86, height: 112)
+                        .frame(width: 68, height: 88)
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                         .overlay(
                             RoundedRectangle(cornerRadius: 6)
@@ -5922,9 +5988,9 @@ struct CoverThumbnailView: View {
                 .help("Open cover image")
             } else {
                 Image(systemName: "photo")
-                    .font(.system(size: 24, weight: .medium))
+                    .font(.system(size: 21, weight: .medium))
                     .foregroundStyle(NewOCRMainPalette.tertiaryText)
-                    .frame(width: 86, height: 112)
+                    .frame(width: 68, height: 88)
                     .background(NewOCRMainPalette.fieldBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(
@@ -6315,43 +6381,22 @@ private struct OCRIconButton: View {
     @State private var isHovered = false
 
     var body: some View {
-        ZStack {
-            Button(action: action) {
-                Image(systemName: systemImage)
-                    .font(.system(size: size >= 38 ? 16 : 14, weight: .semibold))
-                    .foregroundStyle(isEnabled ? foregroundColor : foregroundColor.opacity(0.34))
-                    .frame(width: size, height: size)
-                    .background(isEnabled ? (isHovered ? backgroundColor.opacity(0.86) : backgroundColor) : backgroundColor.opacity(0.32))
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(Color.black.opacity(isEnabled ? 0.18 : 0.08), lineWidth: 1)
-                    )
-                    .shadow(color: Color.black.opacity(isEnabled && isHovered ? 0.13 : 0.06), radius: isHovered ? 6 : 3, x: 0, y: isHovered ? 2 : 1)
-            }
-            .buttonStyle(.plain)
-
-            if isHovered && isEnabled {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.black)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
-                    )
-                    .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 3)
-                    .fixedSize()
-                    .offset(y: size + 18)
-                    .allowsHitTesting(false)
-                    .zIndex(100)
-            }
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: size >= 38 ? 16 : 14, weight: .semibold))
+                .foregroundStyle(isEnabled ? foregroundColor : foregroundColor.opacity(0.34))
+                .frame(width: size, height: size)
+                .background(isEnabled ? (isHovered ? backgroundColor.opacity(0.86) : backgroundColor) : backgroundColor.opacity(0.32))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color.black.opacity(isEnabled ? 0.18 : 0.08), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(isEnabled && isHovered ? 0.13 : 0.06), radius: isHovered ? 6 : 3, x: 0, y: isHovered ? 2 : 1)
         }
+        .buttonStyle(.plain)
         .frame(width: size, height: size)
-        .zIndex(isHovered ? 20 : 0)
+        .background(FloatingTooltip(title: title, isEnabled: isEnabled))
         .accessibilityLabel(title)
         .onHover { hovering in
             isHovered = hovering
@@ -6635,54 +6680,33 @@ struct OCRMarkdownPresenceBadge: View {
     @State private var isHovered = false
 
     var body: some View {
-        ZStack {
-            Button {
-                guard exists else { return }
-                action()
-            } label: {
-                ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.primaryText)
-                        .frame(width: 40, height: 34)
-                        .background(exists ? Color.white.opacity(isHovered ? 0.18 : 0.13) : Color.white.opacity(0.11))
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .stroke(exists ? Color.green.opacity(0.48) : Color(red: 255/255, green: 102/255, blue: 102/255).opacity(0.48), lineWidth: 1)
-                        )
-
-                    Image(systemName: exists ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(exists ? Color.green : Color(red: 255/255, green: 102/255, blue: 102/255))
-                        .background(Color.black.opacity(0.32))
-                        .clipShape(Circle())
-                        .offset(x: 4, y: 4)
-                }
-            }
-            .buttonStyle(.plain)
-
-            if isHovered {
-                Text("\(label) \(exists ? "found" : "not found")")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.black)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.white)
+        Button {
+            guard exists else { return }
+            action()
+        } label: {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                    .frame(width: 40, height: 34)
+                    .background(exists ? Color.white.opacity(isHovered ? 0.18 : 0.13) : Color.white.opacity(0.11))
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                            .stroke(exists ? Color.green.opacity(0.48) : Color(red: 255/255, green: 102/255, blue: 102/255).opacity(0.48), lineWidth: 1)
                     )
-                    .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 3)
-                    .fixedSize()
-                    .offset(y: 44)
-                    .allowsHitTesting(false)
-                    .zIndex(100)
+
+                Image(systemName: exists ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(exists ? Color.green : Color(red: 255/255, green: 102/255, blue: 102/255))
+                    .background(Color.black.opacity(0.32))
+                    .clipShape(Circle())
+                    .offset(x: 4, y: 4)
             }
         }
+        .buttonStyle(.plain)
         .frame(width: 44, height: 38)
-        .zIndex(isHovered ? 20 : 0)
+        .background(FloatingTooltip(title: "\(label) \(exists ? "found" : "not found")", isEnabled: true))
         .accessibilityLabel("\(label) \(exists ? "exists" : "not found")")
         .onHover { hovering in
             isHovered = hovering

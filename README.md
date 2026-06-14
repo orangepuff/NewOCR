@@ -445,11 +445,11 @@ The window is a split editor:
 
 Features:
 
-- Preview Markdown, Save Markdown, Close, Run OCR, Load Markdown, Files, Search
-  help, Replace All, and Clear Search use icon-first buttons with hover help
-- Search Markdown
+- Preview Markdown, Save Markdown, Close, Run OCR, Load Markdown, Files,
+  Information, Replace, and Remove Search use icon-first buttons with hover help
+- Search Text
 - Replace All
-- badges/focus shortcuts for Image, Footnote, and Blockquote
+- icon-only status/focus shortcuts for Image, Footnote, and Blockquote
 - paragraph editing actions:
   - add paragraph before/after
   - add line break before/after
@@ -762,23 +762,29 @@ Width values may be numeric or `FULL` for full-screen opening.
 - Use restrained neutral surfaces, subtle borders, and small shadows to separate
   the main window, Section List surface, header row, and command/action lane.
   Avoid large colored panels for professional workflow areas.
-- Main window text should use larger white text on darker gray surfaces for
-  clearer contrast, while filled command buttons keep white text.
+- Main window text should use the larger `MainTypography` scale on darker gray
+  surfaces for clearer contrast, while filled command buttons keep high-contrast
+  icon/text colors. The main window typography should stay visually close to the
+  OCR window scale.
+- Keep the EPUB Covers sidebar compact so the Section List gets most of the
+  available width. Covers use smaller thumbnails and tighter spacing than the
+  section table.
 - Section List rows should use clear table structure: even rows and odd rows use
   alternating dark gray backgrounds, with separators and a command/action lane
   that follows the same row background.
 - Section List hides the table header row; the columns are visually implied by
   consistent row alignment and icon treatments.
-- Section List utility icons should stay high-contrast on dark rows: remove uses
-  a red circular background with a black X, add uses a green circular background
-  with a black plus, file/status badges use light foregrounds, and title fields
-  use white backgrounds with black text.
+- Section List utility buttons should match the rectangular action-button style:
+  remove uses a red rounded rectangle with a white X, add uses a green rounded
+  rectangle with a dark plus, and both use the same approximate button size as
+  other row controls.
 - Section List file indicators should be easy to distinguish: PDF rows use a
-  larger orange document icon, manual/section rows use a larger blue section
-  icon, and the MD badge uses a pastel pink background with black text.
+  larger orange document icon in a 46×36 rounded slot, manual/section rows use a
+  larger blue section icon in the same slot, and the MD badge uses a similarly
+  sized pastel pink rounded rectangle with black text.
 - Section List command buttons should be icon-only on white backgrounds with
   black icons, sized large enough to click comfortably, and should show the
-  command name in a custom hover popover.
+  command name in a floating `NSPopover` tooltip below the control.
 - Section List command buttons use per-action colors: Scan Header is brown with
   a white icon, Process is blue with a white play icon, and Preview is orange
   with a black icon.
@@ -795,10 +801,17 @@ Width values may be numeric or `FULL` for full-screen opening.
   and log fields, `stroke` borders, white headings, and colorful icon-first
   buttons. The OCR header uses the same white 58×58 rounded icon tile pattern as
   the main and Add Split headers. OCR top actions and side-panel actions use SF
-  Symbol icon buttons with `.help(...)` tooltips instead of text-heavy buttons.
+  Symbol icon buttons with floating `NSPopover` tooltips instead of text-heavy
+  buttons or SwiftUI in-row tooltip labels.
 - The OCR editor content uses `HSplitView`: the Markdown editor is the left
   pane and OCR controls/log are the right pane. Preserve this split-pane layout
   when making UI-only changes so the user can resize text vs. controls.
+- The OCR search row uses a white rounded `Search Text` field with larger black
+  text and a larger search icon. Search actions are icon buttons named Replace,
+  Remove Search, and Information.
+- Image, Footnote, and Blockquote detection controls are icon-only status
+  buttons. They show a green circle-check when found and a red circle-X when not
+  found, and their hover text is shown in a floating `NSPopover` tooltip.
 - OCR editing text is intentionally larger than default AppKit text. Plain text
   and paragraph text editors share `OCRTypography.editorFontSize` and
   `OCRTypography.editorInset`; paragraph auto-height calculations must stay in
@@ -821,8 +834,7 @@ Width values may be numeric or `FULL` for full-screen opening.
   them. The Section title field uses white background, black text, 14pt medium
   weight, yellow tint — identical to the section title field in the main window.
   The From and To fields are 46px wide (3-digit max of 999), monospaced digit.
-  The Close button is a red circle with a dark X (34×34), matching the
-  section-list utility circle button style. The VStack uses
+  The Close button is red with a white X. The VStack uses
   `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
   .padding(22)` (fills the content area, 22pt insets), then an outer
   `.frame(minWidth: 1100, minHeight: 620)` bounds the NSHostingView fitting
@@ -864,8 +876,8 @@ Before changing behavior:
 
 Maintenance rule:
 
-- If you change, fix, add, or remove app behavior, update this README in the
-  same work session so it remains the current handoff reference.
+- If you change, fix, add, or remove app behavior or visible UI, update this
+  README in the same work session so it remains the current handoff reference.
 - If you make a feature configurable, keep the configurable value in
   `config.txt`; do not store it only in hidden app state or only in UI controls.
 - If the change is intentionally too small to affect documented behavior, say
