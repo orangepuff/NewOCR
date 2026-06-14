@@ -143,6 +143,19 @@ private struct OCRCompareDifference: Identifiable {
     let editedText: String
 }
 
+private final class WindowCleanupDelegate: NSObject, NSWindowDelegate {
+    private let onClose: (NSWindow) -> Void
+
+    init(onClose: @escaping (NSWindow) -> Void) {
+        self.onClose = onClose
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        onClose(window)
+    }
+}
+
 private extension String {
     func trimmingLeadingCharacters(in characterSet: CharacterSet) -> String {
         guard let index = firstIndex(where: { character in
@@ -262,6 +275,7 @@ final class AppState: ObservableObject {
     @Published var ocrSearchText: String = ""
     @Published var paragraphScrollTargetIndex: Int = 0
     @Published var paragraphScrollRequestID: Int = 0
+    @Published var ocrWindowOpenFocusRequestID: Int = 0
     @Published var ocrParagraphSourcePages: [Int] = []
     @Published var ocrParagraphHasOCRSourcePage: [Bool] = []
     @Published var ocrParagraphEditRevision: Int = 0
@@ -329,6 +343,7 @@ final class AppState: ObservableObject {
     private var isRestoring = false
     private var ocrWindows: [NSWindow] = []
     private var ocrCompareWindows: [NSWindow] = []
+    private var retainedWindowDelegates: [ObjectIdentifier: WindowCleanupDelegate] = [:]
     private weak var ocrPreviewWindow: NSWindow?
     private weak var ocrLogWindow: NSWindow?
     private var detachedSplitPlannerStates: [SplitPlannerState] = []
@@ -943,6 +958,7 @@ final class AppState: ObservableObject {
         currentStep = 1
         isOCRRunning = false
         logOutput = ""
+        prepareOCRWindowInitialFocus()
 
         if item.isManualSection {
             if let markdownText = loadAppleVisionMarkdownText() {
@@ -989,6 +1005,13 @@ final class AppState: ObservableObject {
         openOCRWindow()
     }
 
+    private func prepareOCRWindowInitialFocus() {
+        ocrSearchText = ""
+        paragraphScrollTargetIndex = 0
+        paragraphScrollRequestID += 1
+        ocrWindowOpenFocusRequestID += 1
+    }
+
     func previewMarkdown(for item: PDFFileItem) {
         selectedPDFPath = item.url.path
         currentStep = 1
@@ -1031,6 +1054,7 @@ final class AppState: ObservableObject {
                 .environmentObject(self)
         )
         ocrWindows.append(window)
+        trackRetainedWindow(window)
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -1097,23 +1121,51 @@ final class AppState: ObservableObject {
             return sourceURL
         }
 
+        let jpegData = try coverJPEGData(from: sourceURL)
         let folderURL = URL(fileURLWithPath: selectedFolderPath)
             .appendingPathComponent("CoverImage", isDirectory: true)
         try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
 
-        let fileExtension = sourceURL.pathExtension.isEmpty ? "png" : sourceURL.pathExtension
-        let destinationURL = folderURL.appendingPathComponent("\(outputStem).\(fileExtension)")
-        if sourceURL.standardizedFileURL.path == destinationURL.standardizedFileURL.path {
-            return destinationURL
-        }
+        let destinationURL = folderURL.appendingPathComponent("\(outputStem).jpg")
 
         let existingCoverFiles = (try? FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)) ?? []
         for fileURL in existingCoverFiles where fileURL.deletingPathExtension().lastPathComponent == outputStem {
+            if fileURL.standardizedFileURL.path == destinationURL.standardizedFileURL.path {
+                continue
+            }
             try? FileManager.default.removeItem(at: fileURL)
         }
 
-        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        try jpegData.write(to: destinationURL, options: .atomic)
         return destinationURL
+    }
+
+    private func normalizedCoverImagePath(_ path: String, outputStem: String) throws -> String {
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else {
+            return ""
+        }
+        guard !selectedFolderPath.isEmpty else {
+            return trimmedPath
+        }
+
+        let sourceURL = URL(fileURLWithPath: trimmedPath)
+        let copiedURL = try copyCoverImageToSelectedFolder(sourceURL, outputStem: outputStem)
+        return copiedURL.path
+    }
+
+    private func coverJPEGData(from sourceURL: URL) throws -> Data {
+        guard let image = NSImage(contentsOf: sourceURL),
+              let tiffData = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData),
+              let jpegData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.92]) else {
+            throw NSError(
+                domain: "NewOCR.CoverImage",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Could not read this cover image as a supported image."]
+            )
+        }
+        return jpegData
     }
 
     private var coverPanelDirectoryURL: URL? {
@@ -1543,8 +1595,19 @@ final class AppState: ObservableObject {
         let folderURL = URL(fileURLWithPath: selectedFolderPath)
         let configPath = configFileURL.path
         let helperPath = conversionHelperURL.path
-        let frontCoverPath = frontCoverImagePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let backCoverPath = backCoverImagePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let frontCoverPath: String
+        let backCoverPath: String
+        do {
+            frontCoverPath = try normalizedCoverImagePath(frontCoverImagePath, outputStem: "front-cover")
+            backCoverPath = try normalizedCoverImagePath(backCoverImagePath, outputStem: "back-cover")
+            frontCoverImagePath = frontCoverPath
+            backCoverImagePath = backCoverPath
+        } catch {
+            epubStatus = "Could not prepare cover image."
+            ocrStatus = "Could not prepare cover image."
+            logOutput = error.localizedDescription
+            return
+        }
         let bookTitle = folderURL.lastPathComponent
         let manifestURL = folderURL
             .appendingPathComponent("EPUB", isDirectory: true)
@@ -2113,7 +2176,21 @@ final class AppState: ObservableObject {
             )
         )
         ocrCompareWindows.append(window)
+        trackRetainedWindow(window)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private func trackRetainedWindow(_ window: NSWindow) {
+        let key = ObjectIdentifier(window)
+        let delegate = WindowCleanupDelegate { [weak self] closedWindow in
+            guard let self else { return }
+            closedWindow.contentView = nil
+            self.ocrWindows.removeAll { $0 === closedWindow }
+            self.ocrCompareWindows.removeAll { $0 === closedWindow }
+            self.retainedWindowDelegates.removeValue(forKey: ObjectIdentifier(closedWindow))
+        }
+        retainedWindowDelegates[key] = delegate
+        window.delegate = delegate
     }
 
     private func previewHTML(for markdown: String) -> String {
@@ -3575,11 +3652,11 @@ final class AppState: ObservableObject {
 
     func ocrPDFPreviewZoomPercent(for path: String) -> Double {
         let stored = ocrPDFPreviewZoomPercents[path] ?? ocrPDFPreviewLastZoomPercent
-        return min(max(stored, 110), 220)
+        return min(max(stored, 100), 220)
     }
 
     func setOCRPDFPreviewZoomPercent(_ value: Double, for path: String) {
-        let clampedValue = min(max(value, 110), 220)
+        let clampedValue = min(max(value, 100), 220)
         ocrPDFPreviewLastZoomPercent = clampedValue
         if !path.isEmpty {
             ocrPDFPreviewZoomPercents[path] = clampedValue
@@ -5051,7 +5128,8 @@ final class AppState: ObservableObject {
 
             let isIndented = (line.left - normalLeft) >= indentThreshold
             let previousIsFullLine = previousLine.map { (normalRight - $0.right) <= rightEdgeThreshold } ?? false
-            let shouldContinue = !current.isEmpty && !isIndented && (centeredBodyMode || previousIsFullLine)
+            let hasBlankLineGap = previousLine.map { hasDetectedBlankLineGap(between: $0, and: line, averageHeight: averageHeight) } ?? false
+            let shouldContinue = !hasBlankLineGap && !current.isEmpty && !isIndented && (centeredBodyMode || previousIsFullLine)
 
             if shouldContinue {
                 current = joinContinuousLine(current, line.text)
@@ -5069,6 +5147,12 @@ final class AppState: ObservableObject {
         }
 
         return paragraphs.joined(separator: "\n\n")
+    }
+
+    private func hasDetectedBlankLineGap(between previousLine: OCRLine, and currentLine: OCRLine, averageHeight: CGFloat) -> Bool {
+        let verticalGap = previousLine.bottom - currentLine.top
+        guard verticalGap > 0 else { return false }
+        return verticalGap >= max(averageHeight * 1.35, 0.026)
     }
 
     private func applyMarkdownTitle(_ title: String, to markdown: String, replaceExistingHeading: Bool) -> String {
@@ -5281,8 +5365,8 @@ final class AppState: ObservableObject {
         logOutput = ""
         pdfTitles = defaults.dictionary(forKey: "pdfTitles") as? [String: String] ?? [:]
         ocrPDFPreviewZoomPercents = loadDoubleDictionary(forKey: "ocrPDFPreviewZoomPercents")
-        ocrPDFPreviewLastZoomPercent = min(max(defaults.double(forKey: "ocrPDFPreviewLastZoomPercent"), 110), 220)
-        if ocrPDFPreviewLastZoomPercent == 110, defaults.object(forKey: "ocrPDFPreviewLastZoomPercent") == nil {
+        ocrPDFPreviewLastZoomPercent = min(max(defaults.double(forKey: "ocrPDFPreviewLastZoomPercent"), 100), 220)
+        if ocrPDFPreviewLastZoomPercent == 100, defaults.object(forKey: "ocrPDFPreviewLastZoomPercent") == nil {
             ocrPDFPreviewLastZoomPercent = 145
         }
         frontCoverImagePath = defaults.string(forKey: "frontCoverImagePath") ?? ""
@@ -7476,7 +7560,7 @@ struct OCRPDFPreviewPanel: View {
                 OCRIconButton(title: "Zoom Out", systemImage: "minus.magnifyingglass", backgroundColor: Color.white.opacity(0.92), size: 34) {
                     setZoomPercent(zoomPercent - 15)
                 }
-                .disabled(pdfURL == nil || zoomPercent <= 110)
+                .disabled(pdfURL == nil || zoomPercent <= 100)
 
                 Text("\(Int(zoomPercent))%")
                     .font(.system(size: 13, weight: .semibold).monospacedDigit())
@@ -8260,6 +8344,7 @@ struct ParagraphEditorView: View {
     @EnvironmentObject private var appState: AppState
     @State private var lastScrollPreviewIndex: Int? = nil
     @State private var lastHandledParagraphEditRevision = 0
+    @State private var handledOpenFocusRequestID = 0
 
     var body: some View {
         let visibleIndexes = appState.visibleOCRParagraphIndexes
@@ -8292,6 +8377,13 @@ struct ParagraphEditorView: View {
                 .padding(8)
             }
             .coordinateSpace(name: "ocrParagraphScroll")
+            .onAppear {
+                focusFirstParagraph(with: proxy)
+            }
+            .onReceive(appState.$ocrWindowOpenFocusRequestID) { requestID in
+                guard requestID > 0, requestID != handledOpenFocusRequestID else { return }
+                focusFirstParagraph(with: proxy)
+            }
             .onPreferenceChange(ParagraphListItemOffsetPreferenceKey.self) { offsets in
                 guard appState.ocrParagraphEditRevision == lastHandledParagraphEditRevision else {
                     lastHandledParagraphEditRevision = appState.ocrParagraphEditRevision
@@ -8324,6 +8416,19 @@ struct ParagraphEditorView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
         )
+    }
+
+    private func focusFirstParagraph(with proxy: ScrollViewProxy) {
+        let requestID = appState.ocrWindowOpenFocusRequestID
+        guard handledOpenFocusRequestID != requestID else { return }
+        handledOpenFocusRequestID = requestID
+        lastHandledParagraphEditRevision = appState.ocrParagraphEditRevision
+        guard appState.ocrParagraphs.indices.contains(0) else { return }
+        lastScrollPreviewIndex = 0
+        DispatchQueue.main.async {
+            proxy.scrollTo(0, anchor: .top)
+            appState.previewOCRParagraphSourcePage(0)
+        }
     }
 }
 

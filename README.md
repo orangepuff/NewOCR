@@ -433,6 +433,9 @@ Important fix/behavior:
 - Real smaller images, figures, diagrams, and illustrations are extracted only
   on pages without meaningful OCR text. Users can still add images manually from
   the OCR editor when a text page also needs an image.
+- Process OCR should detect a large vertical gap between OCR text lines as a
+  blank-line paragraph break, so visible blank rows in the PDF become separate
+  Markdown paragraphs instead of being joined into one paragraph.
 
 This prevents pages or paragraphs from becoming image-only Markdown when text
 OCR succeeded.
@@ -545,9 +548,16 @@ The window is a split editor:
   moving up/down must not recenter left/right unless the user pans horizontally
 - editing paragraph text must not reset the PDF preview to the start of the
   source page; keep the current preview area when the source page is unchanged
+- opening the OCR window should clear the paragraph search, focus/scroll the
+  paragraph editor to paragraph 1, and show paragraph 1's source page in the PDF
+  preview
 - OCR PDF preview zoom is remembered per selected section PDF file and persists
   after closing and reopening the app. If a section has no saved zoom yet, use
   the last OCR PDF preview zoom the user chose instead of resetting to `145%`.
+  The OCR PDF preview zoom range is `100%` to `220%`.
+- Closed OCR and Compare windows must be removed from retained window lists and
+  release their hosted views so editing many sections does not get slower over
+  time.
 
 Features:
 
@@ -804,6 +814,10 @@ Expected EPUB behavior:
 - copy `Fonts/`
 - copy Markdown image assets
 - include front/back covers if selected
+- normalize selected/existing cover images to real JPEG files before building,
+  so the EPUB manifest media type matches the image bytes
+- mark the front cover with both EPUB 3 `cover-image` metadata and the older
+  `meta name="cover"` metadata for reader compatibility
 - create per-chapter XHTML files
 - create navigation/TOC
 - preserve supported Markdown and supported HTML classes
@@ -829,6 +843,11 @@ The Python converter supports:
 ## Covers
 
 Front and back covers are copied into the project folder under `CoverImage/`.
+The app writes them as real JPEG files named `front-cover.jpg` and
+`back-cover.jpg`, including when the selected source image uses another format
+or has a misleading extension. **Build EPUB** also re-normalizes existing cover
+files before creating the EPUB, so older project cover files are repaired during
+the next build.
 
 The main window should keep cover thumbnails centered and compact so the section
 list has enough vertical space.
@@ -1133,6 +1152,18 @@ Check:
 - `Apply CSS` was run or default stylesheet includes the classes
 - Python converter preserved the class
 - generated XHTML contains `class="left"`, `class="center"`, or `class="right"`
+
+### EPUB cover does not appear
+
+Check:
+
+- cover paths in `EPUB/book-epub-manifest.json`
+- `CoverImage/front-cover.jpg` and `CoverImage/back-cover.jpg` are real JPEG
+  files, not WebP or another image format with a `.jpg` extension
+- generated `OEBPS/content.opf` has `properties="cover-image"` on the front
+  cover image item and `meta name="cover"`
+- rebuild the EPUB after cover normalization changes, because an already-created
+  `.epub` will still contain the old packaged image
 
 ## Glossary
 

@@ -615,6 +615,8 @@ def make_content_opf(book_title, identifier, covers=None, assets=None, documents
         f'<itemref idref="{document["id"]}"/>'
         for document in documents
     )
+    front_cover_id = next((cover["id"] for cover in covers if cover["xhtml_id"] == "front-cover"), "")
+    cover_meta = f'<meta name="cover" content="{html.escape(front_cover_id, quote=True)}"/>' if front_cover_id else ""
     front_spine = '<itemref idref="front-cover" linear="yes"/>\n' if any(cover["xhtml_id"] == "front-cover" for cover in covers) else ""
     back_spine = '\n<itemref idref="back-cover" linear="yes"/>' if any(cover["xhtml_id"] == "back-cover" for cover in covers) else ""
     return f"""<?xml version="1.0" encoding="utf-8"?>
@@ -624,6 +626,7 @@ def make_content_opf(book_title, identifier, covers=None, assets=None, documents
 <dc:title>{html.escape(book_title)}</dc:title>
 <dc:language>th</dc:language>
 <meta property="dcterms:modified">{modified}</meta>
+{cover_meta}
 </metadata>
 <manifest>
 <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
