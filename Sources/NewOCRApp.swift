@@ -3269,12 +3269,14 @@ final class AppState: ObservableObject {
 
             let image = try renderPDFPageToCGImage(page)
             let rawLines = try recognizeTextWithAppleVision(in: image)
-            let imageRegions = try detectImageRegions(
-                in: image,
-                textLines: rawLines,
-                pageNumber: pageIndex + 1,
-                outputFolder: mdFolder
-            )
+            let imageRegions = hasMeaningfulOCRText(rawLines)
+                ? []
+                : try detectImageRegions(
+                    in: image,
+                    textLines: rawLines,
+                    pageNumber: pageIndex + 1,
+                    outputFolder: mdFolder
+                )
             rawPages.append(rawLines)
             pageImageRegions.append(imageRegions)
 
@@ -3401,6 +3403,14 @@ final class AppState: ObservableObject {
                 bottom: observation.boundingBox.minY,
                 top: observation.boundingBox.maxY
             )
+        }
+    }
+
+    private func hasMeaningfulOCRText(_ lines: [OCRLine]) -> Bool {
+        lines.contains { line in
+            line.text.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+                && line.width >= 0.01
+                && line.height >= 0.003
         }
     }
 
@@ -4829,13 +4839,17 @@ struct ContentView: View {
         .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
         .onAppear {
-            guard appState.shouldOpenMainWindowFullScreen else { return }
             DispatchQueue.main.async {
                 guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first,
                       let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame else {
                     return
                 }
-                window.setFrame(visibleFrame, display: true)
+                if appState.shouldOpenMainWindowFullScreen {
+                    window.setFrame(visibleFrame, display: true)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    window.makeFirstResponder(nil)
+                }
             }
         }
     }
@@ -5686,14 +5700,25 @@ struct ConfigEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: appState.isHeaderFooterReviewOpen ? "text.viewfinder" : "gearshape")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text(appState.configEditorTitle)
-                        .font(.title2.weight(.semibold))
+                        .font(.system(size: 31, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
                     Text(appState.configEditorPath)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -5707,7 +5732,7 @@ struct ConfigEditorView: View {
                     .keyboardShortcut("s", modifiers: [.command])
                 }
 
-                Button("Close") {
+                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
                     dismiss()
                 }
             }
@@ -5716,31 +5741,32 @@ struct ConfigEditorView: View {
                 HeaderFooterReviewView()
                     .environmentObject(appState)
                     .frame(minWidth: 640, minHeight: 360)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                    )
             } else {
                 TextEditor(text: $appState.configText)
-                    .font(.body.monospaced())
+                    .font(.system(size: 16, design: .monospaced))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                    .scrollContentBackground(.hidden)
+                    .background(NewOCRMainPalette.fieldBackground)
                     .frame(minWidth: 640, minHeight: 360)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
                     )
             }
 
             HStack {
                 Text(appState.configStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
                 Spacer()
             }
         }
-        .padding(20)
+        .padding(22)
+        .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
     }
 }
@@ -5752,31 +5778,42 @@ struct HeaderFooterReviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Approved Remove Items")
-                    .font(.headline)
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.headingText)
 
                 if appState.headerFooterReviewRemoveItems.isEmpty {
                     Text("No remove items.")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
                 } else {
                     ForEach(appState.headerFooterReviewRemoveItems, id: \.self) { item in
                         HStack(spacing: 10) {
                             Text(item)
-                                .font(.body.monospaced())
+                                .font(.system(size: 16, design: .monospaced))
+                                .foregroundStyle(NewOCRMainPalette.primaryText)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            Button("Remove") {
+                            OCRIconButton(title: "Remove", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
                                 appState.removeHeaderFooterReviewItem(item)
                             }
                         }
-                        .padding(10)
-                        .background(Color(nsColor: .controlBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .padding(11)
+                        .background(NewOCRMainPalette.fieldBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                        )
                     }
                 }
             }
-            .padding(12)
+            .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
     }
 }
 
@@ -6784,22 +6821,47 @@ struct OCRMarkdownPreviewWindowView: View {
     let readAccessURL: URL
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Spacer()
-                Button("Close") {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "eye")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Preview")
+                        .font(.system(size: 31, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(previewURL.deletingPathExtension().lastPathComponent)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 10)
+
+                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
                     NSApp.keyWindow?.close()
                 }
-                .controlSize(.large)
             }
-            .padding(12)
-            .background(Color(nsColor: .windowBackgroundColor))
-
-            Divider()
 
             WebPreviewView(url: previewURL, readAccessURL: readAccessURL)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
         }
-        .frame(minWidth: 520, minHeight: 420)
+        .padding(22)
+        .frame(minWidth: 620, minHeight: 520)
+        .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
     }
 }
@@ -6884,10 +6946,14 @@ struct WebPreviewView: NSViewRepresentable {
     let readAccessURL: URL
 
     func makeNSView(context: Context) -> WKWebView {
-        WKWebView()
+        let webView = WKWebView()
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.layer?.backgroundColor = NSColor.white.cgColor
+        return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        webView.layer?.backgroundColor = NSColor.white.cgColor
         webView.loadFileURL(url, allowingReadAccessTo: readAccessURL)
     }
 }

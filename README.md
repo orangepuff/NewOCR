@@ -384,13 +384,17 @@ image references such as:
 Important fix/behavior:
 
 - OCR text is priority.
+- If Apple Vision recognizes meaningful text on a page, NewOCR must not emit any
+  OCR-detected image Markdown for that page.
+- Image-region detection should run only for pages where no meaningful OCR text
+  is detected.
 - A full-page scanned text page must not be replaced by a full-page image.
-- If Apple Vision recognizes meaningful text, large page-sized image regions
-  that overlap many OCR lines should be ignored.
-- Real smaller images, figures, diagrams, and illustrations should still be
-  extracted.
+- Real smaller images, figures, diagrams, and illustrations are extracted only
+  on pages without meaningful OCR text. Users can still add images manually from
+  the OCR editor when a text page also needs an image.
 
-This prevents pages from becoming image-only Markdown when text OCR succeeded.
+This prevents pages or paragraphs from becoming image-only Markdown when text
+OCR succeeded.
 
 ### User-Added Images
 
@@ -452,6 +456,11 @@ title phrase also found in footers.
 When the working folder changes, the current folder's
 `AppleVision/LineCache/header-footer-review.txt` should be removed/cleared.
 
+The Header/Footer Review UI uses the same dark NewOCR shell as other windows:
+white 58×58 icon tile, dark outer background, red rectangular close button with
+white X, bordered panel surfaces, dark row backgrounds with light text, and
+red rectangular X buttons for removing approved header/footer items.
+
 ## OCR Editor
 
 The OCR editor can show Markdown as paragraphs or as plain text. It follows the
@@ -489,6 +498,11 @@ close.
 If the OCR Preview window is open, closing the OCR window should also close the
 Preview window. This applies to both the OCR window **Close** button and the
 Save-success OK flow.
+
+The OCR Preview window uses the same dark NewOCR window shell as other windows:
+white 58×58 icon tile, dark outer background, red rectangular close button with
+white X, and bordered content panel. Only the actual rendered preview/WebView
+area should be white.
 
 The OCR Log is opened from a Log icon button instead of living as a large panel
 inside the OCR editor. Clicking Log opens or focuses a separate dark themed log
@@ -803,6 +817,9 @@ Width values may be numeric or `FULL` for full-screen opening.
   that follows the same row background.
 - Section List hides the table header row; the columns are visually implied by
   consistent row alignment and icon treatments.
+- The first Section List title field should not appear focused/highlighted when
+  the main window opens. The main window clears the initial first responder
+  after layout; users can still click any title field to edit normally.
 - Section List utility buttons should match the rectangular action-button style:
   remove uses a red rounded rectangle with a white X, add uses a green rounded
   rectangle with a dark plus, and both use the same approximate button size as
