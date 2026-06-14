@@ -7230,15 +7230,8 @@ final class SplitPlannerState: ObservableObject {
             return
         }
 
-        let initialRect: NSRect
-        if shouldOpenAddSplitWindowFullScreen, let visibleFrame = NSScreen.main?.visibleFrame {
-            initialRect = visibleFrame
-        } else {
-            initialRect = NSRect(x: 0, y: 0, width: addSplitWindowWidth, height: addSplitWindowHeight)
-        }
-
         let window = NSWindow(
-            contentRect: initialRect,
+            contentRect: NSRect(x: 0, y: 0, width: addSplitWindowWidth, height: addSplitWindowHeight),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -7247,15 +7240,15 @@ final class SplitPlannerState: ObservableObject {
         window.contentMinSize = NSSize(width: 1100, height: 620)
         window.isReleasedWhenClosed = false
 
-        if shouldOpenAddSplitWindowFullScreen {
-            window.setFrame(initialRect, display: true)
+        let hostingView = NSHostingView(rootView: AddSplitWindowView().environmentObject(self))
+        hostingView.sizingOptions = []
+        window.contentView = hostingView
+
+        if shouldOpenAddSplitWindowFullScreen, let visibleFrame = NSScreen.main?.visibleFrame {
+            window.setFrame(visibleFrame, display: true)
         } else {
             window.center()
         }
-        window.contentView = NSHostingView(
-            rootView: AddSplitWindowView()
-                .environmentObject(self)
-        )
         addSplitWindows.append(window)
         window.makeKeyAndOrderFront(nil)
     }
@@ -7509,11 +7502,10 @@ final class SplitPlannerState: ObservableObject {
                     pageTo: "\(document.pageCount)"
                 )
             ])
-            let loadedMessage = loadedFromPath ? "Loaded working PDF." : (isStale ? "Loaded PDF. Bookmark may need refreshing later." : "Loaded PDF from bookmark.")
             if !savedRanges.isEmpty {
-                status = "\(loadedMessage) Loaded \(savedRanges.count) saved split rows."
+                status = "\(savedRanges.count) split files"
             } else {
-                status = bookmarkRanges.isEmpty ? "\(loadedMessage) No PDF bookmarks found." : "\(loadedMessage) Created \(bookmarkRanges.count) split rows from PDF bookmarks."
+                status = bookmarkRanges.isEmpty ? "No PDF bookmarks found." : "Created \(bookmarkRanges.count) split files from PDF bookmarks."
             }
             isLoadingPDF = false
             if shouldOpenCropWindowAfterLoad {
@@ -7926,9 +7918,12 @@ struct CropPDFWindowView: View {
 private struct AddSplitActionButtonStyle: ButtonStyle {
     let backgroundColor: Color
     let foregroundColor: Color
+    var fontSize: CGFloat = 16
+    var paddingH: CGFloat = 11
+    var paddingV: CGFloat = 9
 
     func makeBody(configuration: Configuration) -> some View {
-        AddSplitActionButtonBody(configuration: configuration, backgroundColor: backgroundColor, foregroundColor: foregroundColor)
+        AddSplitActionButtonBody(configuration: configuration, backgroundColor: backgroundColor, foregroundColor: foregroundColor, fontSize: fontSize, paddingH: paddingH, paddingV: paddingV)
     }
 }
 
@@ -7936,16 +7931,19 @@ private struct AddSplitActionButtonBody: View {
     let configuration: AddSplitActionButtonStyle.Configuration
     let backgroundColor: Color
     let foregroundColor: Color
+    var fontSize: CGFloat = 16
+    var paddingH: CGFloat = 11
+    var paddingV: CGFloat = 9
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
 
     var body: some View {
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
+            .font(.system(size: fontSize, weight: .semibold))
             .lineLimit(1)
             .foregroundStyle(isEnabled ? foregroundColor : foregroundColor.opacity(0.38))
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
+            .padding(.horizontal, paddingH)
+            .padding(.vertical, paddingV)
             .background(isEnabled ? (configuration.isPressed ? backgroundColor.opacity(0.70) : (isHovered ? backgroundColor.opacity(0.86) : backgroundColor)) : backgroundColor.opacity(0.32))
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
@@ -7966,47 +7964,60 @@ struct AddSplitWindowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 16) {
-                HStack(alignment: .center, spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.white.opacity(0.94))
-                            .frame(width: 58, height: 58)
-                            .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                        Image(systemName: "scissors")
-                            .font(.system(size: 28, weight: .semibold))
-                            .foregroundStyle(Color.black)
-                    }
-
-                    HStack(spacing: 9) {
-                        Image(systemName: "doc.richtext")
-                            .font(.system(size: 26, weight: .semibold))
-                            .foregroundStyle(.orange)
-                            .frame(width: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(planner.pdfName)
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(NewOCRMainPalette.primaryText)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Text("\(max(planner.pageCount, 0)) pages")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(NewOCRMainPalette.tertiaryText)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 11)
-                    .background(NewOCRMainPalette.panelBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                    )
-                    .frame(maxWidth: 300, alignment: .leading)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "scissors")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color.black)
                 }
+
+                HStack(spacing: 9) {
+                    Image(systemName: "doc.richtext")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(planner.pdfName)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text("\(planner.ranges.count) split files")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .frame(maxWidth: 300, alignment: .leading)
 
                 Spacer(minLength: 12)
 
-                HStack(spacing: 8) {
+                Button {
+                    NSApp.keyWindow?.close()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color(red: 17/255, green: 17/255, blue: 17/255))
+                        .frame(width: 34, height: 34)
+                        .background(Color(red: 255/255, green: 71/255, blue: 71/255))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+                .modifier(PointingHandCursorModifier(isEnabled: true))
+            }
+
+            HStack(spacing: 8) {
                     Button {
                         setPreviewPageIndex(max(previewPageIndex - 1, 0))
                     } label: {
@@ -8079,13 +8090,13 @@ struct AddSplitWindowView: View {
 
                     TextField("Section title", text: $titleText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(Color.black)
                         .tint(Color.yellow)
                         .accentColor(Color.yellow)
                         .frame(minWidth: 170)
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
+                        .padding(.vertical, 9)
                         .background(Color.white.opacity(0.94))
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .overlay(
@@ -8095,11 +8106,11 @@ struct AddSplitWindowView: View {
 
                     TextField("From", text: $pageFrom)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 15).monospacedDigit())
+                        .font(.system(size: 17).monospacedDigit())
                         .foregroundStyle(NewOCRMainPalette.primaryText)
-                        .frame(width: 46)
+                        .frame(width: 64)
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
+                        .padding(.vertical, 9)
                         .background(NewOCRMainPalette.fieldBackground)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .overlay(
@@ -8109,11 +8120,11 @@ struct AddSplitWindowView: View {
 
                     TextField("To", text: $pageTo)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 15).monospacedDigit())
+                        .font(.system(size: 17).monospacedDigit())
                         .foregroundStyle(NewOCRMainPalette.primaryText)
-                        .frame(width: 46)
+                        .frame(width: 64)
                         .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
+                        .padding(.vertical, 9)
                         .background(NewOCRMainPalette.fieldBackground)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .overlay(
@@ -8124,59 +8135,19 @@ struct AddSplitWindowView: View {
                     Button {
                         saveSplit()
                     } label: {
-                        Label("Split", systemImage: "scissors")
+                        Image(systemName: "scissors")
+                            .font(.system(size: 22, weight: .semibold))
                     }
                     .buttonStyle(AddSplitActionButtonStyle(
                         backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
-                        foregroundColor: Color(red: 17/255, green: 17/255, blue: 17/255)
+                        foregroundColor: Color(red: 17/255, green: 17/255, blue: 17/255),
+                        paddingH: 16,
+                        paddingV: 11
                     ))
                     .keyboardShortcut(.defaultAction)
                     .disabled(planner.isLoadingPDF || !planner.canAddMoreSplits || planner.pageCount == 0)
-                }
-                .padding(10)
-                .background(NewOCRMainPalette.panelBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                )
-
-                Spacer(minLength: 12)
-
-                Button {
-                    NSApp.keyWindow?.close()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color(red: 17/255, green: 17/255, blue: 17/255))
-                        .frame(width: 34, height: 34)
-                        .background(Color(red: 255/255, green: 71/255, blue: 71/255))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Close")
-                .modifier(PointingHandCursorModifier(isEnabled: true))
             }
-
-            HStack(spacing: 10) {
-                if planner.isLoadingPDF {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: planner.status.lowercased().hasPrefix("created") ? "checkmark.circle.fill" : "info.circle")
-                        .foregroundStyle(planner.status.lowercased().hasPrefix("created") ? .green : NewOCRMainPalette.tertiaryText)
-                }
-
-                Text(planner.status)
-                    .font(.caption)
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(10)
             .background(NewOCRMainPalette.panelBackground)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
@@ -8210,14 +8181,8 @@ struct AddSplitWindowView: View {
         .buttonStyle(NewOCRButtonStyle())
         .onAppear {
             resetRange()
-            DispatchQueue.main.async {
-                guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.last,
-                      let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame else { return }
-                window.setFrame(visibleFrame, display: true)
-            }
         }
         .onChange(of: planner.pageCount) { _, _ in resetRange() }
-        .frame(minWidth: 1100, minHeight: 620)
     }
 
     private func saveSplit() {
