@@ -434,8 +434,9 @@ Important fix/behavior:
   on pages without meaningful OCR text. Users can still add images manually from
   the OCR editor when a text page also needs an image.
 - Process OCR should detect a large vertical gap between OCR text lines as a
-  blank-line paragraph break, so visible blank rows in the PDF become separate
-  Markdown paragraphs instead of being joined into one paragraph.
+  blank-line paragraph break. The surrounding text paragraphs stay unchanged,
+  and NewOCR inserts a separate `<br/>` paragraph between them so the visible
+  blank row is preserved.
 
 This prevents pages or paragraphs from becoming image-only Markdown when text
 OCR succeeded.
@@ -499,6 +500,15 @@ This should only remove top/bottom lines that match the entered filter text.
 
 When the working folder changes, filtered text should be cleared so a filter
 from one book does not affect another book.
+
+During OCR, NewOCR also checks the first configured OCR lines on each page
+against the section title. `OCR_TITLE_MATCH_TOP_LINES=3` means the first three
+OCR text lines are checked. If a top line matches the title words in order, for
+example section title `Do my best` matching OCR text like `Do 01 my best`, that
+line is removed before Markdown is created. If OCR splits the title across
+multiple top lines, such as one line containing `28 ความสำเร็จที่` and the next
+line containing `ไร้ความหมายที่สุด`, NewOCR matches the combined top lines and
+removes all title lines that formed the match.
 
 ### Scan Header
 
@@ -871,6 +881,7 @@ CROP_PDF_WINDOW_HEIGHT=720
 ADD_SPLIT_WINDOW_WIDTH=FULL
 ADD_SPLIT_WINDOW_HEIGHT=720
 OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
+OCR_TITLE_MATCH_TOP_LINES=3
 PREVIEW_TEXT_SCALE_PERCENT=170
 NEW_PROJECTS_FOLDER=~/Downloads
 ```

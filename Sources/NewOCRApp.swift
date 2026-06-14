@@ -323,6 +323,7 @@ final class AppState: ObservableObject {
     @Published var mainWindowHeight: CGFloat = 520
     @Published var shouldOpenMainWindowFullScreen: Bool = false
     @Published var ocrParagraphTextAreaMinHeight: CGFloat = 58
+    @Published var ocrTitleMatchTopLineCount: Int = 3
     @Published var ocrWindowWidth: CGFloat = 820
     @Published var ocrWindowHeight: CGFloat = 620
     @Published var shouldOpenOCRWindowFullScreen: Bool = false
@@ -3974,6 +3975,7 @@ final class AppState: ObservableObject {
 
         let topCount = parseLineCount(filterTopLines, defaultValue: 1)
         let bottomCount = parseLineCount(filterBottomLines, defaultValue: 1)
+        let titleMatchTopLineCount = ocrTitleMatchTopLineCount
         let filterValues = parseFilterValues(filteredText)
         var rawPages: [[OCRLine]] = []
         var pageImageRegions: [[OCRImageRegion]] = []
@@ -4020,6 +4022,8 @@ final class AppState: ObservableObject {
                 topCount: topCount,
                 bottomCount: bottomCount,
                 filterValues: filterValues,
+                documentTitle: documentTitle,
+                titleMatchTopLineCount: titleMatchTopLineCount,
                 repeatedHeaderFooterKeys: repeatedHeaderFooterKeys
             )
             let imageRegions = pageImageRegions.indices.contains(pageIndex) ? pageImageRegions[pageIndex] : []
@@ -4402,12 +4406,21 @@ final class AppState: ObservableObject {
         topCount: Int,
         bottomCount: Int,
         filterValues: [String],
+        documentTitle: String,
+        titleMatchTopLineCount: Int,
         repeatedHeaderFooterKeys: Set<String>
     ) -> [OCRLine] {
         var removeIndexes = Set<Int>()
 
         for (index, line) in lines.enumerated() where isPageBoundaryLine(index, in: lines) && shouldAutoRemoveHeaderFooterLine(line, repeatedHeaderFooterKeys: repeatedHeaderFooterKeys) {
             removeIndexes.insert(index)
+        }
+
+        let titleTopCount = min(max(0, titleMatchTopLineCount), lines.count)
+        if titleTopCount > 0 {
+            for index in titleLineIndexesToRemove(in: lines, topCount: titleTopCount, documentTitle: documentTitle) {
+                removeIndexes.insert(index)
+            }
         }
 
         if !filterValues.isEmpty {
@@ -4427,6 +4440,51 @@ final class AppState: ObservableObject {
             .enumerated()
             .filter { !removeIndexes.contains($0.offset) }
             .map { $0.element }
+    }
+
+    private func titleLineIndexesToRemove(in lines: [OCRLine], topCount: Int, documentTitle: String) -> Set<Int> {
+        guard topCount > 0 else { return [] }
+        let topIndexes = Array(0..<min(topCount, lines.count))
+        var indexesToRemove = Set<Int>()
+
+        for index in topIndexes where shouldRemoveTitleText(lines[index].text, documentTitle: documentTitle) {
+            indexesToRemove.insert(index)
+        }
+
+        for start in topIndexes {
+            var combinedParts: [String] = []
+            for end in start..<min(topCount, lines.count) {
+                combinedParts.append(lines[end].text)
+                let combinedText = combinedParts.joined(separator: " ")
+                if shouldRemoveTitleText(combinedText, documentTitle: documentTitle) {
+                    for index in start...end {
+                        indexesToRemove.insert(index)
+                    }
+                    break
+                }
+            }
+        }
+
+        return indexesToRemove
+    }
+
+    private func shouldRemoveTitleText(_ text: String, documentTitle: String) -> Bool {
+        guard let titleKey = normalizedHeaderFooterKey(documentTitle),
+              let lineKey = normalizedHeaderFooterKey(text) else {
+            return false
+        }
+
+        let compactTitleKey = compactTitleMatchKey(titleKey)
+        let compactLineKey = compactTitleMatchKey(lineKey)
+        if compactTitleKey.count >= 2 && compactLineKey.contains(compactTitleKey) {
+            return true
+        }
+
+        return headerFooterKeyTokensMatchInOrder(lineKey, pattern: titleKey)
+    }
+
+    private func compactTitleMatchKey(_ value: String) -> String {
+        value.filter { !$0.isWhitespace }
     }
 
     private func shouldAutoRemoveHeaderFooterLine(_ line: OCRLine, repeatedHeaderFooterKeys: Set<String>) -> Bool {
@@ -5136,6 +5194,9 @@ final class AppState: ObservableObject {
             } else {
                 if !current.isEmpty {
                     paragraphs.append(current)
+                    if hasBlankLineGap {
+                        paragraphs.append("<br/>")
+                    }
                 }
                 current = line.text
             }
@@ -5563,6 +5624,7 @@ final class AppState: ObservableObject {
             mainWindowHeight = CGFloat(parseDouble(values["MAIN_WINDOW_HEIGHT"], defaultValue: 520, minimum: 480))
         }
         ocrParagraphTextAreaMinHeight = CGFloat(parseDouble(values["OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT"], defaultValue: 58, minimum: 40))
+        ocrTitleMatchTopLineCount = Int(parseDouble(values["OCR_TITLE_MATCH_TOP_LINES"], defaultValue: 3, minimum: 0))
         previewTextScalePercent = min(parseDouble(values["PREVIEW_TEXT_SCALE_PERCENT"], defaultValue: 170, minimum: 80), 220)
         shouldOpenOCRWindowFullScreen = (values["OCR_WINDOW_WIDTH"] ?? "FULL").trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
         if !shouldOpenOCRWindowFullScreen {
