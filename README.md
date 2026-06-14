@@ -487,6 +487,11 @@ Features:
 - when Search Text is empty, scrolling the paragraph list switches the PDF
   preview to the nearest visible paragraph's source page; focusing or editing a
   paragraph text box also switches to that paragraph's source page
+- paragraph labels show source page numbers only for paragraphs known to come
+  from OCR page output, for example `Paragraph 1 (Page 1)`; manual sections,
+  newly inserted paragraphs, and paragraphs without a known OCR page keep the
+  plain `Paragraph 1` label; this state is saved in
+  `paragraph-source-pages.json` next to the section's `page*.md` files
 - paragraph editing actions:
   - add paragraph before/after
   - add user image before/after
@@ -886,6 +891,12 @@ Width values may be numeric or `FULL` for full-screen opening.
   requests a preview jump. Search filtering must not request scroll-based
   preview jumps. Saving edited Markdown should preserve known source pages by
   writing paragraphs back to their mapped `page*.md` files where possible.
+- Paragraph row titles use the known OCR source-page flag before appending
+  `(Page n)`. Do not show a guessed page number for manual sections, newly
+  inserted paragraphs, user-added images, or paragraphs without a known OCR page
+  source. The editor persists these flags in `paragraph-source-pages.json` in
+  the section Markdown folder and falls back to treating existing non-manual OCR
+  `page*.md` content as OCR-sourced when older folders do not have metadata.
 - Image, Footnote, and Blockquote detection controls are icon-only status
   buttons. They show a green circle-check when found and a red circle-X when not
   found, and their hover text is shown in a floating `NSPopover` tooltip.

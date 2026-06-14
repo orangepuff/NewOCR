@@ -101,6 +101,11 @@ private struct OCRPageMarkdown {
     let lastTextLineCanContinueNextPage: Bool
 }
 
+private struct OCRParagraphSourcePageRecord: Codable {
+    let page: Int
+    let hasOCRSourcePage: Bool
+}
+
 private extension String {
     func trimmingLeadingCharacters(in characterSet: CharacterSet) -> String {
         guard let index = firstIndex(where: { character in
@@ -221,6 +226,7 @@ final class AppState: ObservableObject {
     @Published var paragraphScrollTargetIndex: Int = 0
     @Published var paragraphScrollRequestID: Int = 0
     @Published var ocrParagraphSourcePages: [Int] = []
+    @Published var ocrParagraphHasOCRSourcePage: [Bool] = []
     @Published var ocrPDFPreviewPageRequestIndex: Int = 0
     @Published var ocrPDFPreviewPageRequestID: Int = 0
 
@@ -556,6 +562,7 @@ final class AppState: ObservableObject {
                         self.selectedPDFPath = ""
                         self.ocrText = ""
                         self.ocrParagraphSourcePages = []
+                        self.ocrParagraphHasOCRSourcePage = []
                     }
                     self.builtEPUBPath = ""
                     self.frontCoverImagePath = ""
@@ -901,6 +908,8 @@ final class AppState: ObservableObject {
                 let markdownText = "## \(title.isEmpty ? "Manual Section" : title)"
                 do {
                     let markdownFolderURL = manualMarkdownFolderURL(for: item.url)
+                    ocrParagraphSourcePages = []
+                    ocrParagraphHasOCRSourcePage = []
                     try saveAppleVisionMarkdownText(markdownText, folderURL: markdownFolderURL)
                     ocrText = markdownText
                     ocrStatus = "Created manual Markdown."
@@ -925,6 +934,7 @@ final class AppState: ObservableObject {
         } else {
             ocrText = ""
             ocrParagraphSourcePages = []
+            ocrParagraphHasOCRSourcePage = []
             skipProcessOCREngine = false
             ocrStatus = "Ready. Click OCR to start."
         }
@@ -1339,6 +1349,7 @@ final class AppState: ObservableObject {
         ocrStatus = "No AppleVision Markdown found."
         logOutput = selectedItemIsManualSection ? "Add text, then save Markdown." : "Run OCR first to create Markdown files."
         ocrParagraphSourcePages = []
+        ocrParagraphHasOCRSourcePage = []
     }
 
     func loadExistingMarkdownAsync() {
@@ -1353,6 +1364,7 @@ final class AppState: ObservableObject {
         ocrStatus = "No AppleVision Markdown found."
         logOutput = selectedItemIsManualSection ? "Add text, then save Markdown." : "Run OCR first to create Markdown files."
         ocrParagraphSourcePages = []
+        ocrParagraphHasOCRSourcePage = []
     }
 
     func saveOCRTextFile() -> Bool {
@@ -2322,10 +2334,11 @@ final class AppState: ObservableObject {
             return nil
         }
         ocrParagraphSourcePages = loaded.sourcePages
+        ocrParagraphHasOCRSourcePage = loaded.ocrSourcePageFlags
         return loaded.text
     }
 
-    private func loadAppleVisionMarkdown() -> (text: String, sourcePages: [Int])? {
+    private func loadAppleVisionMarkdown() -> (text: String, sourcePages: [Int], ocrSourcePageFlags: [Bool])? {
         guard let folderURL = localAppleVisionOutputFolderURL else {
             return nil
         }
@@ -2351,7 +2364,11 @@ final class AppState: ObservableObject {
         }
 
         let text = paragraphs.joined(separator: "\n\n")
-        return text.isEmpty ? nil : (text, sourcePages)
+        guard !text.isEmpty else { return nil }
+
+        let flags = loadOCRParagraphSourcePageFlags(in: folderURL, paragraphCount: paragraphs.count)
+            ?? Array(repeating: !selectedItemIsManualSection, count: paragraphs.count)
+        return (text, sourcePages, flags)
     }
 
     private func saveAppleVisionMarkdownText(_ text: String, folderURL: URL) throws {
@@ -2362,6 +2379,7 @@ final class AppState: ObservableObject {
             ocrParagraphSourcePages.isEmpty ? nil : ocrParagraphSourcePages,
             paragraphCount: paragraphs.count
         )
+        let sourcePageFlags = normalizedOCRSourcePageFlags(ocrParagraphHasOCRSourcePage, paragraphCount: paragraphs.count)
         let grouped = Dictionary(grouping: Array(zip(paragraphs.indices, paragraphs)), by: { sourcePages[$0.0] })
         let pageNumbers = Set(grouped.keys)
         let savedPageNumbers = pageNumbers.isEmpty ? Set([1]) : pageNumbers
@@ -2388,6 +2406,30 @@ final class AppState: ObservableObject {
         }
 
         ocrParagraphSourcePages = paragraphs.isEmpty ? [] : sourcePages
+        ocrParagraphHasOCRSourcePage = paragraphs.isEmpty ? [] : sourcePageFlags
+        try saveOCRParagraphSourcePageFlags(pages: sourcePages, flags: sourcePageFlags, in: folderURL)
+    }
+
+    private func loadOCRParagraphSourcePageFlags(in folderURL: URL, paragraphCount: Int) -> [Bool]? {
+        let metadataURL = ocrParagraphSourcePageMetadataURL(in: folderURL)
+        guard let data = try? Data(contentsOf: metadataURL),
+              let records = try? JSONDecoder().decode([OCRParagraphSourcePageRecord].self, from: data),
+              records.count == paragraphCount else {
+            return nil
+        }
+        return records.map(\.hasOCRSourcePage)
+    }
+
+    private func saveOCRParagraphSourcePageFlags(pages: [Int], flags: [Bool], in folderURL: URL) throws {
+        let records = zip(pages, flags).map { OCRParagraphSourcePageRecord(page: $0.0, hasOCRSourcePage: $0.1) }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(records)
+        try data.write(to: ocrParagraphSourcePageMetadataURL(in: folderURL), options: .atomic)
+    }
+
+    private func ocrParagraphSourcePageMetadataURL(in folderURL: URL) -> URL {
+        folderURL.appendingPathComponent("paragraph-source-pages.json")
     }
 
     private func appleVisionMarkdownPageFiles(in folderURL: URL) -> [URL] {
@@ -2697,7 +2739,11 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         let insertIndex = max(0, min(index, paragraphs.count))
         paragraphs.insert("", at: insertIndex)
-        setOCRParagraphs(paragraphs, sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)))
+        setOCRParagraphs(
+            paragraphs,
+            sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)),
+            ocrSourcePageFlags: ocrSourcePageFlagsByInsertingManualParagraph(at: insertIndex)
+        )
         finishParagraphAction(focusIndex: insertIndex)
     }
 
@@ -2705,7 +2751,11 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         let insertIndex = max(0, min(index + 1, paragraphs.count))
         paragraphs.insert("", at: insertIndex)
-        setOCRParagraphs(paragraphs, sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)))
+        setOCRParagraphs(
+            paragraphs,
+            sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)),
+            ocrSourcePageFlags: ocrSourcePageFlagsByInsertingManualParagraph(at: insertIndex)
+        )
         finishParagraphAction(focusIndex: insertIndex)
     }
 
@@ -2713,7 +2763,11 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         let insertIndex = max(0, min(index, paragraphs.count))
         paragraphs.insert("<br/>", at: insertIndex)
-        setOCRParagraphs(paragraphs, sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)))
+        setOCRParagraphs(
+            paragraphs,
+            sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)),
+            ocrSourcePageFlags: ocrSourcePageFlagsByInsertingManualParagraph(at: insertIndex)
+        )
         finishParagraphAction(focusIndex: insertIndex)
     }
 
@@ -2721,7 +2775,11 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         let insertIndex = max(0, min(index + 1, paragraphs.count))
         paragraphs.insert("<br/>", at: insertIndex)
-        setOCRParagraphs(paragraphs, sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)))
+        setOCRParagraphs(
+            paragraphs,
+            sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)),
+            ocrSourcePageFlags: ocrSourcePageFlagsByInsertingManualParagraph(at: insertIndex)
+        )
         finishParagraphAction(focusIndex: insertIndex)
     }
 
@@ -2729,7 +2787,11 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         let insertIndex = max(0, min(index, paragraphs.count))
         paragraphs.insert("<!-- page-break-before -->", at: insertIndex)
-        setOCRParagraphs(paragraphs, sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)))
+        setOCRParagraphs(
+            paragraphs,
+            sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)),
+            ocrSourcePageFlags: ocrSourcePageFlagsByInsertingManualParagraph(at: insertIndex)
+        )
         finishParagraphAction(focusIndex: insertIndex)
     }
 
@@ -2737,7 +2799,11 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         let insertIndex = max(0, min(index + 1, paragraphs.count))
         paragraphs.insert("<!-- page-break-after -->", at: insertIndex)
-        setOCRParagraphs(paragraphs, sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)))
+        setOCRParagraphs(
+            paragraphs,
+            sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)),
+            ocrSourcePageFlags: ocrSourcePageFlagsByInsertingManualParagraph(at: insertIndex)
+        )
         finishParagraphAction(focusIndex: insertIndex)
     }
 
@@ -2745,12 +2811,22 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         guard index > 0, paragraphs.indices.contains(index) else { return }
         var sourcePages = currentOCRParagraphSourcePages(for: paragraphs.count)
+        var sourcePageFlags = currentOCRSourcePageFlags(for: paragraphs.count)
+        if sourcePageFlags.indices.contains(index - 1), sourcePageFlags.indices.contains(index) {
+            if !sourcePageFlags[index - 1], sourcePageFlags[index], sourcePages.indices.contains(index) {
+                sourcePages[index - 1] = sourcePages[index]
+            }
+            sourcePageFlags[index - 1] = sourcePageFlags[index - 1] || sourcePageFlags[index]
+        }
         paragraphs[index - 1] = mergeParagraphText(paragraphs[index - 1], paragraphs[index])
         paragraphs.remove(at: index)
         if sourcePages.indices.contains(index) {
             sourcePages.remove(at: index)
         }
-        setOCRParagraphs(paragraphs, sourcePages: sourcePages)
+        if sourcePageFlags.indices.contains(index) {
+            sourcePageFlags.remove(at: index)
+        }
+        setOCRParagraphs(paragraphs, sourcePages: sourcePages, ocrSourcePageFlags: sourcePageFlags)
         finishParagraphAction(focusIndex: index - 1)
     }
 
@@ -2758,12 +2834,19 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         guard paragraphs.indices.contains(index), index + 1 < paragraphs.count else { return }
         var sourcePages = currentOCRParagraphSourcePages(for: paragraphs.count)
+        var sourcePageFlags = currentOCRSourcePageFlags(for: paragraphs.count)
+        if sourcePageFlags.indices.contains(index), sourcePageFlags.indices.contains(index + 1) {
+            sourcePageFlags[index] = sourcePageFlags[index] || sourcePageFlags[index + 1]
+        }
         paragraphs[index] = mergeParagraphText(paragraphs[index], paragraphs[index + 1])
         paragraphs.remove(at: index + 1)
         if sourcePages.indices.contains(index + 1) {
             sourcePages.remove(at: index + 1)
         }
-        setOCRParagraphs(paragraphs, sourcePages: sourcePages)
+        if sourcePageFlags.indices.contains(index + 1) {
+            sourcePageFlags.remove(at: index + 1)
+        }
+        setOCRParagraphs(paragraphs, sourcePages: sourcePages, ocrSourcePageFlags: sourcePageFlags)
         finishParagraphAction(focusIndex: index)
     }
 
@@ -2771,11 +2854,15 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         guard paragraphs.indices.contains(index) else { return }
         var sourcePages = currentOCRParagraphSourcePages(for: paragraphs.count)
+        var sourcePageFlags = currentOCRSourcePageFlags(for: paragraphs.count)
         paragraphs.remove(at: index)
         if sourcePages.indices.contains(index) {
             sourcePages.remove(at: index)
         }
-        setOCRParagraphs(paragraphs, sourcePages: sourcePages)
+        if sourcePageFlags.indices.contains(index) {
+            sourcePageFlags.remove(at: index)
+        }
+        setOCRParagraphs(paragraphs, sourcePages: sourcePages, ocrSourcePageFlags: sourcePageFlags)
         finishParagraphAction(focusIndex: min(index, max(0, paragraphs.count - 1)))
     }
 
@@ -2847,7 +2934,11 @@ final class AppState: ObservableObject {
             var paragraphs = ocrParagraphs
             let insertIndex = insertBefore ? max(0, min(index, paragraphs.count)) : max(0, min(index + 1, paragraphs.count))
             paragraphs.insert(imageMarkdown, at: insertIndex)
-            setOCRParagraphs(paragraphs, sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)))
+            setOCRParagraphs(
+                paragraphs,
+                sourcePages: sourcePagesByInserting(at: insertIndex, page: sourcePageForParagraph(at: index)),
+                ocrSourcePageFlags: ocrSourcePageFlagsByInsertingManualParagraph(at: insertIndex)
+            )
             finishParagraphAction(focusIndex: insertIndex)
             ocrStatus = "Added image \(destinationURL.lastPathComponent). Click Save to update Markdown."
             logOutput = "Added image:\n\(destinationURL.path)"
@@ -2914,6 +3005,9 @@ final class AppState: ObservableObject {
         }
         if isMarkdownBlockquote(paragraphs[index]) {
             return "Blockquote#\(index + 1)"
+        }
+        if ocrSourcePageIsKnown(for: index) {
+            return "Paragraph \(index + 1) (Page \(sourcePageForParagraph(at: index)))"
         }
         return "Paragraph \(index + 1)"
     }
@@ -2991,9 +3085,11 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         guard index > 0, paragraphs.indices.contains(index) else { return }
         var sourcePages = currentOCRParagraphSourcePages(for: paragraphs.count)
+        var sourcePageFlags = currentOCRSourcePageFlags(for: paragraphs.count)
         paragraphs.swapAt(index, index - 1)
         sourcePages.swapAt(index, index - 1)
-        setOCRParagraphs(paragraphs, sourcePages: sourcePages)
+        sourcePageFlags.swapAt(index, index - 1)
+        setOCRParagraphs(paragraphs, sourcePages: sourcePages, ocrSourcePageFlags: sourcePageFlags)
         finishParagraphAction(focusIndex: index - 1)
     }
 
@@ -3001,9 +3097,11 @@ final class AppState: ObservableObject {
         var paragraphs = ocrParagraphs
         guard paragraphs.indices.contains(index), index + 1 < paragraphs.count else { return }
         var sourcePages = currentOCRParagraphSourcePages(for: paragraphs.count)
+        var sourcePageFlags = currentOCRSourcePageFlags(for: paragraphs.count)
         paragraphs.swapAt(index, index + 1)
         sourcePages.swapAt(index, index + 1)
-        setOCRParagraphs(paragraphs, sourcePages: sourcePages)
+        sourcePageFlags.swapAt(index, index + 1)
+        setOCRParagraphs(paragraphs, sourcePages: sourcePages, ocrSourcePageFlags: sourcePageFlags)
         finishParagraphAction(focusIndex: index + 1)
     }
 
@@ -3021,6 +3119,7 @@ final class AppState: ObservableObject {
 
         let originalText = ocrText
         let originalSourcePages = currentOCRParagraphSourcePages(for: ocrParagraphs.count)
+        let originalSourcePageFlags = currentOCRSourcePageFlags(for: ocrParagraphs.count)
         var updatedText = ""
         var searchStart = originalText.startIndex
         var replacementCount = 0
@@ -3038,7 +3137,9 @@ final class AppState: ObservableObject {
 
         guard replacementCount > 0 else { return 0 }
         updatedText += originalText[searchStart..<originalText.endIndex]
-        ocrParagraphSourcePages = normalizedSourcePages(originalSourcePages, paragraphCount: splitParagraphs(updatedText).count)
+        let updatedParagraphCount = splitParagraphs(updatedText).count
+        ocrParagraphSourcePages = normalizedSourcePages(originalSourcePages, paragraphCount: updatedParagraphCount)
+        ocrParagraphHasOCRSourcePage = normalizedOCRSourcePageFlags(originalSourcePageFlags, paragraphCount: updatedParagraphCount)
         ocrText = updatedText
         ocrStatus = "Replaced \(replacementCount) occurrences in editor. Click Save to update Markdown."
         return replacementCount
@@ -3091,8 +3192,11 @@ final class AppState: ObservableObject {
         ocrPDFPreviewPageRequestID += 1
     }
 
-    private func setOCRParagraphs(_ paragraphs: [String], sourcePages: [Int]? = nil) {
-        ocrParagraphSourcePages = normalizedSourcePages(sourcePages, paragraphCount: paragraphs.count)
+    private func setOCRParagraphs(_ paragraphs: [String], sourcePages: [Int]? = nil, ocrSourcePageFlags: [Bool]? = nil) {
+        let pages = sourcePages ?? currentOCRParagraphSourcePages(for: ocrParagraphs.count)
+        let flags = ocrSourcePageFlags ?? currentOCRSourcePageFlags(for: ocrParagraphs.count)
+        ocrParagraphSourcePages = normalizedSourcePages(pages, paragraphCount: paragraphs.count)
+        ocrParagraphHasOCRSourcePage = normalizedOCRSourcePageFlags(flags, paragraphCount: paragraphs.count)
         ocrText = paragraphs.joined(separator: "\n\n")
     }
 
@@ -3102,6 +3206,12 @@ final class AppState: ObservableObject {
         return pages[index]
     }
 
+    private func ocrSourcePageIsKnown(for index: Int) -> Bool {
+        let flags = currentOCRSourcePageFlags(for: ocrParagraphs.count)
+        guard flags.indices.contains(index) else { return false }
+        return flags[index]
+    }
+
     private func sourcePagesByInserting(at insertIndex: Int, page: Int) -> [Int] {
         var pages = currentOCRParagraphSourcePages(for: ocrParagraphs.count)
         let clampedIndex = max(0, min(insertIndex, pages.count))
@@ -3109,8 +3219,19 @@ final class AppState: ObservableObject {
         return pages
     }
 
+    private func ocrSourcePageFlagsByInsertingManualParagraph(at insertIndex: Int) -> [Bool] {
+        var flags = currentOCRSourcePageFlags(for: ocrParagraphs.count)
+        let clampedIndex = max(0, min(insertIndex, flags.count))
+        flags.insert(false, at: clampedIndex)
+        return flags
+    }
+
     private func currentOCRParagraphSourcePages(for count: Int) -> [Int] {
         normalizedSourcePages(ocrParagraphSourcePages, paragraphCount: count)
+    }
+
+    private func currentOCRSourcePageFlags(for count: Int) -> [Bool] {
+        normalizedOCRSourcePageFlags(ocrParagraphHasOCRSourcePage, paragraphCount: count)
     }
 
     private func normalizedSourcePages(_ pages: [Int]?, paragraphCount: Int) -> [Int] {
@@ -3123,6 +3244,16 @@ final class AppState: ObservableObject {
             } else {
                 result.append(result.last ?? cleanPages.last ?? 1)
             }
+        }
+        return result
+    }
+
+    private func normalizedOCRSourcePageFlags(_ flags: [Bool]?, paragraphCount: Int) -> [Bool] {
+        guard paragraphCount > 0 else { return [] }
+        let cleanFlags = flags ?? []
+        var result: [Bool] = []
+        for index in 0..<paragraphCount {
+            result.append(cleanFlags.indices.contains(index) ? cleanFlags[index] : false)
         }
         return result
     }
@@ -4714,6 +4845,7 @@ final class AppState: ObservableObject {
         selectedPDFPath = defaults.string(forKey: "selectedPDFPath") ?? ""
         ocrText = ""
         ocrParagraphSourcePages = []
+        ocrParagraphHasOCRSourcePage = []
         skipProcessOCREngine = defaults.bool(forKey: "skipProcessOCREngine")
         filterTopLines = defaults.string(forKey: "filterTopLines") ?? "1"
         filterBottomLines = defaults.string(forKey: "filterBottomLines") ?? "1"
