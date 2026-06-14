@@ -106,6 +106,42 @@ private struct OCRParagraphSourcePageRecord: Codable {
     let hasOCRSourcePage: Bool
 }
 
+private enum OCRCompareDifferenceKind {
+    case missingFromEdited
+    case addedInEdited
+    case changed
+
+    var title: String {
+        switch self {
+        case .missingFromEdited:
+            return "Missing from MD"
+        case .addedInEdited:
+            return "Added in MD"
+        case .changed:
+            return "Changed"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .missingFromEdited:
+            return "minus.circle.fill"
+        case .addedInEdited:
+            return "plus.circle.fill"
+        case .changed:
+            return "arrow.triangle.2.circlepath.circle.fill"
+        }
+    }
+}
+
+private struct OCRCompareDifference: Identifiable {
+    let id = UUID()
+    let page: Int
+    let kind: OCRCompareDifferenceKind
+    let pureText: String
+    let editedText: String
+}
+
 private extension String {
     func trimmingLeadingCharacters(in characterSet: CharacterSet) -> String {
         guard let index = firstIndex(where: { character in
@@ -287,6 +323,7 @@ final class AppState: ObservableObject {
     private let defaults = UserDefaults.standard
     private var isRestoring = false
     private var ocrWindows: [NSWindow] = []
+    private var ocrCompareWindows: [NSWindow] = []
     private weak var ocrPreviewWindow: NSWindow?
     private weak var ocrLogWindow: NSWindow?
     private var detachedSplitPlannerStates: [SplitPlannerState] = []
@@ -313,6 +350,12 @@ final class AppState: ObservableObject {
     var selectedItemIsManualSection: Bool {
         guard !selectedPDFPath.isEmpty else { return false }
         return URL(fileURLWithPath: selectedPDFPath).pathExtension.localizedCaseInsensitiveCompare("manual") == .orderedSame
+    }
+
+    var selectedPDFFileItem: PDFFileItem? {
+        guard !selectedPDFPath.isEmpty else { return nil }
+        return pdfFiles.first { $0.url.path == selectedPDFPath }
+            ?? PDFFileItem(id: selectedPDFPath, url: URL(fileURLWithPath: selectedPDFPath))
     }
 
     var configFileURL: URL {
@@ -1381,7 +1424,7 @@ final class AppState: ObservableObject {
             Saved Markdown:
             \(markdownFolderURL.path)
             """
-            ocrSaveAlertMessage = "Saved Markdown:\n\(markdownFolderURL.path)"
+            ocrSaveAlertMessage = "Save successfully"
             return true
         } catch {
             ocrStatus = "Could not save Markdown."
@@ -1946,6 +1989,37 @@ final class AppState: ObservableObject {
         window.makeKeyAndOrderFront(nil)
     }
 
+    func openOCRCompareReport(for item: PDFFileItem) {
+        guard !item.isManualSection else {
+            showAlert(title: "Compare Not Available", message: "Manual sections do not have a pure Apple Vision OCR result.")
+            return
+        }
+
+        guard pureOCRSnapshotExists(for: item) else {
+            showAlert(title: "Compare Not Available", message: "Run OCR for this section first to create a pure Apple Vision OCR snapshot.")
+            return
+        }
+
+        let differences = ocrCompareDifferences(for: item)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1120, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Compare - \(sectionListDisplayName(for: item))"
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: OCRCompareReportWindowView(
+                sectionTitle: sectionListDisplayName(for: item),
+                differences: differences
+            )
+        )
+        ocrCompareWindows.append(window)
+        window.makeKeyAndOrderFront(nil)
+    }
+
     private func previewHTML(for markdown: String) -> String {
         let escapedTitle = htmlEscaped(selectedPDFName)
         let styles = previewStylesHTML()
@@ -2304,6 +2378,13 @@ final class AppState: ObservableObject {
         return pageFiles.contains { $0.pathExtension.lowercased() == "md" }
     }
 
+    func pureOCRSnapshotExists(for item: PDFFileItem) -> Bool {
+        guard !item.isManualSection else { return false }
+        let folderURL = pureOCRSnapshotFolderURL(in: markdownFolderURL(for: item))
+        let pageFiles = (try? FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)) ?? []
+        return pageFiles.contains { $0.pathExtension.lowercased() == "md" }
+    }
+
     var markdownChapterCount: Int {
         pdfFiles.filter { appleVisionMarkdownExists(for: $0) }.count
     }
@@ -2319,6 +2400,10 @@ final class AppState: ObservableObject {
 
         return appleVisionOutputFolderURL(for: item.url)
             .appendingPathComponent(item.url.deletingPathExtension().lastPathComponent, isDirectory: true)
+    }
+
+    private func pureOCRSnapshotFolderURL(in markdownFolderURL: URL) -> URL {
+        markdownFolderURL.appendingPathComponent("OriginalOCR", isDirectory: true)
     }
 
     private func manualMarkdownFolderURL(for url: URL) -> URL {
@@ -2428,8 +2513,163 @@ final class AppState: ObservableObject {
         try data.write(to: ocrParagraphSourcePageMetadataURL(in: folderURL), options: .atomic)
     }
 
+    private func savePureOCRSnapshot(_ pageMarkdownItems: [OCRPageMarkdown], in markdownFolderURL: URL) throws {
+        let snapshotFolderURL = pureOCRSnapshotFolderURL(in: markdownFolderURL)
+        if FileManager.default.fileExists(atPath: snapshotFolderURL.path) {
+            try FileManager.default.removeItem(at: snapshotFolderURL)
+        }
+        try FileManager.default.createDirectory(at: snapshotFolderURL, withIntermediateDirectories: true)
+        for pageMarkdown in pageMarkdownItems {
+            let pageURL = snapshotFolderURL.appendingPathComponent("page\(pageMarkdown.pageNumber).md")
+            try pageMarkdown.text.write(to: pageURL, atomically: true, encoding: .utf8)
+        }
+    }
+
     private func ocrParagraphSourcePageMetadataURL(in folderURL: URL) -> URL {
         folderURL.appendingPathComponent("paragraph-source-pages.json")
+    }
+
+    private func ocrCompareDifferences(for item: PDFFileItem) -> [OCRCompareDifference] {
+        let markdownFolderURL = markdownFolderURL(for: item)
+        let purePages = markdownPageTexts(in: pureOCRSnapshotFolderURL(in: markdownFolderURL))
+        let editedPages = markdownPageTexts(in: markdownFolderURL)
+        let pageNumbers = Set(purePages.keys).union(editedPages.keys).sorted()
+
+        return pageNumbers.flatMap { page in
+            paragraphDifferences(
+                page: page,
+                pureParagraphs: splitParagraphs(purePages[page] ?? ""),
+                editedParagraphs: splitParagraphs(editedPages[page] ?? "")
+            )
+        }
+    }
+
+    private func markdownPageTexts(in folderURL: URL) -> [Int: String] {
+        Dictionary(uniqueKeysWithValues: appleVisionMarkdownPageFiles(in: folderURL).map { fileURL in
+            let page = normalizedPageNumber(from: fileURL, fallbackIndex: 0)
+            let text = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+            return (page, text.trimmingCharacters(in: .whitespacesAndNewlines))
+        })
+    }
+
+    private func paragraphDifferences(page: Int, pureParagraphs: [String], editedParagraphs: [String]) -> [OCRCompareDifference] {
+        let pureNormalized = pureParagraphs.map(compareNormalizedText)
+        let editedNormalized = editedParagraphs.map(compareNormalizedText)
+        let operations = paragraphDiffOperations(pureNormalized: pureNormalized, editedNormalized: editedNormalized)
+        var differences: [OCRCompareDifference] = []
+        var missing: [String] = []
+        var added: [String] = []
+
+        func flushPending() {
+            let pairedCount = min(missing.count, added.count)
+            if pairedCount > 0 {
+                for offset in 0..<pairedCount {
+                    differences.append(
+                        OCRCompareDifference(
+                            page: page,
+                            kind: .changed,
+                            pureText: missing[offset],
+                            editedText: added[offset]
+                        )
+                    )
+                }
+            }
+            if missing.count > pairedCount {
+                for text in missing.dropFirst(pairedCount) {
+                    differences.append(
+                        OCRCompareDifference(
+                            page: page,
+                            kind: .missingFromEdited,
+                            pureText: text,
+                            editedText: ""
+                        )
+                    )
+                }
+            }
+            if added.count > pairedCount {
+                for text in added.dropFirst(pairedCount) {
+                    differences.append(
+                        OCRCompareDifference(
+                            page: page,
+                            kind: .addedInEdited,
+                            pureText: "",
+                            editedText: text
+                        )
+                    )
+                }
+            }
+            missing = []
+            added = []
+        }
+
+        for operation in operations {
+            switch operation {
+            case .equal:
+                flushPending()
+            case .delete(let index):
+                if pureParagraphs.indices.contains(index) {
+                    missing.append(pureParagraphs[index])
+                }
+            case .insert(let index):
+                if editedParagraphs.indices.contains(index) {
+                    added.append(editedParagraphs[index])
+                }
+            }
+        }
+        flushPending()
+        return differences
+    }
+
+    private enum ParagraphDiffOperation {
+        case equal
+        case delete(Int)
+        case insert(Int)
+    }
+
+    private func paragraphDiffOperations(pureNormalized: [String], editedNormalized: [String]) -> [ParagraphDiffOperation] {
+        let pureCount = pureNormalized.count
+        let editedCount = editedNormalized.count
+        var lengths = Array(repeating: Array(repeating: 0, count: editedCount + 1), count: pureCount + 1)
+
+        if pureCount > 0 && editedCount > 0 {
+            for pureIndex in stride(from: pureCount - 1, through: 0, by: -1) {
+                for editedIndex in stride(from: editedCount - 1, through: 0, by: -1) {
+                    if pureNormalized[pureIndex] == editedNormalized[editedIndex] {
+                        lengths[pureIndex][editedIndex] = lengths[pureIndex + 1][editedIndex + 1] + 1
+                    } else {
+                        lengths[pureIndex][editedIndex] = max(lengths[pureIndex + 1][editedIndex], lengths[pureIndex][editedIndex + 1])
+                    }
+                }
+            }
+        }
+
+        var operations: [ParagraphDiffOperation] = []
+        var pureIndex = 0
+        var editedIndex = 0
+        while pureIndex < pureCount || editedIndex < editedCount {
+            if pureIndex < pureCount,
+               editedIndex < editedCount,
+               pureNormalized[pureIndex] == editedNormalized[editedIndex] {
+                operations.append(.equal)
+                pureIndex += 1
+                editedIndex += 1
+            } else if editedIndex >= editedCount || (pureIndex < pureCount && lengths[pureIndex + 1][editedIndex] >= lengths[pureIndex][editedIndex + 1]) {
+                operations.append(.delete(pureIndex))
+                pureIndex += 1
+            } else {
+                operations.append(.insert(editedIndex))
+                editedIndex += 1
+            }
+        }
+        return operations
+    }
+
+    private func compareNormalizedText(_ text: String) -> String {
+        text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func appleVisionMarkdownPageFiles(in folderURL: URL) -> [URL] {
@@ -3577,6 +3817,7 @@ final class AppState: ObservableObject {
         }
 
         mergePageBoundaryContinuations(in: &pageMarkdownItems)
+        try savePureOCRSnapshot(pageMarkdownItems, in: mdFolder)
 
         for pageMarkdown in pageMarkdownItems {
             let pageURL = mdFolder.appendingPathComponent("page\(pageMarkdown.pageNumber).md")
@@ -6134,8 +6375,8 @@ struct PDFListView: View {
     private let sectionActionColumnWidth: CGFloat = 104
     private let sectionNameColumnWidth: CGFloat = 365
     private let sectionTitleColumnWidth: CGFloat = 295
-    private let sectionCommandColumnWidth: CGFloat = 174
-    private let sectionTableWidth: CGFloat = 1012
+    private let sectionCommandColumnWidth: CGFloat = 228
+    private let sectionTableWidth: CGFloat = 1066
 
     var body: some View {
         Group {
@@ -6275,6 +6516,18 @@ struct PDFListView: View {
                                             foregroundColor: Color.black
                                         ) {
                                             appState.previewMarkdown(for: item)
+                                        }
+
+                                        if !item.isManualSection && appState.pureOCRSnapshotExists(for: item) {
+                                            SectionIconButton(
+                                                title: "Compare",
+                                                systemImage: "doc.text.magnifyingglass",
+                                                isDisabled: appState.isScanningHeaderFooter(for: item),
+                                                backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255),
+                                                foregroundColor: Color.black
+                                            ) {
+                                                appState.openOCRCompareReport(for: item)
+                                            }
                                         }
                                     }
                                     .padding(.horizontal, 8)
@@ -6483,6 +6736,17 @@ struct StepTwoOCRView: View {
                     }
                     .disabled(appState.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
 
+                    OCRIconButton(title: "Compare", systemImage: "doc.text.magnifyingglass", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
+                        if let item = appState.selectedPDFFileItem {
+                            appState.openOCRCompareReport(for: item)
+                        }
+                    }
+                    .disabled(
+                        appState.selectedPDFFileItem.map { item in
+                            item.isManualSection || !appState.pureOCRSnapshotExists(for: item)
+                        } ?? true
+                    )
+
                     OCRIconButton(title: "Save", systemImage: "square.and.arrow.down", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
                         windowToCloseAfterSave = NSApp.keyWindow
                         if appState.saveOCRTextFile() {
@@ -6510,13 +6774,51 @@ struct StepTwoOCRView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding(22)
-        .alert("Saved Successfully", isPresented: $isSaveAlertPresented) {
-            Button("OK", role: .cancel) {
-                appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
-                windowToCloseAfterSave = nil
+        .overlay {
+            if isSaveAlertPresented {
+                Color.black.opacity(0.34)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 18) {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.white.opacity(0.94))
+                                .frame(width: 44, height: 44)
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 24, weight: .semibold))
+                                .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
+                        }
+
+                        Text(appState.ocrSaveAlertMessage)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.headingText)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button("OK") {
+                            isSaveAlertPresented = false
+                            windowToCloseAfterSave = nil
+                        }
+
+                        Button("Close") {
+                            isSaveAlertPresented = false
+                            appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
+                            windowToCloseAfterSave = nil
+                        }
+                    }
+                    .buttonStyle(NewOCRButtonStyle())
+                }
+                .padding(22)
+                .frame(minWidth: 340)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
             }
-        } message: {
-            Text(appState.ocrSaveAlertMessage)
         }
         .buttonStyle(NewOCRButtonStyle())
         .background(NewOCRMainPalette.windowBackground)
@@ -7189,6 +7491,181 @@ struct OCRLogWindowView: View {
         .frame(minWidth: 620, minHeight: 420)
         .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct OCRCompareReportWindowView: View {
+    let sectionTitle: String
+    let differences: [OCRCompareDifference]
+
+    private var groupedDifferences: [(page: Int, differences: [OCRCompareDifference])] {
+        Dictionary(grouping: differences, by: \.page)
+            .map { (page: $0.key, differences: $0.value) }
+            .sorted { $0.page < $1.page }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 27, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Compare")
+                        .font(.system(size: 31, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(sectionTitle)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 10)
+
+                Text("\(differences.count) differences")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12))
+                    .clipShape(Capsule())
+
+                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
+                    NSApp.keyWindow?.close()
+                }
+            }
+
+            if differences.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 42, weight: .semibold))
+                        .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
+                    Text("No differences found")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text("The edited MD text currently matches the saved pure Apple Vision OCR snapshot for this section.")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(22)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        ForEach(groupedDifferences, id: \.page) { group in
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(spacing: 8) {
+                                    Text("Page \(group.page)")
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .foregroundStyle(NewOCRMainPalette.headingText)
+                                    Text("\(group.differences.count)")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundStyle(Color.black)
+                                        .frame(minWidth: 28, minHeight: 24)
+                                        .background(Color.white.opacity(0.90))
+                                        .clipShape(Capsule())
+                                    Spacer()
+                                }
+
+                                ForEach(group.differences) { difference in
+                                    OCRCompareDifferenceRow(difference: difference)
+                                }
+                            }
+                            .padding(14)
+                            .background(NewOCRMainPalette.panelBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                            )
+                        }
+                    }
+                    .padding(2)
+                }
+            }
+        }
+        .padding(22)
+        .frame(minWidth: 840, minHeight: 620)
+        .background(NewOCRMainPalette.windowBackground)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct OCRCompareDifferenceRow: View {
+    let difference: OCRCompareDifference
+
+    private var accentColor: Color {
+        switch difference.kind {
+        case .missingFromEdited:
+            return Color(red: 255/255, green: 117/255, blue: 117/255)
+        case .addedInEdited:
+            return Color(red: 53/255, green: 200/255, blue: 90/255)
+        case .changed:
+            return Color(red: 255/255, green: 182/255, blue: 216/255)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: difference.kind.systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                Text(difference.kind.title)
+                    .font(.system(size: 14, weight: .bold))
+                Spacer()
+            }
+            .foregroundStyle(Color.black)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(accentColor)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            HStack(alignment: .top, spacing: 10) {
+                compareTextPanel(title: "Pure OCR", text: difference.pureText, isEmpty: difference.pureText.isEmpty)
+                compareTextPanel(title: "Edited MD", text: difference.editedText, isEmpty: difference.editedText.isEmpty)
+            }
+        }
+        .padding(12)
+        .background(NewOCRMainPalette.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+
+    private func compareTextPanel(title: String, text: String, isEmpty: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(NewOCRMainPalette.secondaryText)
+            Text(isEmpty ? "-" : text)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(isEmpty ? NewOCRMainPalette.tertiaryText : NewOCRMainPalette.primaryText)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.07))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 

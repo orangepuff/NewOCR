@@ -182,6 +182,8 @@ Each section row supports:
 - title editing
 - **Process** to open/run OCR for that section
 - **Preview** to open the existing Markdown preview for that section
+- **Compare** to compare pure Apple Vision OCR against edited Markdown for that
+  section when a pure OCR snapshot exists
 - **Scan Header** for section PDFs
 - **+** to add a manual section after that item
 - **X** to remove a section/manual section after confirmation
@@ -192,6 +194,8 @@ The command column uses fixed button positions:
 - manual sections hide **Scan Header** but keep its space reserved, so **Process** and
   **Preview** align with PDF rows
 - **Preview** is enabled only when the section already has Markdown output
+- **Compare** appears as an icon next to **Preview** only for non-manual section
+  PDFs that have already saved a pure OCR snapshot
 - row action buttons use compact icon+text styling with consistent height and
   accent-colored borders
 
@@ -345,6 +349,17 @@ AppleVision/MD/section-001/page2.md
 ...
 ```
 
+When OCR runs, NewOCR also saves an untouched pure OCR snapshot for comparison:
+
+```text
+AppleVision/MD/section-001/OriginalOCR/page1.md
+AppleVision/MD/section-001/OriginalOCR/page2.md
+...
+```
+
+The editable MD files remain the normal `page*.md` files. Saving from the OCR
+editor should not modify `OriginalOCR/`.
+
 Image crops are written to:
 
 ```text
@@ -420,6 +435,23 @@ Caption is optional. If the user skips or leaves the caption blank, only the
 image Markdown line is inserted. The user still needs to click **Save** in the
 OCR editor to write the updated Markdown files.
 
+## OCR Compare
+
+The Section List can show a **Compare** icon next to **Preview** for a split PDF
+after Apple Vision OCR has saved an `OriginalOCR/` snapshot. Manual sections do
+not show Compare.
+
+Compare opens a dark NewOCR-styled report for only that one split file. The
+report compares pure Apple Vision OCR in `OriginalOCR/page*.md` against the
+current edited MD `page*.md` files and shows only differences, grouped by page:
+
+- Missing from MD
+- Added in MD
+- Changed
+
+The report is intended for verification, so it should avoid dumping unchanged
+text.
+
 ## Header/Footer Filtering
 
 There are two independent filter mechanisms:
@@ -480,7 +512,7 @@ The window is a split editor:
 
 Features:
 
-- Preview Markdown, Save Markdown, Close, Run OCR, Files, Log,
+- Preview Markdown, Compare, Save Markdown, Close, Run OCR, Files, Log,
   Information, Replace, and Remove Search use icon-first buttons with hover help
 - Search Text
 - Replace All
@@ -503,8 +535,10 @@ Features:
   - move paragraph up/down
   - add image description
 
-After clicking Save and confirming the success popup, the OCR window should
-close.
+After clicking Save, the success popup should show only `Save successfully` with
+`OK` and `Close`. `OK` dismisses the popup and keeps the OCR/editor windows
+open. `Close` dismisses the popup and closes the OCR window plus any OCR Preview
+window, matching the previous save-success close behavior.
 
 If the OCR Preview window is open, closing the OCR window should also close the
 Preview window. This applies to both the OCR window **Close** button and the
@@ -876,6 +910,8 @@ Width values may be numeric or `FULL` for full-screen opening.
 - The OCR side toolbar does not include a Load Markdown button. Existing
   Markdown is loaded when opening a processed section; the OCR editor's primary
   side actions are Files, Run OCR, Log, and Cancel while running.
+- The OCR top toolbar includes a Compare icon before Save when the selected
+  non-manual section has a pure OCR snapshot.
 - The OCR search row uses a white rounded `Search Text` field with larger black
   text and a larger search icon. Search actions are icon buttons named Replace,
   Remove Search, and Information.
@@ -954,7 +990,8 @@ These are intentional and should not be changed casually:
 - Header/footer removal requires `header-footer-review.txt` REMOVE entries.
 - Working folder changes clear filtered text and header/footer review state.
 - Full-page scanned text images should not replace recognized OCR text.
-- Save in OCR window closes the OCR window after success popup OK.
+- Save in OCR window shows `Save successfully`; OK stays in the OCR window,
+  Close closes the OCR window after save.
 
 ## Development Notes For Future Assistants
 
