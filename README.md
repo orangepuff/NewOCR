@@ -474,6 +474,8 @@ The window is a split editor:
 - right pane: file/OCR controls, selected PDF chip, and PDF preview
 - the split is resizable so the user can give more width to the text editor or
   to the OCR controls and preview as needed
+- the PDF preview control row shows the current source page as
+  `Page 3 / 12` style text, alongside previous/next page and zoom buttons
 
 Features:
 
@@ -482,6 +484,9 @@ Features:
 - Search Text
 - Replace All
 - icon-only status/focus shortcuts for Image, Footnote, and Blockquote
+- when Search Text is empty, scrolling the paragraph list switches the PDF
+  preview to the nearest visible paragraph's source page; focusing or editing a
+  paragraph text box also switches to that paragraph's source page
 - paragraph editing actions:
   - add paragraph before/after
   - add user image before/after
@@ -508,6 +513,15 @@ The OCR Log is opened from a Log icon button instead of living as a large panel
 inside the OCR editor. Clicking Log opens or focuses a separate dark themed log
 window with the OCR status and `logOutput`. Closing the OCR window should also
 close the OCR Log window.
+
+Paragraph-to-PDF preview sync uses the per-page Markdown files in
+`AppleVision/MD/<section>/page*.md`. Re-running OCR recreates those page files
+and gives the most accurate source-page mapping. Existing OCR output can still
+drive the preview when the original `page*.md` files are present; if older edits
+were previously flattened into one file, the preview falls back to that available
+page. Search/filter results do not move the PDF preview while the filtered list
+is scrolled; in search mode, the jump happens only when a paragraph editor
+receives focus or is edited.
 
 ## Markdown And Supported HTML
 
@@ -864,7 +878,14 @@ Width values may be numeric or `FULL` for full-screen opening.
   the preview reads like a cropped page inspection view. The preview panel does
   not show a `PDF Preview` title or OCR status text such as "Loaded existing
   AppleVision Markdown"; keep vertical space for the PDF itself. Previous/next
-  page navigation and Zoom In/Zoom Out controls live on one compact row.
+  page navigation, `Page n / total` text, and Zoom In/Zoom Out controls live on
+  one compact row.
+- The OCR editor keeps an in-memory paragraph-to-source-page map when it loads
+  `page*.md`. With an empty search field, paragraph-list scrolling may request a
+  preview jump to the nearest visible source page. Paragraph focus/editing always
+  requests a preview jump. Search filtering must not request scroll-based
+  preview jumps. Saving edited Markdown should preserve known source pages by
+  writing paragraphs back to their mapped `page*.md` files where possible.
 - Image, Footnote, and Blockquote detection controls are icon-only status
   buttons. They show a green circle-check when found and a red circle-X when not
   found, and their hover text is shown in a floating `NSPopover` tooltip.
