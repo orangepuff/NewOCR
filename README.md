@@ -395,7 +395,8 @@ Expected behavior:
   - old `.md` files
   - old `Images/`
   - line-cache entries for that PDF in `AppleVision/LineCache/header-footer-lines.json`
-  - stale `header-footer-review.txt`
+- keep `AppleVision/LineCache/header-footer-review.txt`; it is shared review
+  input used by OCR to remove approved header/footer lines
 - replace existing Markdown with newly generated Markdown
 - show finished successfully when done
 
@@ -502,6 +503,9 @@ Important rule:
   because `header-footer-lines.json` exists.
 - Header/footer removal should only happen if `header-footer-review.txt` exists
   and contains `REMOVE:` entries.
+- Multi-word `REMOVE:` entries should match like ordered wildcard tokens. For
+  example, `REMOVE: guidance find your way` should also remove boundary lines
+  such as `guidance find 01 your way`.
 
 This prevents false removal of real text such as a sentence containing a book
 title phrase also found in footers.
@@ -1027,6 +1031,8 @@ These are intentional and should not be changed casually:
 - Empty paragraph slots from the paragraph editor should survive Preview and
   EPUB build.
 - Header/footer removal requires `header-footer-review.txt` REMOVE entries.
+- Process OCR All must preserve `header-footer-review.txt`; deleting it before
+  OCR disables approved header/footer removal for that batch.
 - Working folder changes clear filtered text and header/footer review state.
 - Full-page scanned text images should not replace recognized OCR text.
 - Save in OCR window shows `Save successfully`; OK stays in the OCR window,
@@ -1090,9 +1096,10 @@ remove text.
 
 ### Process OCR All seems stale
 
-It should remove section-specific `AppleVision/MD/<section>/` and line-cache
-entries before OCR. If stale images or Markdown remain, inspect
-`removeAppleVisionResources(for:)`.
+It should remove section-specific `AppleVision/MD/<section>/` and that PDF's
+line-cache entries before OCR, but it should not remove
+`AppleVision/LineCache/header-footer-review.txt`. If stale images or Markdown
+remain, inspect `removeAppleVisionResources(for:)`.
 
 ### EPUB misses a manual section
 

@@ -3964,7 +3964,7 @@ final class AppState: ObservableObject {
     }
 
     private func renderPDFPageToCGImage(_ page: PDFPage, scale: CGFloat = 2.0) throws -> CGImage {
-        let bounds = page.bounds(for: .mediaBox)
+        let bounds = page.bounds(for: .cropBox)
         let width = max(1, Int(bounds.width * scale))
         let height = max(1, Int(bounds.height * scale))
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -3985,7 +3985,7 @@ final class AppState: ObservableObject {
         context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
         context.saveGState()
         context.scaleBy(x: scale, y: scale)
-        page.draw(with: .mediaBox, to: context)
+        page.draw(with: .cropBox, to: context)
         context.restoreGState()
 
         guard let image = context.makeImage() else {
@@ -4456,11 +4456,6 @@ final class AppState: ObservableObject {
                 try encoded.write(to: cacheURL, options: .atomic)
             }
         }
-
-        let reviewURL = headerFooterReviewURL(for: pdfURL)
-        if FileManager.default.fileExists(atPath: reviewURL.path) {
-            try FileManager.default.removeItem(at: reviewURL)
-        }
     }
 
     private func scanHeaderFooterSample(pdfURL: URL, progress: ((Int, Int) -> Void)? = nil) throws -> String? {
@@ -4652,7 +4647,38 @@ final class AppState: ObservableObject {
             return true
         }
 
+        if headerFooterKeyTokensMatchInOrder(first, pattern: second)
+            || headerFooterKeyTokensMatchInOrder(second, pattern: first) {
+            return true
+        }
+
         return characterBigramSimilarity(first, second) >= 0.82
+    }
+
+    private func headerFooterKeyTokensMatchInOrder(_ value: String, pattern: String) -> Bool {
+        let valueTokens = headerFooterKeyTokens(value)
+        let patternTokens = headerFooterKeyTokens(pattern)
+        guard patternTokens.count >= 2, valueTokens.count >= patternTokens.count else {
+            return false
+        }
+
+        var searchStart = valueTokens.startIndex
+        for patternToken in patternTokens {
+            guard let matchIndex = valueTokens[searchStart...].firstIndex(where: { valueToken in
+                valueToken == patternToken || valueToken.contains(patternToken) || patternToken.contains(valueToken)
+            }) else {
+                return false
+            }
+            searchStart = valueTokens.index(after: matchIndex)
+        }
+        return true
+    }
+
+    private func headerFooterKeyTokens(_ value: String) -> [String] {
+        value
+            .split(separator: " ")
+            .map(String.init)
+            .filter { $0.contains(where: { $0.isLetter }) }
     }
 
     private func preferredHeaderFooterDisplayKey(for group: HeaderFooterGroup) -> String {
@@ -9458,7 +9484,7 @@ final class SplitPlannerState: ObservableObject {
     }
 
     private func renderPageForTitleOCR(_ page: PDFPage, scale: CGFloat = 2.0) throws -> CGImage {
-        let bounds = page.bounds(for: .mediaBox)
+        let bounds = page.bounds(for: .cropBox)
         let width = max(1, Int(bounds.width * scale))
         let height = max(1, Int(bounds.height * scale))
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -9479,7 +9505,7 @@ final class SplitPlannerState: ObservableObject {
         context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
         context.saveGState()
         context.scaleBy(x: scale, y: scale)
-        page.draw(with: .mediaBox, to: context)
+        page.draw(with: .cropBox, to: context)
         context.restoreGState()
 
         guard let image = context.makeImage() else {
