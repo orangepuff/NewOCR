@@ -715,9 +715,10 @@ Width values may be numeric or `FULL` for full-screen opening.
 
 - Keep the app as a practical working tool, not a landing page.
 - Buttons should be clear, friendly, and consistent.
-- Main toolbar buttons use the regular NewOCR bordered style. Section List
-  command buttons use a filled accent background with white text so actions are
-  easy to scan. Destructive buttons such as Revert Original keep the red style.
+- The main top bar groups commands into compact menus instead of many separate
+  buttons: Project contains New, Open, Revert Original, and Open Config; Edit
+  PDF contains Add Split, Crop, Apply CSS, and Clear Scan Report; Build EPUB is
+  its own menu; Close remains a single top-level command.
 - Use icons where they help scanning.
 - Do not let decorative UI reduce section-list space.
 - Do not alter behavior while only making UI more beautiful.

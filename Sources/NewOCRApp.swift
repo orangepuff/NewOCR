@@ -5001,14 +5001,13 @@ struct StepOneLoadPDFView: View {
 
                     Spacer(minLength: 0)
 
-                    VStack(alignment: .trailing, spacing: 8) {
-                        HStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        Menu {
                             Button {
                                 appState.newSplitPlan()
                             } label: {
                                 Label("New", systemImage: "plus")
                             }
-                            .controlSize(.large)
                             .keyboardShortcut("n", modifiers: [.command])
 
                             Button {
@@ -5016,16 +5015,35 @@ struct StepOneLoadPDFView: View {
                             } label: {
                                 Label("Open", systemImage: "folder")
                             }
-                            .controlSize(.large)
                             .keyboardShortcut("o", modifiers: [.command])
 
+                            Divider()
+
+                            if appState.canOpenSplitPlannerForSelectedFolder {
+                                Button(role: .destructive) {
+                                    appState.confirmAndRevertSelectedFolderToOriginalPDF()
+                                } label: {
+                                    Label("Revert Original", systemImage: "arrow.uturn.backward")
+                                }
+                            }
+
+                            Button {
+                                appState.openConfigEditor()
+                            } label: {
+                                Label("Open Config", systemImage: "gearshape")
+                            }
+                        } label: {
+                            Label("Project", systemImage: "folder")
+                        }
+                        .controlSize(.large)
+
+                        Menu {
                             if appState.canOpenSplitPlannerForSelectedFolder {
                                 Button {
                                     appState.openSelectedFolderAddSplit()
                                 } label: {
                                     Label("Add Split", systemImage: "rectangle.split.2x1")
                                 }
-                                .controlSize(.large)
                                 .disabled(!appState.canAddSplitForSelectedFolder)
 
                                 Button {
@@ -5033,32 +5051,34 @@ struct StepOneLoadPDFView: View {
                                 } label: {
                                     Label("Crop", systemImage: "crop")
                                 }
-                                .controlSize(.large)
-
-                                Button(role: .destructive) {
-                                    appState.confirmAndRevertSelectedFolderToOriginalPDF()
-                                } label: {
-                                    Label("Revert Original", systemImage: "arrow.uturn.backward")
-                                }
-                                .controlSize(.large)
                             }
-                        }
 
-                        HStack(spacing: 10) {
                             Button {
                                 appState.applyStylesheet()
                             } label: {
                                 Label("Apply CSS", systemImage: "paintbrush")
                             }
-                            .controlSize(.large)
                             .disabled(appState.selectedFolderPath.isEmpty)
 
+                            Divider()
+
+                            Button(role: .destructive) {
+                                appState.clearAllHeaderFooterScans()
+                            } label: {
+                                Label("Clear Scan Report", systemImage: "trash")
+                            }
+                            .disabled(appState.selectedFolderPath.isEmpty || appState.isHeaderFooterScanRunning)
+                        } label: {
+                            Label("Edit PDF", systemImage: "slider.horizontal.3")
+                        }
+                        .controlSize(.large)
+
+                        Menu {
                             Button {
                                 appState.buildBookEPUB()
                             } label: {
                                 Label(appState.isOCRRunning ? "Building EPUB..." : "Build EPUB", systemImage: "book")
                             }
-                            .controlSize(.large)
                             .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
 
                             if appState.bookEPUBFilePathIfExists != nil {
@@ -5067,31 +5087,18 @@ struct StepOneLoadPDFView: View {
                                 } label: {
                                     Label("View EPUB", systemImage: "eye")
                                 }
-                                .controlSize(.large)
                             }
-
-                            Button(role: .destructive) {
-                                appState.clearAllHeaderFooterScans()
-                            } label: {
-                                Label("Clear Scan Report", systemImage: "trash")
-                            }
-                            .controlSize(.large)
-                            .disabled(appState.selectedFolderPath.isEmpty || appState.isHeaderFooterScanRunning)
-
-                            Button {
-                                appState.openConfigEditor()
-                            } label: {
-                                Label("Open Config", systemImage: "gearshape")
-                            }
-                            .controlSize(.large)
-
-                            Button {
-                                NSApp.terminate(nil)
-                            } label: {
-                                Label("Close", systemImage: "xmark")
-                            }
-                            .controlSize(.large)
+                        } label: {
+                            Label("Build EPUB", systemImage: "book")
                         }
+                        .controlSize(.large)
+
+                        Button {
+                            NSApp.terminate(nil)
+                        } label: {
+                            Label("Close", systemImage: "xmark")
+                        }
+                        .controlSize(.large)
                     }
                     .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(1)
