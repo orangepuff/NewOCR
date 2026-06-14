@@ -311,12 +311,6 @@ final class AppState: ObservableObject {
             .appendingPathComponent("config.txt")
     }
 
-    var ocrInstructionFileURL: URL {
-        Bundle.main.bundleURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("OCRInstruction")
-    }
-
     var configEditorPath: String {
         (activeConfigFileURL ?? configFileURL).path
     }
@@ -990,10 +984,6 @@ final class AppState: ObservableObject {
         openTextConfig(title: "Config File", url: configFileURL)
     }
 
-    func openOCRInstructionEditor() {
-        openTextConfig(title: "OCRInstruction", url: ocrInstructionFileURL)
-    }
-
     func chooseFrontCoverImage() {
         chooseCoverImage(title: "Select Front Cover Image", outputStem: "front-cover") { path in
             self.frontCoverImagePath = path
@@ -1266,7 +1256,6 @@ final class AppState: ObservableObject {
     }
 
     private func openTextConfig(title: String, url: URL) {
-        ensureConfigFilesExist()
         activeConfigFileURL = url
         configEditorTitle = title
         configText = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
@@ -1275,7 +1264,6 @@ final class AppState: ObservableObject {
     }
 
     func saveConfigFile() {
-        ensureConfigFilesExist()
         let targetURL = activeConfigFileURL ?? configFileURL
 
         do {
@@ -2957,7 +2945,6 @@ final class AppState: ObservableObject {
             return
         }
 
-        ensureConfigFilesExist()
         sendSelectedPDFToAppleVision()
     }
 
@@ -2970,7 +2957,6 @@ final class AppState: ObservableObject {
         }
         guard !isOCRRunning else { return }
 
-        ensureConfigFilesExist()
         isOCRRunning = true
         isOCRCancelling = false
         ocrProgressPercent = 0
@@ -4482,7 +4468,6 @@ final class AppState: ObservableObject {
         epubStatus = ""
 
         isRestoring = false
-        ensureConfigFilesExist()
         loadAppConfigValues()
         loadPDFFiles()
         refreshCoverImagePathsForSelectedFolder()
@@ -4634,59 +4619,18 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func ensureConfigFilesExist() {
-        let folderURL = configFileURL.deletingLastPathComponent()
-
-        do {
-            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-
-            if !FileManager.default.fileExists(atPath: configFileURL.path) {
-                try defaultConfigText().write(to: configFileURL, atomically: true, encoding: .utf8)
-            } else {
-                try ensureConfigKeyExists("NEW_PROJECTS_FOLDER", defaultValue: "~/Downloads", comment: "# New projects made from the New button are created here.")
-                try ensureConfigKeyExists("CROP_PDF_WINDOW_WIDTH", defaultValue: "FULL", comment: "# Set CROP_PDF_WINDOW_WIDTH=FULL to open the Crop PDF window at full screen size.")
-                try ensureConfigKeyExists("CROP_PDF_WINDOW_HEIGHT", defaultValue: "720", comment: "# Used only when CROP_PDF_WINDOW_WIDTH is a number.")
-                try ensureConfigKeyExists("ADD_SPLIT_WINDOW_WIDTH", defaultValue: "FULL", comment: "# Set ADD_SPLIT_WINDOW_WIDTH=FULL to open the Add Split window at full screen size.")
-                try ensureConfigKeyExists("ADD_SPLIT_WINDOW_HEIGHT", defaultValue: "720", comment: "# Used only when ADD_SPLIT_WINDOW_WIDTH is a number.")
-                try ensureConfigKeyExists("PREVIEW_TEXT_SCALE_PERCENT", defaultValue: "130", comment: "# Preview-only text scale percent. This does not affect EPUB output.")
-            }
-
-            if !FileManager.default.fileExists(atPath: ocrInstructionFileURL.path) {
-                try defaultOCRInstructionText().write(to: ocrInstructionFileURL, atomically: true, encoding: .utf8)
-            }
-
-        } catch {
-            configStatus = "Could not prepare config: \(error.localizedDescription)"
-        }
-    }
-
-    private func ensureConfigKeyExists(_ key: String, defaultValue: String, comment: String) throws {
-        var text = (try? String(contentsOf: configFileURL, encoding: .utf8)) ?? ""
-        let hasKey = text.components(separatedBy: .newlines).contains { rawLine in
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            return line.hasPrefix("\(key)=")
-        }
-        guard !hasKey else { return }
-
-        if !text.hasSuffix("\n") {
-            text += "\n"
-        }
-        text += "\n\(comment)\n\(key)=\(defaultValue)\n"
-        try text.write(to: configFileURL, atomically: true, encoding: .utf8)
-    }
-
     private func loadAppConfigValues() {
         let values = readKeyValueConfig(from: configFileURL)
         newProjectsFolderPath = expandedPath(values["NEW_PROJECTS_FOLDER"] ?? "~/Downloads")
         pdfListMinHeight = CGFloat(parseDouble(values["PDF_LIST_MIN_HEIGHT"], defaultValue: 420, minimum: 200))
-        shouldOpenMainWindowFullScreen = values["MAIN_WINDOW_WIDTH"]?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
+        shouldOpenMainWindowFullScreen = (values["MAIN_WINDOW_WIDTH"] ?? "FULL").trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
         if !shouldOpenMainWindowFullScreen {
             mainWindowWidth = CGFloat(parseDouble(values["MAIN_WINDOW_WIDTH"], defaultValue: 780, minimum: 640))
             mainWindowHeight = CGFloat(parseDouble(values["MAIN_WINDOW_HEIGHT"], defaultValue: 520, minimum: 480))
         }
         ocrParagraphTextAreaMinHeight = CGFloat(parseDouble(values["OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT"], defaultValue: 58, minimum: 40))
-        previewTextScalePercent = min(parseDouble(values["PREVIEW_TEXT_SCALE_PERCENT"], defaultValue: 130, minimum: 80), 220)
-        shouldOpenOCRWindowFullScreen = values["OCR_WINDOW_WIDTH"]?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
+        previewTextScalePercent = min(parseDouble(values["PREVIEW_TEXT_SCALE_PERCENT"], defaultValue: 170, minimum: 80), 220)
+        shouldOpenOCRWindowFullScreen = (values["OCR_WINDOW_WIDTH"] ?? "FULL").trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
         if !shouldOpenOCRWindowFullScreen {
             ocrWindowWidth = CGFloat(parseDouble(values["OCR_WINDOW_WIDTH"], defaultValue: 820, minimum: 640))
             ocrWindowHeight = CGFloat(parseDouble(values["OCR_WINDOW_HEIGHT"], defaultValue: 620, minimum: 480))
@@ -4736,39 +4680,6 @@ final class AppState: ObservableObject {
         return parsed
     }
 
-    private func defaultConfigText() -> String {
-        """
-        # New projects made from the New button are created here.
-        NEW_PROJECTS_FOLDER=~/Downloads
-        PDF_LIST_MIN_HEIGHT=420
-        # Set MAIN_WINDOW_WIDTH=FULL to open the main window at full screen size.
-        MAIN_WINDOW_WIDTH=780
-        MAIN_WINDOW_HEIGHT=520
-        # Set OCR_WINDOW_WIDTH=FULL to open the OCR window at full screen size.
-        OCR_WINDOW_WIDTH=820
-        OCR_WINDOW_HEIGHT=620
-        # Set CROP_PDF_WINDOW_WIDTH=FULL to open the Crop PDF window at full screen size.
-        CROP_PDF_WINDOW_WIDTH=FULL
-        # Used only when CROP_PDF_WINDOW_WIDTH is a number.
-        CROP_PDF_WINDOW_HEIGHT=720
-        # Set ADD_SPLIT_WINDOW_WIDTH=FULL to open the Add Split window at full screen size.
-        ADD_SPLIT_WINDOW_WIDTH=FULL
-        # Used only when ADD_SPLIT_WINDOW_WIDTH is a number.
-        ADD_SPLIT_WINDOW_HEIGHT=720
-        OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
-        # Preview-only text scale percent. This does not affect EPUB output.
-        PREVIEW_TEXT_SCALE_PERCENT=130
-
-        """
-    }
-
-    private func defaultOCRInstructionText() -> String {
-        """
-        AppleVision uses Apple's local Vision framework to detect text.
-        It writes per-page Markdown files first, then can produce combined text or EPUB later.
-
-        """
-    }
 }
 
 struct ContentView: View {

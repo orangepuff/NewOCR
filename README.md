@@ -30,8 +30,6 @@ It also bundles:
 - `Fonts/`
 - `Styles/`
 - the app icon resources
-- `config.txt`
-- `OCRInstruction`
 
 Run the built app with:
 
@@ -75,13 +73,8 @@ bundle during build.
 config.txt
 ```
 
-Runtime configuration defaults. Missing keys are recreated by the app.
-
-```text
-OCRInstruction
-```
-
-Editable instruction/reference text shown by the app.
+Runtime configuration defaults. The app reads this file as-is and does not
+recreate it or append missing keys automatically.
 
 ## App Purpose
 
@@ -603,10 +596,10 @@ the same NewOCR Markdown/HTML features as EPUB where practical:
 Preview text size is configurable in `config.txt`:
 
 ```text
-PREVIEW_TEXT_SCALE_PERCENT=130
+PREVIEW_TEXT_SCALE_PERCENT=170
 ```
 
-The default is 130%. Values below 80 are treated as 130, and values above 220
+The default is 170%. Values below 80 are treated as 170, and values above 220
 are capped at 220. The app reloads this config value when Preview opens. The
 scale is applied to a preview-only content wrapper inside `preview.html`, on top
 of the project stylesheet; EPUB output must not inherit this preview-only font
@@ -705,7 +698,7 @@ CROP_PDF_WINDOW_HEIGHT=720
 ADD_SPLIT_WINDOW_WIDTH=FULL
 ADD_SPLIT_WINDOW_HEIGHT=720
 OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
-PREVIEW_TEXT_SCALE_PERCENT=130
+PREVIEW_TEXT_SCALE_PERCENT=170
 NEW_PROJECTS_FOLDER=~/Downloads
 ```
 

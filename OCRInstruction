@@ -1,2 +1,0 @@
-AppleVision uses Apple's local Vision framework to detect text.
-It writes per-page Markdown files first, then can produce combined text or EPUB later.
