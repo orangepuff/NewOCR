@@ -4782,7 +4782,7 @@ struct ContentView: View {
             minWidth: appState.shouldOpenMainWindowFullScreen ? 1180 : max(1180, appState.mainWindowWidth),
             minHeight: appState.shouldOpenMainWindowFullScreen ? 520 : appState.mainWindowHeight
         )
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
         .onAppear {
             guard appState.shouldOpenMainWindowFullScreen else { return }
@@ -4809,44 +4809,56 @@ struct SectionActionButtonStyle: ButtonStyle {
     }
 }
 
+private enum NewOCRMainPalette {
+    static let windowBackground = Color(nsColor: NSColor(calibratedWhite: 0.22, alpha: 1))
+    static let panelBackground = Color(nsColor: NSColor(calibratedWhite: 0.27, alpha: 1))
+    static let headerBackground = Color(nsColor: NSColor(calibratedWhite: 0.24, alpha: 1))
+    static let rowBackground = Color(nsColor: NSColor(calibratedWhite: 0.33, alpha: 1))
+    static let alternateRowBackground = Color(nsColor: NSColor(calibratedWhite: 0.29, alpha: 1))
+    static let fieldBackground = Color(nsColor: NSColor(calibratedWhite: 0.20, alpha: 1))
+    static let stroke = Color.white.opacity(0.16)
+    static let primaryText = Color.white.opacity(0.92)
+    static let headingText = Color.white.opacity(0.98)
+    static let secondaryText = Color.white.opacity(0.74)
+    static let tertiaryText = Color.white.opacity(0.58)
+}
+
 private struct SectionActionButtonStyleBody: View {
     let configuration: SectionActionButtonStyle.Configuration
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
 
     private var foregroundColor: Color {
-        isEnabled ? .primary : Color(nsColor: .disabledControlTextColor)
+        isEnabled ? .black : Color.black.opacity(0.34)
     }
 
     private var backgroundColor: Color {
         if !isEnabled {
-            return Color(nsColor: .controlBackgroundColor).opacity(0.42)
+            return Color.white.opacity(0.42)
         }
         if configuration.isPressed {
-            return Color.accentColor.opacity(0.20)
+            return Color.white.opacity(0.76)
         }
         if isHovered {
-            return Color.accentColor.opacity(0.12)
+            return Color.white
         }
-        return Color(nsColor: .controlBackgroundColor)
+        return Color.white.opacity(0.92)
     }
 
     private var borderColor: Color {
         if !isEnabled {
-            return Color(nsColor: .separatorColor).opacity(0.62)
+            return Color.black.opacity(0.10)
         }
-        return Color.accentColor.opacity(isHovered || configuration.isPressed ? 0.78 : 0.48)
+        return Color.black.opacity(isHovered || configuration.isPressed ? 0.34 : 0.18)
     }
 
     var body: some View {
         configuration.label
-            .font(.system(size: 12, weight: .semibold))
-            .labelStyle(.titleAndIcon)
+            .font(.system(size: 13, weight: .semibold))
+            .labelStyle(.iconOnly)
             .lineLimit(1)
             .foregroundStyle(foregroundColor)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .frame(height: 28)
+            .frame(width: 42, height: 32)
             .background(backgroundColor)
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(
@@ -4854,15 +4866,44 @@ private struct SectionActionButtonStyleBody: View {
                     .stroke(borderColor, lineWidth: 1)
             )
             .shadow(
-                color: Color.black.opacity(isEnabled && isHovered ? 0.06 : 0),
-                radius: 4,
+                color: Color.black.opacity(isEnabled ? (isHovered ? 0.12 : 0.07) : 0),
+                radius: isHovered ? 5 : 3,
                 x: 0,
-                y: 2
+                y: isHovered ? 2 : 1
             )
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isHovered)
             .onHover { isHovered = $0 }
+    }
+}
+
+private struct SectionIconButton: View {
+    let title: String
+    let systemImage: String
+    let isDisabled: Bool
+    let action: () -> Void
+    @State private var isTooltipPresented = false
+
+    var body: some View {
+        ZStack {
+            Button(action: action) {
+                Label(title, systemImage: systemImage)
+            }
+            .buttonStyle(SectionActionButtonStyle())
+            .disabled(isDisabled)
+            .accessibilityLabel(title)
+        }
+        .frame(width: 42, height: 32)
+        .onHover { isTooltipPresented = $0 }
+        .popover(isPresented: $isTooltipPresented, arrowEdge: .top) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .presentationCompactAdaptation(.popover)
+        }
     }
 }
 
@@ -4882,7 +4923,7 @@ private struct NewOCRButtonStyleBody: View {
         if isDestructive {
             return .red
         }
-        return .primary
+        return NewOCRMainPalette.primaryText
     }
 
     private var backgroundColor: Color {
@@ -4895,7 +4936,7 @@ private struct NewOCRButtonStyleBody: View {
         if isHovered {
             return isDestructive ? Color.red.opacity(0.10) : Color.accentColor.opacity(0.10)
         }
-        return Color(nsColor: .controlBackgroundColor)
+        return NewOCRMainPalette.panelBackground
     }
 
     private var borderColor: Color {
@@ -4910,7 +4951,7 @@ private struct NewOCRButtonStyleBody: View {
 
     var body: some View {
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
+            .font(.system(size: 14, weight: .semibold))
             .lineLimit(1)
             .foregroundStyle(foregroundColor)
             .padding(.horizontal, 12)
@@ -4945,14 +4986,15 @@ struct StepOneLoadPDFView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 16) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Load PDF/OCR")
-                            .font(.largeTitle.weight(.semibold))
+                            .font(.system(size: 38, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.headingText)
                         Text("Choose which PDF file and do OCR.")
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
                         ProjectPathView(path: appState.selectedFolderPath)
                             .frame(maxWidth: 360, alignment: .leading)
                     }
@@ -5060,11 +5102,8 @@ struct StepOneLoadPDFView: View {
 
                     HStack(spacing: 8) {
                         Text("EPUB Covers")
-                            .font(.subheadline.weight(.semibold))
-
-                        Text("\(appState.markdownChapterCount) Markdown chapters")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.headingText)
                     }
 
                     Divider()
@@ -5097,21 +5136,22 @@ struct StepOneLoadPDFView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text("Sections")
-                            .font(.headline)
+                            .font(.system(size: 19, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.headingText)
                         Text("\(appState.pdfFiles.count)")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(Color(nsColor: .quaternaryLabelColor))
+                            .background(Color.white.opacity(0.12))
                             .clipShape(Capsule())
-                        Button {
+                        SectionIconButton(
+                            title: "Process OCR All",
+                            systemImage: "square.stack.3d.up.fill",
+                            isDisabled: !appState.canProcessOCRAllSections
+                        ) {
                             appState.processOCRAllSections()
-                        } label: {
-                            Label(appState.isOCRRunning ? "Processing OCR..." : "Process OCR All", systemImage: "text.viewfinder")
                         }
-                        .controlSize(.large)
-                        .disabled(!appState.canProcessOCRAllSections)
                         Spacer()
                     }
 
@@ -5120,25 +5160,23 @@ struct StepOneLoadPDFView: View {
                             ProgressView(value: appState.headerFooterScanProgressPercent ?? 0, total: 100)
                                 .frame(maxWidth: .infinity)
                             Text("\(Int(appState.headerFooterScanProgressPercent ?? 0))%")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
                                 .frame(width: 42, alignment: .trailing)
                         }
                         Text(appState.headerFooterScanStatus)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
 
                     PDFListView()
                 }
-
-                Spacer(minLength: 0)
+                .frame(maxHeight: .infinity, alignment: .top)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .padding(22)
-        }
         .sheet(isPresented: $appState.isConfigEditorPresented) {
             ConfigEditorView()
                 .environmentObject(appState)
@@ -5160,6 +5198,7 @@ struct StepOneLoadPDFView: View {
             BulkOCRProgressView()
                 .environmentObject(appState)
         }
+        .background(NewOCRMainPalette.windowBackground)
     }
 }
 
@@ -5338,15 +5377,15 @@ struct ProjectPathView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(folderName)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(isEmpty ? Color(nsColor: .secondaryLabelColor) : .primary)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isEmpty ? NewOCRMainPalette.secondaryText : NewOCRMainPalette.primaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
                 if !isEmpty {
                     Text(path)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -5355,11 +5394,11 @@ struct ProjectPathView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.72), lineWidth: 1)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
         )
         .help(isEmpty ? "No project folder selected" : path)
     }
@@ -5367,6 +5406,11 @@ struct ProjectPathView: View {
 
 struct PDFListView: View {
     @EnvironmentObject private var appState: AppState
+    private let sectionActionColumnWidth: CGFloat = 68
+    private let sectionNameColumnWidth: CGFloat = 300
+    private let sectionTitleColumnWidth: CGFloat = 240
+    private let sectionCommandColumnWidth: CGFloat = 158
+    private let sectionTableWidth: CGFloat = 840
 
     var body: some View {
         Group {
@@ -5386,130 +5430,175 @@ struct PDFListView: View {
                 }
             } else {
                 VStack(spacing: 0) {
-                    HStack(spacing: 12) {
-                        Text("")
-                            .frame(width: 68)
-                        Text("Section")
-                            .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
-                        Text("Title")
-                            .frame(width: 260, alignment: .leading)
-                        Text("Command")
-                            .frame(width: 348, alignment: .leading)
-                    }
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color(nsColor: .controlBackgroundColor))
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(appState.pdfFiles.enumerated()), id: \.element.id) { index, item in
+                                HStack(spacing: 12) {
+                                    HStack(spacing: 6) {
+                                        Button(role: .destructive) {
+                                            appState.removeSectionItem(item)
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(Color.black)
+                                                .frame(width: 24, height: 24)
+                                                .background(Color.red.opacity(0.92))
+                                                .clipShape(Circle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("Remove section")
 
-                    Divider()
-
-                    List(appState.pdfFiles) { item in
-                        HStack(spacing: 12) {
-	                            HStack(spacing: 6) {
-	                                Button(role: .destructive) {
-	                                    appState.removeSectionItem(item)
-	                                } label: {
-	                                    Image(systemName: "xmark")
-	                                        .font(.system(size: 12, weight: .semibold))
-	                                        .frame(width: 18, height: 18)
-	                                }
-	                                .help("Remove section")
-
-                                Button {
-                                    appState.addManualSection(after: item)
-                                } label: {
-                                    Image(systemName: "plus")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .frame(width: 18, height: 18)
-                                }
-                                .help("Add manual section below")
-                            }
-                            .frame(width: 68)
-
-                            HStack(spacing: 8) {
-                                Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
-                                    .foregroundStyle(item.isManualSection ? .blue : .red)
-
-                                if appState.appleVisionMarkdownExists(for: item) {
-                                    Text("MD")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.green)
-                                }
-
-                                if item.isManualSection {
-                                    Text(appState.sectionListDisplayName(for: item))
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                } else {
-                                    Button {
-                                        NSWorkspace.shared.open(item.url)
-                                    } label: {
-                                        Text(appState.sectionListDisplayName(for: item))
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        Button {
+                                            appState.addManualSection(after: item)
+                                        } label: {
+                                            Image(systemName: "plus")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(Color.black)
+                                                .frame(width: 24, height: 24)
+                                                .background(Color.white.opacity(0.92))
+                                                .clipShape(Circle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("Add manual section below")
                                     }
-                                    .buttonStyle(.plain)
-                                    .foregroundStyle(.link)
-                                    .help("Open PDF")
-                                }
-                            }
-                            .frame(minWidth: 220, maxWidth: .infinity, alignment: .leading)
+                                    .frame(width: sectionActionColumnWidth)
 
-                            TextField("Title", text: appState.titleBinding(for: item))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 260)
+                                    HStack(spacing: 8) {
+                                        Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
+                                            .foregroundStyle(Color.white.opacity(0.92))
 
-                            HStack(spacing: 8) {
-                                if item.isManualSection {
-                                    Color.clear
-                                        .frame(width: 124, height: 28)
-                                        .accessibilityHidden(true)
-                                } else {
-                                    Button {
-                                        appState.scanHeaderFooterSample(for: item)
-                                    } label: {
-                                        Label(appState.isScanningHeaderFooter(for: item) ? "Scanning..." : "Scan Header", systemImage: "text.viewfinder")
+                                        if appState.appleVisionMarkdownExists(for: item) {
+                                            Text("MD")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(Color.black)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 2)
+                                                .background(Color.white.opacity(0.90))
+                                                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                                        }
+
+                                        if item.isManualSection {
+                                            Text(appState.sectionListDisplayName(for: item))
+                                                .font(.system(size: 14, weight: .medium))
+                                                .foregroundStyle(NewOCRMainPalette.primaryText)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        } else {
+                                            Button {
+                                                NSWorkspace.shared.open(item.url)
+                                            } label: {
+                                                Text(appState.sectionListDisplayName(for: item))
+                                                    .font(.system(size: 14, weight: .medium))
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                            }
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                                            .help("Open PDF")
+                                        }
                                     }
-                                    .frame(width: 124)
-                                    .buttonStyle(SectionActionButtonStyle())
-                                    .disabled(appState.isScanningHeaderFooter(for: item))
-                                }
+                                    .frame(width: sectionNameColumnWidth, alignment: .leading)
 
-                                Button {
-                                    appState.beginOCR(for: item)
-                                } label: {
-                                    Label("Process", systemImage: "play.fill")
-                                }
-                                .frame(width: 96)
-                                .buttonStyle(SectionActionButtonStyle())
-                                .disabled((!item.isManualSection && !appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item))
+                                    TextField("Title", text: appState.titleBinding(for: item))
+                                        .textFieldStyle(.plain)
+                                        .foregroundStyle(Color.black)
+                                        .font(.system(size: 14, weight: .medium))
+                                        .tint(Color.yellow)
+                                        .accentColor(Color.yellow)
+                                        .padding(.horizontal, 9)
+                                        .padding(.vertical, 7)
+                                        .background(Color.white.opacity(0.94))
+                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                                .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                                        )
+                                        .frame(width: sectionTitleColumnWidth)
 
-                                Button {
-                                    appState.previewMarkdown(for: item)
-                                } label: {
-                                    Label("Preview", systemImage: "eye")
+                                    Divider()
+                                        .frame(height: 38)
+
+                                    HStack(spacing: 8) {
+                                        if item.isManualSection {
+                                            Color.clear
+                                                .frame(width: 42, height: 32)
+                                                .accessibilityHidden(true)
+                                        } else {
+                                            SectionIconButton(
+                                                title: "Scan Header",
+                                                systemImage: "text.viewfinder",
+                                                isDisabled: appState.isScanningHeaderFooter(for: item)
+                                            ) {
+                                                appState.scanHeaderFooterSample(for: item)
+                                            }
+                                        }
+
+                                        SectionIconButton(
+                                            title: "Process",
+                                            systemImage: "play.fill",
+                                            isDisabled: (!item.isManualSection && !appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item)
+                                        ) {
+                                            appState.beginOCR(for: item)
+                                        }
+
+                                        SectionIconButton(
+                                            title: "Preview",
+                                            systemImage: "eye",
+                                            isDisabled: !appState.appleVisionMarkdownExists(for: item) || appState.isScanningHeaderFooter(for: item)
+                                        ) {
+                                            appState.previewMarkdown(for: item)
+                                        }
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .frame(width: sectionCommandColumnWidth, alignment: .leading)
+                                    .background(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
+                                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                                    )
                                 }
-                                .frame(width: 96)
-                                .buttonStyle(SectionActionButtonStyle())
-                                .disabled(!appState.appleVisionMarkdownExists(for: item) || appState.isScanningHeaderFooter(for: item))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .frame(width: sectionTableWidth, alignment: .leading)
+                                .background(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
+
+                                if index < appState.pdfFiles.count - 1 {
+                                    Divider()
+                                        .overlay(NewOCRMainPalette.stroke)
+                                        .frame(width: sectionTableWidth)
+                                }
                             }
-                            .frame(width: 348, alignment: .leading)
                         }
-                        .padding(.vertical, 5)
+                        .frame(width: sectionTableWidth)
+                        .background(NewOCRMainPalette.rowBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                        )
+                        .padding(8)
                     }
-                    .listStyle(.inset)
                 }
+                .frame(width: sectionTableWidth)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         }
         .frame(maxWidth: .infinity, minHeight: appState.pdfListMinHeight, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+        .shadow(
+            color: Color.black.opacity(0.05),
+            radius: 8,
+            x: 0,
+            y: 3
         )
     }
 }
@@ -5598,9 +5687,9 @@ struct EmptyStateView: View {
         VStack(spacing: 8) {
             Image(systemName: "folder")
                 .font(.system(size: 34))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NewOCRMainPalette.tertiaryText)
             Text(title)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NewOCRMainPalette.secondaryText)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -5645,6 +5734,7 @@ struct StepTwoOCRView: View {
                     Button("Preview") {
                         appState.openOCRMarkdownPreviewWindow()
                     }
+                    .buttonStyle(SectionActionButtonStyle())
                     .controlSize(.large)
                     .disabled(appState.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
 
@@ -5656,12 +5746,14 @@ struct StepTwoOCRView: View {
                             windowToCloseAfterSave = nil
                         }
                     }
+                    .buttonStyle(SectionActionButtonStyle())
                     .controlSize(.large)
                     .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
 
                     Button("Close") {
                         appState.closeOCRWindowsAndPreview(NSApp.keyWindow)
                     }
+                    .buttonStyle(SectionActionButtonStyle())
                     .controlSize(.large)
                 }
 
@@ -5815,11 +5907,13 @@ struct StepTwoOCRView: View {
                                 Button(appState.isOCRRunning ? "Processing..." : "Run OCR") {
                                     appState.sendSelectedPDFToOCREngine()
                                 }
+                                .buttonStyle(SectionActionButtonStyle())
                                 .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
 
                                 Button("Load Markdown") {
                                     appState.loadExistingMarkdownAsync()
                                 }
+                                .buttonStyle(SectionActionButtonStyle())
                                 .disabled(appState.isOCRRunning || appState.localAppleVisionOutputFolderPathIfExists == nil)
                             }
 
@@ -5837,6 +5931,7 @@ struct StepTwoOCRView: View {
                                     Button(appState.isOCRCancelling ? "Cancelling..." : "Cancel") {
                                         appState.cancelOCR()
                                     }
+                                    .buttonStyle(SectionActionButtonStyle())
                                     .disabled(appState.isOCRCancelling)
                                 }
                             }
@@ -5883,6 +5978,7 @@ struct StepTwoOCRView: View {
                 Text(appState.ocrSaveAlertMessage)
             }
             .buttonStyle(NewOCRButtonStyle())
+            .background(Color(nsColor: .underPageBackgroundColor))
     }
 }
 
@@ -6088,7 +6184,7 @@ struct ParagraphEditorView: View {
 
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(visibleIndexes, id: \.self) { index in
                         ParagraphItemView(
                             index: index,
@@ -6103,7 +6199,7 @@ struct ParagraphEditorView: View {
                             .frame(minHeight: 220)
                     }
                 }
-                .padding(10)
+                .padding(8)
             }
             .onReceive(appState.$paragraphScrollRequestID) { requestID in
                 guard requestID > 0 else { return }
@@ -6114,7 +6210,7 @@ struct ParagraphEditorView: View {
                 }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
@@ -6133,6 +6229,8 @@ struct PlainOCRTextEditorView: View {
         )
             .frame(minHeight: 360)
             .background(Color(nsColor: .textBackgroundColor))
+            .padding(8)
+            .background(Color(nsColor: .controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
@@ -6646,8 +6744,13 @@ struct ParagraphItemView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(index.isMultiple(of: 2) ? Color(nsColor: .textBackgroundColor) : Color(nsColor: NSColor(calibratedWhite: 0.91, alpha: 1)))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.46), lineWidth: 1)
+        )
         .onPreferenceChange(ParagraphEditorWidthPreferenceKey.self) { width in
             guard width > 0 else { return }
             editorWidth = width

@@ -715,13 +715,41 @@ Width values may be numeric or `FULL` for full-screen opening.
 
 - Keep the app as a practical working tool, not a landing page.
 - Buttons should be clear, friendly, and consistent.
-- Regular buttons should have a visible accent-colored border; destructive
-  buttons such as Revert Original keep the red border style.
+- Main toolbar buttons use the regular NewOCR bordered style. Section List
+  command buttons use a filled accent background with white text so actions are
+  easy to scan. Destructive buttons such as Revert Original keep the red style.
 - Use icons where they help scanning.
 - Do not let decorative UI reduce section-list space.
 - Do not alter behavior while only making UI more beautiful.
 - Main workflows should be reachable from the main window.
 - Section area should have as much useful space as possible.
+- Use restrained neutral surfaces, subtle borders, and small shadows to separate
+  the main window, Section List surface, header row, and command/action lane.
+  Avoid large colored panels for professional workflow areas.
+- Main window text should use larger white text on darker gray surfaces for
+  clearer contrast, while filled command buttons keep white text.
+- Section List rows should use clear table structure: even rows and odd rows use
+  alternating dark gray backgrounds, with separators and a command/action lane
+  that follows the same row background.
+- Section List hides the table header row; the columns are visually implied by
+  consistent row alignment and icon treatments.
+- Section List utility icons should stay high-contrast on dark rows: remove uses
+  a red circular background with a black X, add uses a white circular background
+  with a black plus, file/status badges use light foregrounds, and title fields
+  use white backgrounds with black text.
+- Section List command buttons should be icon-only on white backgrounds with
+  black icons, sized large enough to click comfortably, and should show the
+  command name in a custom hover popover.
+- Process OCR All should follow the same icon-only button treatment and use a
+  stacked-items icon to suggest batch processing.
+- Section List should use a gray outer panel with darker row/header content
+  inside it, so the list area is visibly separate from the main window.
+- The main window should not have its own vertical scrollbar for the normal
+  workflow; Section List owns the vertical scrolling and fills the remaining
+  window height.
+- OCR editor windows should follow the same visual structure: gray outer editor
+  panels, light/darker alternating paragraph rows, and filled accent action
+  buttons with white text.
 
 ## Known Behavioral Decisions
 
