@@ -717,8 +717,38 @@ Width values may be numeric or `FULL` for full-screen opening.
 - Buttons should be clear, friendly, and consistent.
 - The main top bar groups commands into compact menus instead of many separate
   buttons: Project contains New, Open, Revert Original, and Open Config; Edit
-  PDF contains Add Split, Crop, Apply CSS, and Clear Scan Report; Build EPUB is
-  its own menu; Close remains a single top-level command.
+  PDF contains Add Split, Crop, Apply CSS, and Clear Scan Report; Build EPUB
+  and Close remain single top-level commands. View EPUB appears in Project when
+  a built EPUB file exists. Top-bar dropdowns are custom popovers, not native
+  macOS menus, so rows can use larger text and visible hover/pressed
+  highlighting. Project and Edit PDF open on hover with a short scheduled delay
+  and token-based cancellation so stale hover events do not reopen or duplicate
+  menus. Only one top-bar dropdown may be open at a time: the menu under the
+  active pointer owns the shared active menu state, and opening one menu closes
+  the other. Dropdown rows should clearly highlight the item currently under
+  the pointer; destructive rows use a light coral text/icon color at rest, then
+  white text/icons over a softer custom coral-red hover/pressed highlight for
+  readability instead of the saturated system red.
+- The main header uses an OCR/document icon instead of a large text title. The
+  project chip shows only the PDF/project name, hides the full path, and opens
+  the project folder when clicked with a pointing-hand cursor on hover.
+- Cover controls live in a left sidebar under an external EPUB Covers heading,
+  with compact Front and Back rows using larger thumbnails. The Section List
+  sits to the right so it can use more vertical space.
+- Cover row controls and existing cover thumbnails use a pointing-hand cursor.
+  Clicking an existing cover thumbnail opens the image file with the macOS
+  default image app instead of an in-app preview window.
+- Enabled clickable controls in the main window should use a pointing-hand
+  cursor on hover, including top-bar commands, section utility buttons, section
+  command icons, project/folder chips, cover controls, and clickable file names.
+  Section row X/+ utility buttons and section file-name buttons use direct
+  hover cursor handling so the pointer changes reliably inside the scrollable
+  Section List.
+- Across the app, any visible button, menu trigger, thumbnail, file name, chip,
+  icon, or other UI surface that performs an action or navigates somewhere when
+  clicked should change to a pointing-hand cursor on hover. Non-clickable text,
+  labels, disabled controls, and purely decorative elements should keep the
+  normal cursor.
 - Use icons where they help scanning.
 - Do not let decorative UI reduce section-list space.
 - Do not alter behavior while only making UI more beautiful.
@@ -735,12 +765,18 @@ Width values may be numeric or `FULL` for full-screen opening.
 - Section List hides the table header row; the columns are visually implied by
   consistent row alignment and icon treatments.
 - Section List utility icons should stay high-contrast on dark rows: remove uses
-  a red circular background with a black X, add uses a white circular background
+  a red circular background with a black X, add uses a green circular background
   with a black plus, file/status badges use light foregrounds, and title fields
   use white backgrounds with black text.
+- Section List file indicators should be easy to distinguish: PDF rows use a
+  larger orange document icon, manual/section rows use a larger blue section
+  icon, and the MD badge uses a pastel pink background with black text.
 - Section List command buttons should be icon-only on white backgrounds with
   black icons, sized large enough to click comfortably, and should show the
   command name in a custom hover popover.
+- Section List command buttons use per-action colors: Scan Header is brown with
+  a white icon, Process is blue with a white play icon, and Preview is orange
+  with a black icon.
 - Process OCR All should follow the same icon-only button treatment and use a
   stacked-items icon to suggest batch processing.
 - Section List should use a gray outer panel with darker row/header content

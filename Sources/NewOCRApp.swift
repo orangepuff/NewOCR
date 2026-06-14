@@ -4875,6 +4875,7 @@ private struct SectionActionButtonStyleBody: View {
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isHovered)
             .onHover { isHovered = $0 }
+            .modifier(PointingHandCursorModifier(isEnabled: isEnabled))
     }
 }
 
@@ -4882,27 +4883,134 @@ private struct SectionIconButton: View {
     let title: String
     let systemImage: String
     let isDisabled: Bool
+    var backgroundColor: Color = Color.white.opacity(0.92)
+    var foregroundColor: Color = Color.black
     let action: () -> Void
     @State private var isTooltipPresented = false
 
     var body: some View {
         ZStack {
             Button(action: action) {
-                Label(title, systemImage: systemImage)
+                Image(systemName: systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isDisabled ? foregroundColor.opacity(0.34) : foregroundColor)
+                    .frame(width: 42, height: 32)
+                    .background(isDisabled ? backgroundColor.opacity(0.42) : backgroundColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.black.opacity(isDisabled ? 0.10 : 0.18), lineWidth: 1)
+                    )
             }
-            .buttonStyle(SectionActionButtonStyle())
+            .buttonStyle(.plain)
             .disabled(isDisabled)
             .accessibilityLabel(title)
+
+            if isTooltipPresented {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.black)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 3)
+                    .fixedSize()
+                    .offset(y: -42)
+                    .allowsHitTesting(false)
+                    .zIndex(10)
+            }
         }
         .frame(width: 42, height: 32)
-        .onHover { isTooltipPresented = $0 }
-        .popover(isPresented: $isTooltipPresented, arrowEdge: .top) {
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
+        .onHover { isHovering in
+            guard !isDisabled else { return }
+            isTooltipPresented = isHovering
+            if isHovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear {
+            if !isDisabled {
+                NSCursor.arrow.set()
+            }
+        }
+    }
+}
+
+private struct SectionUtilityCircleButton: View {
+    let title: String
+    let systemImage: String
+    let backgroundColor: Color
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.black)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .presentationCompactAdaptation(.popover)
+                .frame(width: 24, height: 24)
+                .background(backgroundColor)
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .accessibilityLabel(title)
+        .help(title)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear {
+            if isHovered {
+                NSCursor.arrow.set()
+                isHovered = false
+            }
+        }
+    }
+}
+
+private struct SectionFileNameButton: View {
+    let title: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 14, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(NewOCRMainPalette.primaryText)
+        .contentShape(Rectangle())
+        .accessibilityLabel("Open PDF")
+        .help("Open PDF")
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear {
+            if isHovered {
+                NSCursor.arrow.set()
+                isHovered = false
+            }
         }
     }
 }
@@ -4973,6 +5081,183 @@ private struct NewOCRButtonStyleBody: View {
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isHovered)
             .onHover { isHovered = $0 }
+            .modifier(PointingHandCursorModifier(isEnabled: isEnabled))
+    }
+}
+
+private struct TopBarDropdownMenu<Content: View>: View {
+    let id: String
+    let title: String
+    let systemImage: String
+    @Binding var activeMenuID: String?
+    @ViewBuilder let content: (_ close: @escaping () -> Void) -> Content
+    @State private var isHoveringTrigger = false
+    @State private var isHoveringPopover = false
+    @State private var hoverScheduleID = UUID()
+
+    private var isPresentedBinding: Binding<Bool> {
+        Binding {
+            activeMenuID == id
+        } set: { isPresented in
+            if isPresented {
+                activeMenuID = id
+            } else if activeMenuID == id {
+                activeMenuID = nil
+            }
+        }
+    }
+
+    var body: some View {
+        Button {
+            activeMenuID = id
+        } label: {
+            Label(title, systemImage: systemImage)
+        }
+        .controlSize(.large)
+        .onHover { hovering in
+            isHoveringTrigger = hovering
+            if hovering {
+                openAfterHoverDelay()
+            } else {
+                closeAfterHoverDelay()
+            }
+        }
+        .popover(isPresented: isPresentedBinding, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 5) {
+                content {
+                    if activeMenuID == id {
+                        activeMenuID = nil
+                    }
+                }
+            }
+            .padding(8)
+            .frame(minWidth: 230, alignment: .leading)
+            .background(NewOCRMainPalette.panelBackground)
+            .onHover { hovering in
+                isHoveringPopover = hovering
+                if hovering {
+                    hoverScheduleID = UUID()
+                    activeMenuID = id
+                } else {
+                    closeAfterHoverDelay()
+                }
+            }
+        }
+    }
+
+    private func openAfterHoverDelay() {
+        let scheduleID = UUID()
+        hoverScheduleID = scheduleID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            guard hoverScheduleID == scheduleID else { return }
+            if isHoveringTrigger || isHoveringPopover {
+                activeMenuID = id
+            }
+        }
+    }
+
+    private func closeAfterHoverDelay() {
+        let scheduleID = UUID()
+        hoverScheduleID = scheduleID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+            guard hoverScheduleID == scheduleID else { return }
+            if !isHoveringTrigger && !isHoveringPopover && activeMenuID == id {
+                activeMenuID = nil
+            }
+        }
+    }
+}
+
+private struct TopBarDropdownRow: View {
+    let title: String
+    let systemImage: String
+    var isDisabled: Bool = false
+    var isDestructive: Bool = false
+    let close: () -> Void
+    let action: () -> Void
+    @State private var isHovered = false
+    @State private var isPressed = false
+
+    private var foregroundColor: Color {
+        if isDisabled {
+            return NewOCRMainPalette.tertiaryText
+        }
+        if isDestructive && (isHovered || isPressed) {
+            return Color.white
+        }
+        if isDestructive {
+            return Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.56, blue: 0.56, alpha: 1))
+        }
+        return NewOCRMainPalette.primaryText
+    }
+
+    private var highlightColor: Color {
+        if isDisabled {
+            return Color.clear
+        }
+        if isPressed {
+            return isDestructive ? Color(nsColor: NSColor(calibratedRed: 0.92, green: 0.36, blue: 0.36, alpha: 1)) : Color.white.opacity(0.30)
+        }
+        if isHovered {
+            return isDestructive ? Color(nsColor: NSColor(calibratedRed: 0.98, green: 0.48, blue: 0.48, alpha: 1)) : Color.white.opacity(0.22)
+        }
+        return Color.clear
+    }
+
+    var body: some View {
+        Button {
+            guard !isDisabled else { return }
+            action()
+            close()
+        } label: {
+            HStack(spacing: 11) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 22)
+                Text(title)
+                    .font(.system(size: 16, weight: .semibold))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(highlightColor)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            guard !isDisabled else { return }
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+                isPressed = false
+            }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    if !isDisabled {
+                        isPressed = true
+                    }
+                }
+                .onEnded { _ in
+                    isPressed = false
+                }
+        )
+    }
+}
+
+private struct TopBarDropdownDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(NewOCRMainPalette.stroke)
+            .frame(height: 1)
+            .padding(.vertical, 4)
     }
 }
 
@@ -4980,118 +5265,126 @@ private extension View {
     func minFrame(width: CGFloat, height: CGFloat) -> some View {
         frame(minWidth: width, minHeight: height)
     }
+
+    func pointingHandCursor() -> some View {
+        modifier(PointingHandCursorModifier(isEnabled: true))
+    }
 }
 
 struct StepOneLoadPDFView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var activeTopBarMenuID: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Load PDF/OCR")
-                            .font(.system(size: 38, weight: .semibold))
-                            .foregroundStyle(NewOCRMainPalette.headingText)
-                        Text("Choose which PDF file and do OCR.")
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    HStack(alignment: .center, spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color.white.opacity(0.94))
+                                .frame(width: 58, height: 58)
+                                .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                            Image(systemName: "doc.text.viewfinder")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundStyle(Color.black)
+                        }
                         ProjectPathView(path: appState.selectedFolderPath)
-                            .frame(maxWidth: 360, alignment: .leading)
+                            .frame(maxWidth: 320, alignment: .leading)
                     }
 
                     Spacer(minLength: 0)
 
                     HStack(spacing: 10) {
-                        Menu {
-                            Button {
+                        TopBarDropdownMenu(
+                            id: "project",
+                            title: "Project",
+                            systemImage: "folder",
+                            activeMenuID: $activeTopBarMenuID
+                        ) { close in
+                            TopBarDropdownRow(title: "New", systemImage: "plus", close: close) {
                                 appState.newSplitPlan()
-                            } label: {
-                                Label("New", systemImage: "plus")
                             }
-                            .keyboardShortcut("n", modifiers: [.command])
 
-                            Button {
+                            TopBarDropdownRow(title: "Open", systemImage: "folder", close: close) {
                                 appState.chooseFolder()
-                            } label: {
-                                Label("Open", systemImage: "folder")
                             }
-                            .keyboardShortcut("o", modifiers: [.command])
 
-                            Divider()
+                            TopBarDropdownDivider()
 
                             if appState.canOpenSplitPlannerForSelectedFolder {
-                                Button(role: .destructive) {
+                                TopBarDropdownRow(
+                                    title: "Revert Original",
+                                    systemImage: "arrow.uturn.backward",
+                                    isDestructive: true,
+                                    close: close
+                                ) {
                                     appState.confirmAndRevertSelectedFolderToOriginalPDF()
-                                } label: {
-                                    Label("Revert Original", systemImage: "arrow.uturn.backward")
                                 }
                             }
 
-                            Button {
+                            TopBarDropdownRow(title: "Open Config", systemImage: "gearshape", close: close) {
                                 appState.openConfigEditor()
-                            } label: {
-                                Label("Open Config", systemImage: "gearshape")
                             }
-                        } label: {
-                            Label("Project", systemImage: "folder")
-                        }
-                        .controlSize(.large)
-
-                        Menu {
-                            if appState.canOpenSplitPlannerForSelectedFolder {
-                                Button {
-                                    appState.openSelectedFolderAddSplit()
-                                } label: {
-                                    Label("Add Split", systemImage: "rectangle.split.2x1")
-                                }
-                                .disabled(!appState.canAddSplitForSelectedFolder)
-
-                                Button {
-                                    appState.openSelectedFolderCropPDF()
-                                } label: {
-                                    Label("Crop", systemImage: "crop")
-                                }
-                            }
-
-                            Button {
-                                appState.applyStylesheet()
-                            } label: {
-                                Label("Apply CSS", systemImage: "paintbrush")
-                            }
-                            .disabled(appState.selectedFolderPath.isEmpty)
-
-                            Divider()
-
-                            Button(role: .destructive) {
-                                appState.clearAllHeaderFooterScans()
-                            } label: {
-                                Label("Clear Scan Report", systemImage: "trash")
-                            }
-                            .disabled(appState.selectedFolderPath.isEmpty || appState.isHeaderFooterScanRunning)
-                        } label: {
-                            Label("Edit PDF", systemImage: "slider.horizontal.3")
-                        }
-                        .controlSize(.large)
-
-                        Menu {
-                            Button {
-                                appState.buildBookEPUB()
-                            } label: {
-                                Label(appState.isOCRRunning ? "Building EPUB..." : "Build EPUB", systemImage: "book")
-                            }
-                            .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
 
                             if appState.bookEPUBFilePathIfExists != nil {
-                                Button {
+                                TopBarDropdownDivider()
+
+                                TopBarDropdownRow(title: "View EPUB", systemImage: "eye", close: close) {
                                     appState.openBuiltEPUBFile()
-                                } label: {
-                                    Label("View EPUB", systemImage: "eye")
                                 }
                             }
+                        }
+
+                        TopBarDropdownMenu(
+                            id: "edit-pdf",
+                            title: "Edit PDF",
+                            systemImage: "slider.horizontal.3",
+                            activeMenuID: $activeTopBarMenuID
+                        ) { close in
+                            if appState.canOpenSplitPlannerForSelectedFolder {
+                                TopBarDropdownRow(
+                                    title: "Add Split",
+                                    systemImage: "rectangle.split.2x1",
+                                    isDisabled: !appState.canAddSplitForSelectedFolder,
+                                    close: close
+                                ) {
+                                    appState.openSelectedFolderAddSplit()
+                                }
+
+                                TopBarDropdownRow(title: "Crop", systemImage: "crop", close: close) {
+                                    appState.openSelectedFolderCropPDF()
+                                }
+                            }
+
+                            TopBarDropdownRow(
+                                title: "Apply CSS",
+                                systemImage: "paintbrush",
+                                isDisabled: appState.selectedFolderPath.isEmpty,
+                                close: close
+                            ) {
+                                appState.applyStylesheet()
+                            }
+
+                            TopBarDropdownDivider()
+
+                            TopBarDropdownRow(
+                                title: "Clear Scan Report",
+                                systemImage: "trash",
+                                isDisabled: appState.selectedFolderPath.isEmpty || appState.isHeaderFooterScanRunning,
+                                isDestructive: true,
+                                close: close
+                            ) {
+                                appState.clearAllHeaderFooterScans()
+                            }
+                        }
+
+                        Button {
+                            appState.buildBookEPUB()
                         } label: {
-                            Label("Build EPUB", systemImage: "book")
+                            Label(appState.isOCRRunning ? "Building EPUB..." : "Build EPUB", systemImage: "book")
                         }
                         .controlSize(.large)
+                        .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
 
                         Button {
                             NSApp.terminate(nil)
@@ -5104,81 +5397,58 @@ struct StepOneLoadPDFView: View {
                     .layoutPriority(1)
                 }
 
-                HStack(spacing: 14) {
-                    Spacer(minLength: 0)
-
-                    HStack(spacing: 8) {
+                HStack(alignment: .top, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 10) {
                         Text("EPUB Covers")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(NewOCRMainPalette.headingText)
-                    }
-
-                    Divider()
-                        .frame(height: 26)
-
-                    HStack(spacing: 10) {
-                        Button {
-                            appState.chooseFrontCoverImage()
-                        } label: {
-                            Label("Front Cover", systemImage: "photo")
-                        }
-
-                        CoverThumbnailView(path: appState.frontCoverImagePath)
-                    }
-
-                    HStack(spacing: 10) {
-                        Button {
-                            appState.chooseBackCoverImage()
-                        } label: {
-                            Label("Back Cover", systemImage: "photo.on.rectangle")
-                        }
-
-                        CoverThumbnailView(path: appState.backCoverImagePath)
-                    }
-
-                    Spacer(minLength: 0)
-                }
-                .padding(.vertical, 4)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Sections")
                             .font(.system(size: 19, weight: .semibold))
                             .foregroundStyle(NewOCRMainPalette.headingText)
-                        Text("\(appState.pdfFiles.count)")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(NewOCRMainPalette.secondaryText)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color.white.opacity(0.12))
-                            .clipShape(Capsule())
-                        SectionIconButton(
-                            title: "Process OCR All",
-                            systemImage: "square.stack.3d.up.fill",
-                            isDisabled: !appState.canProcessOCRAllSections
-                        ) {
-                            appState.processOCRAllSections()
-                        }
-                        Spacer()
-                    }
 
-                    if appState.isHeaderFooterScanRunning {
-                        HStack(spacing: 10) {
-                            ProgressView(value: appState.headerFooterScanProgressPercent ?? 0, total: 100)
-                                .frame(maxWidth: .infinity)
-                            Text("\(Int(appState.headerFooterScanProgressPercent ?? 0))%")
-                                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        CoverSidebarView()
+                            .environmentObject(appState)
+                    }
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Sections")
+                                .font(.system(size: 19, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.headingText)
+                            Text("\(appState.pdfFiles.count)")
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(NewOCRMainPalette.secondaryText)
-                                .frame(width: 42, alignment: .trailing)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.white.opacity(0.12))
+                                .clipShape(Capsule())
+                            SectionIconButton(
+                                title: "Process OCR All",
+                                systemImage: "square.stack.3d.up.fill",
+                                isDisabled: !appState.canProcessOCRAllSections
+                            ) {
+                                appState.processOCRAllSections()
+                            }
+                            Spacer()
                         }
-                        Text(appState.headerFooterScanStatus)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(NewOCRMainPalette.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
 
-                    PDFListView()
+                        if appState.isHeaderFooterScanRunning {
+                            HStack(spacing: 10) {
+                                ProgressView(value: appState.headerFooterScanProgressPercent ?? 0, total: 100)
+                                    .frame(maxWidth: .infinity)
+                                Text("\(Int(appState.headerFooterScanProgressPercent ?? 0))%")
+                                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                    .frame(width: 42, alignment: .trailing)
+                            }
+                            Text(appState.headerFooterScanStatus)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+
+                        PDFListView()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
             }
@@ -5378,37 +5648,54 @@ struct ProjectPathView: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: isEmpty ? "folder.badge.questionmark" : "folder.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(isEmpty ? Color(nsColor: .secondaryLabelColor) : Color.accentColor)
-                .frame(width: 20)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(isEmpty ? NewOCRMainPalette.tertiaryText : Color.white.opacity(0.92))
+                .frame(width: 22)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(folderName)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(isEmpty ? NewOCRMainPalette.secondaryText : NewOCRMainPalette.primaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                if !isEmpty {
-                    Text(path)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
+            Text(folderName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(isEmpty ? NewOCRMainPalette.secondaryText : NewOCRMainPalette.primaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
         )
-        .help(isEmpty ? "No project folder selected" : path)
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onTapGesture {
+            guard !isEmpty else { return }
+            NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
+        }
+        .modifier(PointingHandCursorModifier(isEnabled: !isEmpty))
+        .help(isEmpty ? "No project folder selected" : "Open project folder")
     }
+}
+
+private struct PointingHandCursorModifier: ViewModifier {
+    let isEnabled: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { isHovering in
+                guard isEnabled else { return }
+                if isHovering {
+                    NSCursor.pointingHand.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+            .onDisappear {
+                if isEnabled {
+                    NSCursor.arrow.set()
+                }
+            }
+        }
 }
 
 struct PDFListView: View {
@@ -5442,37 +5729,28 @@ struct PDFListView: View {
                             ForEach(Array(appState.pdfFiles.enumerated()), id: \.element.id) { index, item in
                                 HStack(spacing: 12) {
                                     HStack(spacing: 6) {
-                                        Button(role: .destructive) {
+                                        SectionUtilityCircleButton(
+                                            title: "Remove section",
+                                            systemImage: "xmark",
+                                            backgroundColor: Color.red.opacity(0.92)
+                                        ) {
                                             appState.removeSectionItem(item)
-                                        } label: {
-                                            Image(systemName: "xmark")
-                                                .font(.system(size: 12, weight: .semibold))
-                                                .foregroundStyle(Color.black)
-                                                .frame(width: 24, height: 24)
-                                                .background(Color.red.opacity(0.92))
-                                                .clipShape(Circle())
                                         }
-                                        .buttonStyle(.plain)
-                                        .help("Remove section")
 
-                                        Button {
+                                        SectionUtilityCircleButton(
+                                            title: "Add manual section below",
+                                            systemImage: "plus",
+                                            backgroundColor: Color.green.opacity(0.92)
+                                        ) {
                                             appState.addManualSection(after: item)
-                                        } label: {
-                                            Image(systemName: "plus")
-                                                .font(.system(size: 12, weight: .semibold))
-                                                .foregroundStyle(Color.black)
-                                                .frame(width: 24, height: 24)
-                                                .background(Color.white.opacity(0.92))
-                                                .clipShape(Circle())
                                         }
-                                        .buttonStyle(.plain)
-                                        .help("Add manual section below")
                                     }
                                     .frame(width: sectionActionColumnWidth)
 
                                     HStack(spacing: 8) {
                                         Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
-                                            .foregroundStyle(Color.white.opacity(0.92))
+                                            .font(.system(size: 18, weight: .semibold))
+                                            .foregroundStyle(item.isManualSection ? Color.blue : Color.orange)
 
                                         if appState.appleVisionMarkdownExists(for: item) {
                                             Text("MD")
@@ -5480,7 +5758,7 @@ struct PDFListView: View {
                                                 .foregroundStyle(Color.black)
                                                 .padding(.horizontal, 5)
                                                 .padding(.vertical, 2)
-                                                .background(Color.white.opacity(0.90))
+                                                .background(Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.84, alpha: 1)))
                                                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                                         }
 
@@ -5492,18 +5770,11 @@ struct PDFListView: View {
                                                 .truncationMode(.middle)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
                                         } else {
-                                            Button {
+                                            SectionFileNameButton(
+                                                title: appState.sectionListDisplayName(for: item)
+                                            ) {
                                                 NSWorkspace.shared.open(item.url)
-                                            } label: {
-                                                Text(appState.sectionListDisplayName(for: item))
-                                                    .font(.system(size: 14, weight: .medium))
-                                                    .lineLimit(1)
-                                                    .truncationMode(.middle)
-                                                    .frame(maxWidth: .infinity, alignment: .leading)
                                             }
-                                            .buttonStyle(.plain)
-                                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                                            .help("Open PDF")
                                         }
                                     }
                                     .frame(width: sectionNameColumnWidth, alignment: .leading)
@@ -5536,7 +5807,9 @@ struct PDFListView: View {
                                             SectionIconButton(
                                                 title: "Scan Header",
                                                 systemImage: "text.viewfinder",
-                                                isDisabled: appState.isScanningHeaderFooter(for: item)
+                                                isDisabled: appState.isScanningHeaderFooter(for: item),
+                                                backgroundColor: Color.brown.opacity(0.92),
+                                                foregroundColor: Color.white
                                             ) {
                                                 appState.scanHeaderFooterSample(for: item)
                                             }
@@ -5545,7 +5818,9 @@ struct PDFListView: View {
                                         SectionIconButton(
                                             title: "Process",
                                             systemImage: "play.fill",
-                                            isDisabled: (!item.isManualSection && !appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item)
+                                            isDisabled: (!item.isManualSection && !appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item),
+                                            backgroundColor: Color.blue.opacity(0.92),
+                                            foregroundColor: Color.white
                                         ) {
                                             appState.beginOCR(for: item)
                                         }
@@ -5553,7 +5828,9 @@ struct PDFListView: View {
                                         SectionIconButton(
                                             title: "Preview",
                                             systemImage: "eye",
-                                            isDisabled: !appState.appleVisionMarkdownExists(for: item) || appState.isScanningHeaderFooter(for: item)
+                                            isDisabled: !appState.appleVisionMarkdownExists(for: item) || appState.isScanningHeaderFooter(for: item),
+                                            backgroundColor: Color.orange.opacity(0.92),
+                                            foregroundColor: Color.black
                                         ) {
                                             appState.previewMarkdown(for: item)
                                         }
@@ -5610,6 +5887,60 @@ struct PDFListView: View {
     }
 }
 
+struct CoverSidebarView: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            CoverRowView(
+                title: "Front",
+                systemImage: "photo",
+                path: appState.frontCoverImagePath
+            ) {
+                appState.chooseFrontCoverImage()
+            }
+
+            CoverRowView(
+                title: "Back",
+                systemImage: "photo.on.rectangle",
+                path: appState.backCoverImagePath
+            ) {
+                appState.chooseBackCoverImage()
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(width: 190)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+}
+
+struct CoverRowView: View {
+    let title: String
+    let systemImage: String
+    let path: String
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Button(action: action) {
+                Label(title, systemImage: systemImage)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .pointingHandCursor()
+
+            CoverThumbnailView(path: path)
+        }
+    }
+}
+
 struct CoverThumbnailView: View {
     let path: String
 
@@ -5617,72 +5948,33 @@ struct CoverThumbnailView: View {
         Group {
             if !path.isEmpty, let image = NSImage(contentsOfFile: path) {
                 Button {
-                    openImagePreviewWindow(path: path)
+                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
                 } label: {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
-                        .frame(width: 34, height: 44)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .frame(width: 86, height: 112)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
                 .help("Open cover image")
             } else {
                 Image(systemName: "photo")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, height: 44)
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                    .frame(width: 86, height: 112)
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
                     )
             }
-        }
-    }
-
-    private func openImagePreviewWindow(path: String) {
-        guard let image = NSImage(contentsOfFile: path) else { return }
-        let imageSize = image.size
-        let maxWidth: CGFloat = 900
-        let maxHeight: CGFloat = 900
-        let scale = min(maxWidth / max(1, imageSize.width), maxHeight / max(1, imageSize.height), 1)
-        let windowSize = NSSize(width: max(360, imageSize.width * scale), height: max(360, imageSize.height * scale))
-
-        let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: windowSize),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = URL(fileURLWithPath: path).lastPathComponent
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: CoverImagePreviewView(path: path))
-        window.makeKeyAndOrderFront(nil)
-    }
-}
-
-struct CoverImagePreviewView: View {
-    let path: String
-
-    var body: some View {
-        if let image = NSImage(contentsOfFile: path) {
-            ScrollView([.horizontal, .vertical]) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .padding(16)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .background(Color(nsColor: .windowBackgroundColor))
-        } else {
-            EmptyStateView(title: "Image file not found.")
-                .frame(minWidth: 360, minHeight: 360)
         }
     }
 }
