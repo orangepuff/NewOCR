@@ -2474,7 +2474,7 @@ final class AppState: ObservableObject {
         let insertIndex = (pdfFiles.firstIndex(of: item) ?? (pdfFiles.count - 1)) + 1
 
         pdfFiles.insert(newItem, at: min(insertIndex, pdfFiles.count))
-        pdfTitles[newItem.id] = "Section"
+        pdfTitles[newItem.id] = ""
         saveBookSections()
         save()
     }
@@ -2485,7 +2485,7 @@ final class AppState: ObservableObject {
         let url = manualSectionURL(id: id)
         let newItem = PDFFileItem(id: url.path, url: url)
         pdfFiles.append(newItem)
-        pdfTitles[newItem.id] = "Section"
+        pdfTitles[newItem.id] = ""
         saveBookSections()
         save()
     }

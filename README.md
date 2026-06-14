@@ -301,6 +301,7 @@ Rules:
 - Manual sections are part of `book-sections.json`.
 - Manual sections should be removable.
 - Manual sections do not run Apple Vision OCR because they have no PDF.
+- Newly added manual sections start with an empty editable title field.
 - Clicking **Process** for a manual section opens the OCR editor.
 - If no Markdown exists, NewOCR creates:
 
