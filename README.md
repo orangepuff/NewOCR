@@ -714,11 +714,17 @@ Width values may be numeric or `FULL` for full-screen opening.
   and Close remain single top-level commands. View EPUB appears in Project when
   a built EPUB file exists. Top-bar dropdowns are custom popovers, not native
   macOS menus, so rows can use larger text and visible hover/pressed
-  highlighting. Project and Edit PDF open on hover with a short scheduled delay
-  and token-based cancellation so stale hover events do not reopen or duplicate
-  menus. Only one top-bar dropdown may be open at a time: the menu under the
-  active pointer owns the shared active menu state, and opening one menu closes
-  the other. Dropdown rows should clearly highlight the item currently under
+  highlighting. Project and Edit PDF open immediately when the pointer enters
+  the trigger and close 80 ms after the pointer leaves both the trigger and
+  the popover panel. Hover is detected via NSTrackingArea (HoverArea
+  NSViewRepresentable) instead of SwiftUI .onHover; .onHover is unreliable
+  here because the popover lives in a separate NSPanel which breaks SwiftUI
+  tracking. Close scheduling uses DispatchWorkItem inside a MenuHoverController
+  stored in @State so cancellation never reads SwiftUI state inside an async
+  closure. Moving from the trigger into the panel cancels the pending close;
+  switching to the other trigger sets activeMenuID immediately and the old
+  menu's 80 ms close fires harmlessly (activeMenuID no longer matches).
+  Only one menu may be open at a time via a single shared activeMenuID string. Dropdown rows should clearly highlight the item currently under
   the pointer; destructive rows use a light coral text/icon color at rest, then
   white text/icons over a softer custom coral-red hover/pressed highlight for
   readability instead of the saturated system red.

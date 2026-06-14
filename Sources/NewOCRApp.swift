@@ -4996,85 +4996,116 @@ private struct NewOCRButtonStyleBody: View {
     }
 }
 
+// NSView subclass that uses NSTrackingArea for reliable hover detection.
+// SwiftUI's .onHover is unreliable when combined with .popover() because
+// the popover lives in a separate NSPanel, breaking SwiftUI's hover tracking.
+private class HoverTrackingView: NSView {
+    var onEnter: (() -> Void)?
+    var onExit: (() -> Void)?
+    private var trackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let old = trackingArea { removeTrackingArea(old) }
+        let new = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(new)
+        trackingArea = new
+    }
+
+    override func mouseEntered(with event: NSEvent) { onEnter?() }
+    override func mouseExited(with event: NSEvent) { onExit?() }
+}
+
+private struct HoverArea: NSViewRepresentable {
+    var onEnter: () -> Void
+    var onExit: () -> Void
+
+    func makeNSView(context: Context) -> HoverTrackingView {
+        HoverTrackingView()
+    }
+
+    func updateNSView(_ nsView: HoverTrackingView, context: Context) {
+        // Always update closures so they capture the freshest state bindings.
+        nsView.onEnter = onEnter
+        nsView.onExit = onExit
+    }
+}
+
+// Reference-type controller so DispatchWorkItem can be cancelled without
+// reading any SwiftUI state inside an async closure.
+private final class MenuHoverController {
+    private var closeItem: DispatchWorkItem?
+
+    func cancelClose() {
+        closeItem?.cancel()
+        closeItem = nil
+    }
+
+    func scheduleClose(after delay: Double = 0.08, action: @escaping () -> Void) {
+        cancelClose()
+        let item = DispatchWorkItem(block: action)
+        closeItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+}
+
 private struct TopBarDropdownMenu<Content: View>: View {
     let id: String
     let title: String
     let systemImage: String
     @Binding var activeMenuID: String?
     @ViewBuilder let content: (_ close: @escaping () -> Void) -> Content
-    @State private var isHoveringTrigger = false
-    @State private var isHoveringPopover = false
-    @State private var hoverScheduleID = UUID()
+    // @State keeps the same controller instance across re-renders.
+    @State private var ctrl = MenuHoverController()
 
     private var isPresentedBinding: Binding<Bool> {
         Binding {
             activeMenuID == id
-        } set: { isPresented in
-            if isPresented {
-                activeMenuID = id
-            } else if activeMenuID == id {
-                activeMenuID = nil
-            }
+        } set: { newValue in
+            if !newValue, activeMenuID == id { activeMenuID = nil }
         }
     }
 
     var body: some View {
         Button {
-            activeMenuID = id
+            activeMenuID = activeMenuID == id ? nil : id
         } label: {
             Label(title, systemImage: systemImage)
         }
         .controlSize(.large)
-        .onHover { hovering in
-            isHoveringTrigger = hovering
-            if hovering {
-                openAfterHoverDelay()
-            } else {
-                closeAfterHoverDelay()
+        .background(
+            HoverArea {
+                ctrl.cancelClose()
+                activeMenuID = id
+            } onExit: {
+                ctrl.scheduleClose {
+                    if activeMenuID == id { activeMenuID = nil }
+                }
             }
-        }
+        )
         .popover(isPresented: isPresentedBinding, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 5) {
                 content {
-                    if activeMenuID == id {
-                        activeMenuID = nil
-                    }
+                    if activeMenuID == id { activeMenuID = nil }
                 }
             }
             .padding(8)
             .frame(minWidth: 230, alignment: .leading)
             .background(NewOCRMainPalette.panelBackground)
-            .onHover { hovering in
-                isHoveringPopover = hovering
-                if hovering {
-                    hoverScheduleID = UUID()
-                    activeMenuID = id
-                } else {
-                    closeAfterHoverDelay()
+            .background(
+                HoverArea {
+                    ctrl.cancelClose()
+                } onExit: {
+                    ctrl.scheduleClose {
+                        if activeMenuID == id { activeMenuID = nil }
+                    }
                 }
-            }
-        }
-    }
-
-    private func openAfterHoverDelay() {
-        let scheduleID = UUID()
-        hoverScheduleID = scheduleID
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            guard hoverScheduleID == scheduleID else { return }
-            if isHoveringTrigger || isHoveringPopover {
-                activeMenuID = id
-            }
-        }
-    }
-
-    private func closeAfterHoverDelay() {
-        let scheduleID = UUID()
-        hoverScheduleID = scheduleID
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-            guard hoverScheduleID == scheduleID else { return }
-            if !isHoveringTrigger && !isHoveringPopover && activeMenuID == id {
-                activeMenuID = nil
-            }
+            )
         }
     }
 }
