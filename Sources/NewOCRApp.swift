@@ -4734,6 +4734,20 @@ private enum NewOCRMainPalette {
     static let tertiaryText = Color.white.opacity(0.58)
 }
 
+private enum OCRTypography {
+    static let editorFontSize: CGFloat = 18
+    static let editorInset = NSSize(width: 10, height: 9)
+}
+
+private enum MainTypography {
+    static let headingSize: CGFloat = 22
+    static let bodySize: CGFloat = 17
+    static let buttonSize: CGFloat = 17
+    static let smallSize: CGFloat = 15
+    static let badgeSize: CGFloat = 16
+    static let iconSize: CGFloat = 21
+}
+
 private struct SectionActionButtonStyleBody: View {
     let configuration: SectionActionButtonStyle.Configuration
     @Environment(\.isEnabled) private var isEnabled
@@ -4765,11 +4779,11 @@ private struct SectionActionButtonStyleBody: View {
 
     var body: some View {
         configuration.label
-            .font(.system(size: 13, weight: .semibold))
+            .font(.system(size: MainTypography.smallSize, weight: .semibold))
             .labelStyle(.iconOnly)
             .lineLimit(1)
             .foregroundStyle(foregroundColor)
-            .frame(width: 42, height: 32)
+            .frame(width: 46, height: 36)
             .background(backgroundColor)
             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(
@@ -4803,9 +4817,9 @@ private struct SectionIconButton: View {
         ZStack {
             Button(action: action) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: MainTypography.smallSize, weight: .semibold))
                     .foregroundStyle(isDisabled ? foregroundColor.opacity(0.34) : foregroundColor)
-                    .frame(width: 42, height: 32)
+                    .frame(width: 46, height: 36)
                     .background(isDisabled ? backgroundColor.opacity(0.42) : backgroundColor)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                     .overlay(
@@ -4831,12 +4845,13 @@ private struct SectionIconButton: View {
                     )
                     .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 3)
                     .fixedSize()
-                    .offset(y: -42)
+                    .offset(y: 44)
                     .allowsHitTesting(false)
-                    .zIndex(10)
+                    .zIndex(100)
             }
         }
-        .frame(width: 42, height: 32)
+        .frame(width: 46, height: 36)
+        .zIndex(isTooltipPresented ? 100 : 0)
         .onHover { isHovering in
             guard !isDisabled else { return }
             isTooltipPresented = isHovering
@@ -4864,9 +4879,9 @@ private struct SectionUtilityCircleButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Color.black)
-                .frame(width: 24, height: 24)
+                .frame(width: 28, height: 28)
                 .background(backgroundColor)
                 .clipShape(Circle())
         }
@@ -4899,7 +4914,7 @@ private struct SectionFileNameButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: MainTypography.bodySize, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -4970,7 +4985,7 @@ private struct NewOCRButtonStyleBody: View {
 
     var body: some View {
         configuration.label
-            .font(.system(size: 14, weight: .semibold))
+            .font(.system(size: MainTypography.buttonSize, weight: .semibold))
             .lineLimit(1)
             .foregroundStyle(foregroundColor)
             .padding(.horizontal, 12)
@@ -5154,10 +5169,10 @@ private struct TopBarDropdownRow: View {
         } label: {
             HStack(spacing: 11) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: MainTypography.bodySize, weight: .semibold))
                     .frame(width: 22)
                 Text(title)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: MainTypography.bodySize, weight: .semibold))
                 Spacer(minLength: 0)
             }
             .foregroundStyle(foregroundColor)
@@ -5328,12 +5343,9 @@ struct StepOneLoadPDFView: View {
                         .controlSize(.large)
                         .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
 
-                        Button {
+                        OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
                             NSApp.terminate(nil)
-                        } label: {
-                            Label("Close", systemImage: "xmark")
                         }
-                        .controlSize(.large)
                     }
                     .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(1)
@@ -5342,7 +5354,7 @@ struct StepOneLoadPDFView: View {
                 HStack(alignment: .top, spacing: 18) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("EPUB Covers")
-                            .font(.system(size: 19, weight: .semibold))
+                            .font(.system(size: MainTypography.headingSize, weight: .semibold))
                             .foregroundStyle(NewOCRMainPalette.headingText)
 
                         CoverSidebarView()
@@ -5353,10 +5365,10 @@ struct StepOneLoadPDFView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
                             Text("Sections")
-                                .font(.system(size: 19, weight: .semibold))
+                                .font(.system(size: MainTypography.headingSize, weight: .semibold))
                                 .foregroundStyle(NewOCRMainPalette.headingText)
                             Text("\(appState.pdfFiles.count)")
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(.system(size: MainTypography.badgeSize, weight: .semibold))
                                 .foregroundStyle(NewOCRMainPalette.secondaryText)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
@@ -5377,12 +5389,12 @@ struct StepOneLoadPDFView: View {
                                 ProgressView(value: appState.headerFooterScanProgressPercent ?? 0, total: 100)
                                     .frame(maxWidth: .infinity)
                                 Text("\(Int(appState.headerFooterScanProgressPercent ?? 0))%")
-                                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                    .font(.system(size: MainTypography.smallSize, weight: .medium, design: .monospaced))
                                     .foregroundStyle(NewOCRMainPalette.secondaryText)
                                     .frame(width: 42, alignment: .trailing)
                             }
                             Text(appState.headerFooterScanStatus)
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.system(size: MainTypography.smallSize, weight: .medium))
                                 .foregroundStyle(NewOCRMainPalette.secondaryText)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -5590,12 +5602,12 @@ struct ProjectPathView: View {
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: isEmpty ? "folder.badge.questionmark" : "folder.fill")
-                .font(.system(size: 17, weight: .semibold))
+                .font(.system(size: MainTypography.iconSize, weight: .semibold))
                 .foregroundStyle(isEmpty ? NewOCRMainPalette.tertiaryText : Color.white.opacity(0.92))
                 .frame(width: 22)
 
             Text(folderName)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: MainTypography.bodySize, weight: .semibold))
                 .foregroundStyle(isEmpty ? NewOCRMainPalette.secondaryText : NewOCRMainPalette.primaryText)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -5643,10 +5655,10 @@ private struct PointingHandCursorModifier: ViewModifier {
 struct PDFListView: View {
     @EnvironmentObject private var appState: AppState
     private let sectionActionColumnWidth: CGFloat = 68
-    private let sectionNameColumnWidth: CGFloat = 300
-    private let sectionTitleColumnWidth: CGFloat = 240
-    private let sectionCommandColumnWidth: CGFloat = 158
-    private let sectionTableWidth: CGFloat = 840
+    private let sectionNameColumnWidth: CGFloat = 330
+    private let sectionTitleColumnWidth: CGFloat = 260
+    private let sectionCommandColumnWidth: CGFloat = 174
+    private let sectionTableWidth: CGFloat = 906
 
     var body: some View {
         Group {
@@ -5691,22 +5703,22 @@ struct PDFListView: View {
 
                                     HStack(spacing: 8) {
                                         Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
-                                            .font(.system(size: 18, weight: .semibold))
+                                            .font(.system(size: 22, weight: .semibold))
                                             .foregroundStyle(item.isManualSection ? Color.blue : Color.orange)
 
                                         if appState.appleVisionMarkdownExists(for: item) {
                                             Text("MD")
-                                                .font(.system(size: 12, weight: .semibold))
+                                                .font(.system(size: 14, weight: .semibold))
                                                 .foregroundStyle(Color.black)
-                                                .padding(.horizontal, 5)
-                                                .padding(.vertical, 2)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 3)
                                                 .background(Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.84, alpha: 1)))
                                                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                                         }
 
                                         if item.isManualSection {
                                             Text(appState.sectionListDisplayName(for: item))
-                                                .font(.system(size: 14, weight: .medium))
+                                                .font(.system(size: MainTypography.bodySize, weight: .medium))
                                                 .foregroundStyle(NewOCRMainPalette.primaryText)
                                                 .lineLimit(1)
                                                 .truncationMode(.middle)
@@ -5724,11 +5736,11 @@ struct PDFListView: View {
                                     TextField("Title", text: appState.titleBinding(for: item))
                                         .textFieldStyle(.plain)
                                         .foregroundStyle(Color.black)
-                                        .font(.system(size: 14, weight: .medium))
+                                        .font(.system(size: MainTypography.bodySize, weight: .medium))
                                         .tint(Color.yellow)
                                         .accentColor(Color.yellow)
-                                        .padding(.horizontal, 9)
-                                        .padding(.vertical, 7)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 9)
                                         .background(Color.white.opacity(0.94))
                                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                                         .overlay(
@@ -5743,7 +5755,7 @@ struct PDFListView: View {
                                     HStack(spacing: 8) {
                                         if item.isManualSection {
                                             Color.clear
-                                                .frame(width: 42, height: 32)
+                                                .frame(width: 46, height: 36)
                                                 .accessibilityHidden(true)
                                         } else {
                                             SectionIconButton(
@@ -5780,15 +5792,17 @@ struct PDFListView: View {
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 5)
                                     .frame(width: sectionCommandColumnWidth, alignment: .leading)
-                                    .background(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
-                                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .fill(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
+                                    )
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 7, style: .continuous)
                                             .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
                                     )
                                 }
                                 .padding(.horizontal, 12)
-                                .padding(.vertical, 7)
+                                .padding(.vertical, 8)
                                 .frame(width: sectionTableWidth, alignment: .leading)
                                 .background(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
 
@@ -5853,7 +5867,7 @@ struct CoverSidebarView: View {
             Spacer(minLength: 0)
         }
         .padding(14)
-        .frame(width: 190)
+        .frame(width: 205)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -5875,6 +5889,7 @@ struct CoverRowView: View {
             Button(action: action) {
                 Label(title, systemImage: systemImage)
             }
+            .font(.system(size: MainTypography.buttonSize, weight: .semibold))
             .frame(maxWidth: .infinity, alignment: .leading)
             .pointingHandCursor()
 
@@ -5947,39 +5962,45 @@ struct StepTwoOCRView: View {
     @State private var replacementText = ""
 
     var body: some View {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("OCR")
-                            .font(.largeTitle.weight(.semibold))
-                        Text("Review the paths, then run OCR or load existing Markdown.")
-                            .foregroundStyle(.secondary)
-                    }
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "text.viewfinder")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
 
-                    Spacer()
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("OCR")
+                        .font(.system(size: 31, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(appState.selectedPDFName)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
 
-                    Button {
+                Spacer(minLength: 10)
+
+                HStack(spacing: 8) {
+                    OCRIconButton(title: "Markdown syntax", systemImage: "info.circle", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
                         isMarkdownInfoPopoverPresented.toggle()
-                    } label: {
-                        Image(systemName: "info.circle")
                     }
-                    .buttonStyle(.borderless)
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .help("Show Markdown syntax")
-                    .accessibilityLabel("Show Markdown syntax")
                     .popover(isPresented: $isMarkdownInfoPopoverPresented) {
                         MarkdownSyntaxPopoverView()
                     }
 
-                    Button("Preview") {
+                    OCRIconButton(title: "Preview", systemImage: "eye", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
                         appState.openOCRMarkdownPreviewWindow()
                     }
-                    .buttonStyle(SectionActionButtonStyle())
-                    .controlSize(.large)
                     .disabled(appState.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
 
-                    Button("Save") {
+                    OCRIconButton(title: "Save", systemImage: "square.and.arrow.down", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
                         windowToCloseAfterSave = NSApp.keyWindow
                         if appState.saveOCRTextFile() {
                             isSaveAlertPresented = true
@@ -5987,239 +6008,365 @@ struct StepTwoOCRView: View {
                             windowToCloseAfterSave = nil
                         }
                     }
-                    .buttonStyle(SectionActionButtonStyle())
-                    .controlSize(.large)
                     .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
 
-                    Button("Close") {
+                    OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
                         appState.closeOCRWindowsAndPreview(NSApp.keyWindow)
                     }
-                    .buttonStyle(SectionActionButtonStyle())
-                    .controlSize(.large)
                 }
-
-                HStack(alignment: .top, spacing: 14) {
-                    Group {
-                        if appState.localAppleVisionOutputFolderPathIfExists != nil {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("Markdown Text")
-                                        .font(.headline)
-                                    Text(appState.shouldUsePlainOCRTextEditor ? "\(appState.ocrText.count) characters" : "\(appState.ocrParagraphs.count) paragraphs")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(Color(nsColor: .quaternaryLabelColor))
-                                        .clipShape(Capsule())
-                                    OCRMarkdownPresenceBadge(label: "Image", exists: appState.hasOCRMarkdownImages) {
-                                        appState.focusFirstOCRMarkdownImage()
-                                    }
-                                    OCRMarkdownPresenceBadge(label: "Footnote", exists: appState.hasOCRMarkdownFootnotes) {
-                                        appState.focusFirstOCRMarkdownFootnote()
-                                    }
-                                    OCRMarkdownPresenceBadge(label: "Blockquote", exists: appState.hasOCRMarkdownBlockquotes) {
-                                        appState.focusFirstOCRMarkdownBlockquote()
-                                    }
-                                    Spacer()
-                                }
-                                GeometryReader { proxy in
-                                    HStack(spacing: 10) {
-                                        TextField("Search Markdown", text: $appState.ocrSearchText)
-                                            .textFieldStyle(.roundedBorder)
-                                            .frame(width: max(240, proxy.size.width * 0.68))
-                                            .disabled(appState.ocrText.isEmpty)
-                                        Button("Replace All") {
-                                            replacementText = ""
-                                            isReplacePopoverPresented = true
-                                        }
-                                        .frame(width: 140)
-                                        .disabled(appState.ocrText.isEmpty || appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                        .popover(isPresented: $isReplacePopoverPresented) {
-                                            VStack(alignment: .leading, spacing: 12) {
-                                                Text("Replace All")
-                                                    .font(.headline)
-
-                                                HStack(spacing: 8) {
-                                                    Text("Replace To:")
-                                                        .font(.subheadline.weight(.semibold))
-                                                    TextField("Replacement text", text: $replacementText)
-                                                        .textFieldStyle(.roundedBorder)
-                                                        .frame(width: 260)
-                                                }
-
-                                                HStack {
-                                                    Spacer()
-                                                    Button("Cancel") {
-                                                        isReplacePopoverPresented = false
-                                                    }
-                                                    Button("Replace") {
-                                                        _ = appState.replaceAllOCRSearchMatches(with: replacementText)
-                                                        isReplacePopoverPresented = false
-                                                    }
-                                                    .keyboardShortcut(.defaultAction)
-                                                }
-                                            }
-                                            .padding(16)
-                                            .frame(width: 420)
-                                        }
-                                        Button("Clear") {
-                                            appState.ocrSearchText = ""
-                                        }
-                                        .frame(width: 80)
-                                        .disabled(appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                        Button {
-                                            isSearchInfoPopoverPresented.toggle()
-                                        } label: {
-                                            Image(systemName: "info.circle")
-                                        }
-                                        .buttonStyle(.borderless)
-                                        .foregroundStyle(.secondary)
-                                        .help("Search help")
-                                        .accessibilityLabel("Search help")
-                                        .popover(isPresented: $isSearchInfoPopoverPresented) {
-                                            OCRSearchGuidelinePopoverView()
-                                        }
-                                        Spacer(minLength: 0)
-                                    }
-                                }
-                                .frame(height: 28)
-                                Text(appState.ocrSearchResultText.isEmpty ? " " : appState.ocrSearchResultText)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                                    .truncationMode(.tail)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                if appState.shouldUsePlainOCRTextEditor {
-                                    PlainOCRTextEditorView()
-                                        .environmentObject(appState)
-                                        .frame(minHeight: 360, maxHeight: .infinity)
-                                } else {
-                                    ParagraphEditorView()
-                                        .environmentObject(appState)
-                                        .frame(minHeight: 360, maxHeight: .infinity)
-                                }
-                            }
-                        } else {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Markdown Text")
-                                    .font(.headline)
-                                EmptyStateView(title: "Markdown will appear after OCR creates it.")
-                                    .frame(minHeight: 360, maxHeight: .infinity)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                                    )
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-                    VStack(alignment: .leading, spacing: 14) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Button("Files") {
-                                isFilesPopoverPresented.toggle()
-                            }
-                            .controlSize(.large)
-                            .popover(isPresented: $isFilesPopoverPresented) {
-                                FilesPopoverView()
-                                    .environmentObject(appState)
-                            }
-
-                            Text(appState.selectedItemIsManualSection ? "Manual Section" : "Ready for OCR")
-                                .font(.headline)
-
-                            Button {
-                                if !appState.selectedPDFPath.isEmpty && !appState.selectedItemIsManualSection {
-                                    NSWorkspace.shared.open(URL(fileURLWithPath: appState.selectedPDFPath))
-                                }
-                            } label: {
-                                Text(appState.selectedPDFName)
-                                    .lineLimit(2)
-                                    .truncationMode(.middle)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.link)
-                            .help("Open PDF")
-                            .disabled(appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
-
-                            HStack(spacing: 10) {
-                                Button(appState.isOCRRunning ? "Processing..." : "Run OCR") {
-                                    appState.sendSelectedPDFToOCREngine()
-                                }
-                                .buttonStyle(SectionActionButtonStyle())
-                                .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
-
-                                Button("Load Markdown") {
-                                    appState.loadExistingMarkdownAsync()
-                                }
-                                .buttonStyle(SectionActionButtonStyle())
-                                .disabled(appState.isOCRRunning || appState.localAppleVisionOutputFolderPathIfExists == nil)
-                            }
-
-                            if appState.isOCRRunning {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack(spacing: 8) {
-                                        ProgressView(value: appState.ocrProgressPercent ?? 0, total: 100)
-                                            .frame(maxWidth: .infinity)
-                                        Text("\(Int(appState.ocrProgressPercent ?? 0))%")
-                                            .font(.caption.monospacedDigit())
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 42, alignment: .trailing)
-                                    }
-
-                                    Button(appState.isOCRCancelling ? "Cancelling..." : "Cancel") {
-                                        appState.cancelOCR()
-                                    }
-                                    .buttonStyle(SectionActionButtonStyle())
-                                    .disabled(appState.isOCRCancelling)
-                                }
-                            }
-                        }
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Log")
-                                .font(.headline)
-
-                            HStack(spacing: 10) {
-                                if appState.isOCRRunning {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                }
-
-                                Text(appState.ocrStatus)
-                                    .font(.caption)
-                                    .foregroundStyle(appState.isOCRRunning ? .secondary : .primary)
-                                    .lineLimit(2)
-                            }
-
-                            TextEditor(text: $appState.logOutput)
-                                .font(.body.monospaced())
-                                .frame(height: 220)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
-                                )
-                        }
-                    }
-                    .frame(minWidth: 320, idealWidth: 320, maxWidth: 320, alignment: .topLeading)
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .padding(22)
-            .alert("Saved Successfully", isPresented: $isSaveAlertPresented) {
-                Button("OK", role: .cancel) {
-                    appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
-                    windowToCloseAfterSave = nil
-                }
-            } message: {
-                Text(appState.ocrSaveAlertMessage)
+
+            HSplitView {
+                markdownPane
+                    .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
+
+                sidePane
+                    .frame(minWidth: 300, idealWidth: 340, maxWidth: 440, maxHeight: .infinity)
             }
-            .buttonStyle(NewOCRButtonStyle())
-            .background(Color(nsColor: .underPageBackgroundColor))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(22)
+        .alert("Saved Successfully", isPresented: $isSaveAlertPresented) {
+            Button("OK", role: .cancel) {
+                appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
+                windowToCloseAfterSave = nil
+            }
+        } message: {
+            Text(appState.ocrSaveAlertMessage)
+        }
+        .buttonStyle(NewOCRButtonStyle())
+        .background(NewOCRMainPalette.windowBackground)
+    }
+
+    private var markdownPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if appState.localAppleVisionOutputFolderPathIfExists != nil {
+                HStack(spacing: 8) {
+                    Text(appState.shouldUsePlainOCRTextEditor ? "\(appState.ocrText.count) characters" : "\(appState.ocrParagraphs.count) paragraphs")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.12))
+                        .clipShape(Capsule())
+                    OCRMarkdownPresenceBadge(label: "Image", systemImage: "photo", exists: appState.hasOCRMarkdownImages) {
+                        appState.focusFirstOCRMarkdownImage()
+                    }
+                    OCRMarkdownPresenceBadge(label: "Footnote", systemImage: "text.badge.plus", exists: appState.hasOCRMarkdownFootnotes) {
+                        appState.focusFirstOCRMarkdownFootnote()
+                    }
+                    OCRMarkdownPresenceBadge(label: "Blockquote", systemImage: "quote.bubble", exists: appState.hasOCRMarkdownBlockquotes) {
+                        appState.focusFirstOCRMarkdownBlockquote()
+                    }
+                    Spacer()
+                }
+
+                HStack(spacing: 8) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(Color.black.opacity(0.66))
+                        TextField("Search Text", text: $appState.ocrSearchText)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(Color.black)
+                            .tint(Color.yellow)
+                            .disabled(appState.ocrText.isEmpty)
+                    }
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 11)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.white.opacity(0.94))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                    )
+
+                    OCRIconButton(title: "Replace", systemImage: "arrow.triangle.2.circlepath", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255), size: 34) {
+                        replacementText = ""
+                        isReplacePopoverPresented = true
+                    }
+                    .disabled(appState.ocrText.isEmpty || appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .popover(isPresented: $isReplacePopoverPresented) {
+                        replacePopover
+                    }
+
+                    OCRIconButton(title: "Remove Search", systemImage: "xmark.circle", backgroundColor: Color.white.opacity(0.92), size: 34) {
+                        appState.ocrSearchText = ""
+                    }
+                    .disabled(appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    OCRIconButton(title: "Information", systemImage: "questionmark.circle", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white, size: 34) {
+                        isSearchInfoPopoverPresented.toggle()
+                    }
+                    .popover(isPresented: $isSearchInfoPopoverPresented) {
+                        OCRSearchGuidelinePopoverView()
+                    }
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(NewOCRMainPalette.panelBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+
+                Text(appState.ocrSearchResultText.isEmpty ? " " : appState.ocrSearchResultText)
+                    .font(.caption)
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if appState.shouldUsePlainOCRTextEditor {
+                    PlainOCRTextEditorView()
+                        .environmentObject(appState)
+                        .frame(minHeight: 360, maxHeight: .infinity)
+                } else {
+                    ParagraphEditorView()
+                        .environmentObject(appState)
+                        .frame(minHeight: 360, maxHeight: .infinity)
+                }
+            } else {
+                EmptyStateView(title: "Markdown will appear after OCR creates it.")
+                    .frame(minHeight: 360, maxHeight: .infinity)
+                    .background(NewOCRMainPalette.panelBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                    )
+            }
+        }
+        .padding(14)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+
+    private var sidePane: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 11) {
+                HStack(spacing: 8) {
+                    OCRIconButton(title: "Files", systemImage: "folder", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
+                        isFilesPopoverPresented.toggle()
+                    }
+                    .popover(isPresented: $isFilesPopoverPresented) {
+                        FilesPopoverView()
+                            .environmentObject(appState)
+                    }
+
+                    OCRIconButton(title: "Run OCR", systemImage: appState.isOCRRunning ? "hourglass" : "text.viewfinder", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
+                        appState.sendSelectedPDFToOCREngine()
+                    }
+                    .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
+
+                    OCRIconButton(title: "Load Markdown", systemImage: "arrow.down.doc", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
+                        appState.loadExistingMarkdownAsync()
+                    }
+                    .disabled(appState.isOCRRunning || appState.localAppleVisionOutputFolderPathIfExists == nil)
+
+                    if appState.isOCRRunning {
+                        OCRIconButton(title: appState.isOCRCancelling ? "Cancelling" : "Cancel OCR", systemImage: "stop.fill", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255)) {
+                            appState.cancelOCR()
+                        }
+                        .disabled(appState.isOCRCancelling)
+                    }
+                }
+
+                Text(appState.selectedItemIsManualSection ? "Manual Section" : "Ready for OCR")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.headingText)
+
+                Button {
+                    if !appState.selectedPDFPath.isEmpty && !appState.selectedItemIsManualSection {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: appState.selectedPDFPath))
+                    }
+                } label: {
+                    HStack(spacing: 9) {
+                        Image(systemName: appState.selectedItemIsManualSection ? "doc.text" : "doc.richtext")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.orange)
+                        Text(appState.selectedPDFName)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(11)
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Open PDF")
+                .disabled(appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
+
+                if appState.isOCRRunning {
+                    HStack(spacing: 8) {
+                        ProgressView(value: appState.ocrProgressPercent ?? 0, total: 100)
+                            .frame(maxWidth: .infinity)
+                        Text("\(Int(appState.ocrProgressPercent ?? 0))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            .frame(width: 42, alignment: .trailing)
+                    }
+                }
+            }
+            .padding(14)
+            .background(NewOCRMainPalette.panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Log")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.headingText)
+
+                HStack(spacing: 10) {
+                    if appState.isOCRRunning {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    Text(appState.ocrStatus)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(appState.isOCRRunning ? NewOCRMainPalette.secondaryText : NewOCRMainPalette.primaryText)
+                        .lineLimit(2)
+                }
+
+                TextEditor(text: $appState.logOutput)
+                    .font(.system(size: 15, design: .monospaced))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                    .scrollContentBackground(.hidden)
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .frame(maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                    )
+            }
+            .padding(14)
+            .frame(maxHeight: .infinity, alignment: .topLeading)
+            .background(NewOCRMainPalette.panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+        }
+        .padding(.leading, 14)
+    }
+
+    private var replacePopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Replace All")
+                .font(.headline)
+
+            HStack(spacing: 8) {
+                Text("Replace To:")
+                    .font(.subheadline.weight(.semibold))
+                TextField("Replacement text", text: $replacementText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    isReplacePopoverPresented = false
+                }
+                Button("Replace") {
+                    _ = appState.replaceAllOCRSearchMatches(with: replacementText)
+                    isReplacePopoverPresented = false
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
+    }
+}
+
+private struct OCRIconButton: View {
+    let title: String
+    let systemImage: String
+    let backgroundColor: Color
+    var foregroundColor: Color = Color(red: 17/255, green: 17/255, blue: 17/255)
+    var size: CGFloat = 38
+    let action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    var body: some View {
+        ZStack {
+            Button(action: action) {
+                Image(systemName: systemImage)
+                    .font(.system(size: size >= 38 ? 16 : 14, weight: .semibold))
+                    .foregroundStyle(isEnabled ? foregroundColor : foregroundColor.opacity(0.34))
+                    .frame(width: size, height: size)
+                    .background(isEnabled ? (isHovered ? backgroundColor.opacity(0.86) : backgroundColor) : backgroundColor.opacity(0.32))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.black.opacity(isEnabled ? 0.18 : 0.08), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(isEnabled && isHovered ? 0.13 : 0.06), radius: isHovered ? 6 : 3, x: 0, y: isHovered ? 2 : 1)
+            }
+            .buttonStyle(.plain)
+
+            if isHovered && isEnabled {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.black)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 3)
+                    .fixedSize()
+                    .offset(y: size + 18)
+                    .allowsHitTesting(false)
+                    .zIndex(100)
+            }
+        }
+        .frame(width: size, height: size)
+        .zIndex(isHovered ? 20 : 0)
+        .accessibilityLabel(title)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering && isEnabled {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear {
+            if isHovered {
+                NSCursor.arrow.set()
+                isHovered = false
+            }
+        }
     }
 }
 
@@ -6482,30 +6629,75 @@ struct PlainOCRTextEditorView: View {
 
 struct OCRMarkdownPresenceBadge: View {
     let label: String
+    let systemImage: String
     let exists: Bool
     let action: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
-        Button {
-            guard exists else { return }
-            action()
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: exists ? "checkmark.circle.fill" : "xmark.circle")
-                    .font(.caption.weight(.semibold))
-                Text(label)
-                    .font(.caption.weight(.semibold))
+        ZStack {
+            Button {
+                guard exists else { return }
+                action()
+            } label: {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .frame(width: 40, height: 34)
+                        .background(exists ? Color.white.opacity(isHovered ? 0.18 : 0.13) : Color.white.opacity(0.11))
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(exists ? Color.green.opacity(0.48) : Color(red: 255/255, green: 102/255, blue: 102/255).opacity(0.48), lineWidth: 1)
+                        )
+
+                    Image(systemName: exists ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(exists ? Color.green : Color(red: 255/255, green: 102/255, blue: 102/255))
+                        .background(Color.black.opacity(0.32))
+                        .clipShape(Circle())
+                        .offset(x: 4, y: 4)
+                }
             }
-            .foregroundStyle(exists ? .green : .secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(Color(nsColor: .quaternaryLabelColor))
-            .clipShape(Capsule())
+            .buttonStyle(.plain)
+
+            if isHovered {
+                Text("\(label) \(exists ? "found" : "not found")")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.black)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 3)
+                    .fixedSize()
+                    .offset(y: 44)
+                    .allowsHitTesting(false)
+                    .zIndex(100)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(!exists)
-        .help(exists ? "Show first \(label.lowercased()) in Markdown" : "\(label) not found in Markdown")
+        .frame(width: 44, height: 38)
+        .zIndex(isHovered ? 20 : 0)
         .accessibilityLabel("\(label) \(exists ? "exists" : "not found")")
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering && exists {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear {
+            if isHovered {
+                NSCursor.arrow.set()
+                isHovered = false
+            }
+        }
     }
 }
 
@@ -6535,8 +6727,8 @@ struct HighlightingTextEditor: NSViewRepresentable {
         textView.allowsUndo = true
         textView.drawsBackground = true
         textView.backgroundColor = .textBackgroundColor
-        textView.font = .systemFont(ofSize: NSFont.systemFontSize)
-        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.font = .systemFont(ofSize: OCRTypography.editorFontSize)
+        textView.textContainerInset = OCRTypography.editorInset
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
         textView.minSize = NSSize(width: 0, height: 0)
@@ -7003,9 +7195,9 @@ struct ParagraphItemView: View {
     }
 
     private var automaticEditorHeight: CGFloat {
-        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let lineHeight = max(font.ascender - font.descender + font.leading, 17)
-        let usableWidth = max(editorWidth - 18, 180)
+        let font = NSFont.systemFont(ofSize: OCRTypography.editorFontSize)
+        let lineHeight = max(font.ascender - font.descender + font.leading, 22)
+        let usableWidth = max(editorWidth - 28, 180)
         let alphabetWidth = ("abcdefghijklmnopqrstuvwxyz" as NSString).size(withAttributes: [.font: font]).width
         let averageCharacterWidth = max(alphabetWidth / 26, 7)
         let charactersPerLine = max(Int(usableWidth / averageCharacterWidth), 18)
@@ -7032,7 +7224,7 @@ struct ParagraphItemView: View {
             )
 
         let measuredHeight = max(measuredRect.height, CGFloat(max(estimatedLineCount, 1)) * lineHeight)
-        return ceil(max(appState.ocrParagraphTextAreaMinHeight, measuredHeight + 28))
+        return ceil(max(appState.ocrParagraphTextAreaMinHeight, measuredHeight + 36))
     }
 }
 
@@ -8007,7 +8199,7 @@ struct AddSplitWindowView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color(red: 17/255, green: 17/255, blue: 17/255))
+                        .foregroundStyle(Color.white)
                         .frame(width: 34, height: 34)
                         .background(Color(red: 255/255, green: 71/255, blue: 71/255))
                         .clipShape(Circle())

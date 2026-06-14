@@ -431,16 +431,22 @@ When the working folder changes, the current folder's
 
 ## OCR Editor
 
-The OCR editor can show Markdown as paragraphs or as plain text.
+The OCR editor can show Markdown as paragraphs or as plain text. It follows the
+same dark visual system as the main window and Add Split window: dark gray outer
+background, bordered gray panels, white headings, colorful filled icon buttons,
+and larger OCR editing text.
+
+The window is a split editor:
+
+- left pane: Markdown search, badges, paragraph/plain-text editor
+- right pane: file/OCR controls, selected PDF chip, progress, status, and log
+- the split is resizable so the user can give more width to the text editor or
+  to the OCR/log controls as needed
 
 Features:
 
-- Preview Markdown
-- Save Markdown
-- Close after successful save alert
-- Load Markdown
-- Run OCR
-- Cancel OCR
+- Preview Markdown, Save Markdown, Close, Run OCR, Load Markdown, Files, Search
+  help, Replace All, and Clear Search use icon-first buttons with hover help
 - Search Markdown
 - Replace All
 - badges/focus shortcuts for Image, Footnote, and Blockquote
@@ -783,9 +789,20 @@ Width values may be numeric or `FULL` for full-screen opening.
 - The main window should not have its own vertical scrollbar for the normal
   workflow; Section List owns the vertical scrolling and fills the remaining
   window height.
-- OCR editor windows should follow the same visual structure: gray outer editor
-  panels, light/darker alternating paragraph rows, and filled accent action
-  buttons with white text.
+- OCR editor windows should follow the same visual structure as the main window:
+  `NewOCRMainPalette.windowBackground` as the outer background,
+  `panelBackground` for editor/control/log panes, `fieldBackground` for text
+  and log fields, `stroke` borders, white headings, and colorful icon-first
+  buttons. The OCR header uses the same white 58×58 rounded icon tile pattern as
+  the main and Add Split headers. OCR top actions and side-panel actions use SF
+  Symbol icon buttons with `.help(...)` tooltips instead of text-heavy buttons.
+- The OCR editor content uses `HSplitView`: the Markdown editor is the left
+  pane and OCR controls/log are the right pane. Preserve this split-pane layout
+  when making UI-only changes so the user can resize text vs. controls.
+- OCR editing text is intentionally larger than default AppKit text. Plain text
+  and paragraph text editors share `OCRTypography.editorFontSize` and
+  `OCRTypography.editorInset`; paragraph auto-height calculations must stay in
+  sync with those constants to avoid clipping.
 - The Add Split window uses the same dark `NewOCRMainPalette` color system as the
   main window: `windowBackground` as the outer background, `panelBackground` for
   the controls bar, input row, and status bar (each with a `stroke` border),
