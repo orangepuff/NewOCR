@@ -392,6 +392,29 @@ Important fix/behavior:
 
 This prevents pages from becoming image-only Markdown when text OCR succeeded.
 
+### User-Added Images
+
+In the OCR paragraph editor, **Actions** supports **Add Image Before** and
+**Add Image After**. The user chooses an image file, NewOCR copies it into the
+current section's Markdown image folder:
+
+```text
+AppleVision/MD/<section>/Images/
+```
+
+Then NewOCR inserts an image paragraph before or after the current paragraph
+using the same Markdown shape as OCR-detected images:
+
+```md
+![Alt text](Images/image-file.png)
+Caption:
+  Optional caption text
+```
+
+Caption is optional. If the user skips or leaves the caption blank, only the
+image Markdown line is inserted. The user still needs to click **Save** in the
+OCR editor to write the updated Markdown files.
+
 ## Header/Footer Filtering
 
 There are two independent filter mechanisms:
@@ -452,6 +475,7 @@ Features:
 - icon-only status/focus shortcuts for Image, Footnote, and Blockquote
 - paragraph editing actions:
   - add paragraph before/after
+  - add user image before/after
   - add line break before/after
   - page break before/after
   - merge with paragraph above/below

@@ -2737,6 +2737,109 @@ final class AppState: ObservableObject {
         finishParagraphAction(focusIndex: index)
     }
 
+    func addUserImage(before index: Int) {
+        addUserImage(near: index, insertBefore: true)
+    }
+
+    func addUserImage(after index: Int) {
+        addUserImage(near: index, insertBefore: false)
+    }
+
+    private func addUserImage(near index: Int, insertBefore: Bool) {
+        guard let markdownFolderURL = localAppleVisionOutputFolderURL else {
+            ocrStatus = "No Markdown folder selected."
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.title = insertBefore ? "Add Image Before" : "Add Image After"
+        panel.prompt = "Add Image"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+
+        guard panel.runModal() == .OK, let sourceURL = panel.url else {
+            return
+        }
+
+        let caption = promptForOptionalImageCaption()
+
+        do {
+            let imagesFolderURL = markdownFolderURL.appendingPathComponent("Images", isDirectory: true)
+            try FileManager.default.createDirectory(at: imagesFolderURL, withIntermediateDirectories: true)
+
+            let imageExtension = sourceURL.pathExtension.isEmpty ? "png" : sourceURL.pathExtension
+            let baseName = sanitizedImageFileStem(from: sourceURL.deletingPathExtension().lastPathComponent)
+            let destinationURL = uniqueImageURL(in: imagesFolderURL, baseName: baseName, fileExtension: imageExtension)
+            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+
+            let imageMarkdown = userImageMarkdown(
+                fileName: destinationURL.lastPathComponent,
+                altText: sourceURL.deletingPathExtension().lastPathComponent,
+                caption: caption
+            )
+
+            var paragraphs = ocrParagraphs
+            let insertIndex = insertBefore ? max(0, min(index, paragraphs.count)) : max(0, min(index + 1, paragraphs.count))
+            paragraphs.insert(imageMarkdown, at: insertIndex)
+            setOCRParagraphs(paragraphs)
+            finishParagraphAction(focusIndex: insertIndex)
+            ocrStatus = "Added image \(destinationURL.lastPathComponent). Click Save to update Markdown."
+            logOutput = "Added image:\n\(destinationURL.path)"
+        } catch {
+            ocrStatus = "Could not add image."
+            logOutput = error.localizedDescription
+        }
+    }
+
+    private func promptForOptionalImageCaption() -> String {
+        let alert = NSAlert()
+        alert.messageText = "Image Caption"
+        alert.informativeText = "Optional. Leave blank to insert the image without a caption."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Skip Caption")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        textField.placeholderString = "Caption"
+        alert.accessoryView = textField
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return ""
+        }
+        return textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func userImageMarkdown(fileName: String, altText: String, caption: String) -> String {
+        let cleanAltText = altText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let alt = cleanAltText.isEmpty ? "User image" : cleanAltText
+        let imageLine = "![\(alt)](Images/\(fileName))"
+        guard !caption.isEmpty else {
+            return imageLine
+        }
+        return "\(imageLine)\nCaption:\n  \(caption)"
+    }
+
+    private func sanitizedImageFileStem(from value: String) -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "/:\\?%*|\"<>").union(.newlines)
+        let cleaned = value
+            .components(separatedBy: invalidCharacters)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "user-image" : cleaned
+    }
+
+    private func uniqueImageURL(in folderURL: URL, baseName: String, fileExtension: String) -> URL {
+        var candidate = folderURL.appendingPathComponent(baseName).appendingPathExtension(fileExtension)
+        var counter = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = folderURL.appendingPathComponent("\(baseName)-\(counter)").appendingPathExtension(fileExtension)
+            counter += 1
+        }
+        return candidate
+    }
+
     func paragraphDisplayTitle(at index: Int) -> String {
         let paragraphs = ocrParagraphs
         guard paragraphs.indices.contains(index) else {
@@ -7332,6 +7435,14 @@ struct ParagraphItemView: View {
 
                         Button("Add Paragraph After") {
                             appState.addParagraphAfter(index)
+                        }
+
+                        Button("Add Image Before") {
+                            appState.addUserImage(before: index)
+                        }
+
+                        Button("Add Image After") {
+                            appState.addUserImage(after: index)
                         }
 
                         Button("Line Break Before") {
