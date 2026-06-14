@@ -541,8 +541,13 @@ The window is a split editor:
   preview between pages
 - the PDF preview can be dragged with the mouse to pan around the zoomed page,
   in addition to normal scrolling
+- page/zoom updates should preserve the user's horizontal PDF preview position;
+  moving up/down must not recenter left/right unless the user pans horizontally
+- editing paragraph text must not reset the PDF preview to the start of the
+  source page; keep the current preview area when the source page is unchanged
 - OCR PDF preview zoom is remembered per selected section PDF file and persists
-  after closing and reopening the app, not as one global app zoom value
+  after closing and reopening the app. If a section has no saved zoom yet, use
+  the last OCR PDF preview zoom the user chose instead of resetting to `145%`.
 
 Features:
 
@@ -569,10 +574,13 @@ Features:
   - move paragraph up/down
   - add image description
 
-After clicking Save, the success popup should show only `Save successfully` with
-`OK` and `Close`. `OK` dismisses the popup and keeps the OCR/editor windows
-open. `Close` dismisses the popup and closes the OCR window plus any OCR Preview
-window, matching the previous save-success close behavior.
+After clicking Save, the success popup should show `Save successfully` with an
+icon-only **Mark Completed** button before `OK`, then `Close`. **Mark
+Completed** checks the current section's **Ready for EPUB** checkbox and closes
+the OCR window plus any OCR Preview window. `OK` dismisses the popup and keeps
+the OCR/editor windows open. `Close` dismisses the popup and closes the OCR
+window plus any OCR Preview window, matching the previous save-success close
+behavior.
 
 If the OCR Preview window is open, closing the OCR window should also close the
 Preview window. This applies to both the OCR window **Close** button and the
@@ -1039,8 +1047,9 @@ These are intentional and should not be changed casually:
   OCR disables approved header/footer removal for that batch.
 - Working folder changes clear filtered text and header/footer review state.
 - Full-page scanned text images should not replace recognized OCR text.
-- Save in OCR window shows `Save successfully`; OK stays in the OCR window,
-  Close closes the OCR window after save.
+- Save in OCR window shows `Save successfully`; the icon-only Mark Completed
+  button appears before OK, checks **Ready for EPUB**, and closes the OCR window.
+  OK stays in the OCR window, and Close closes the OCR window after save.
 
 ## Development Notes For Future Assistants
 

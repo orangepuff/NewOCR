@@ -264,9 +264,11 @@ final class AppState: ObservableObject {
     @Published var paragraphScrollRequestID: Int = 0
     @Published var ocrParagraphSourcePages: [Int] = []
     @Published var ocrParagraphHasOCRSourcePage: [Bool] = []
+    @Published var ocrParagraphEditRevision: Int = 0
     @Published var ocrPDFPreviewPageRequestIndex: Int = 0
     @Published var ocrPDFPreviewPageRequestID: Int = 0
     @Published var ocrPDFPreviewZoomPercents: [String: Double] = [:]
+    @Published var ocrPDFPreviewLastZoomPercent: Double = 145
 
     @Published var pdfTitles: [String: String] = [:] {
         didSet {
@@ -2828,6 +2830,21 @@ final class AppState: ObservableObject {
         )
     }
 
+    var selectedSectionCanBeMarkedReady: Bool {
+        guard let item = pdfFiles.first(where: { $0.url.path == selectedPDFPath }) else {
+            return false
+        }
+        return !epubReadySectionIDs.contains(item.id)
+    }
+
+    func markSelectedSectionReadyForEPUB() {
+        guard let item = pdfFiles.first(where: { $0.url.path == selectedPDFPath }) else {
+            return
+        }
+        epubReadySectionIDs.insert(item.id)
+        saveBookSections()
+    }
+
     func addManualSection(after item: PDFFileItem) {
         guard !selectedFolderPath.isEmpty else { return }
         let id = "manual-\(UUID().uuidString)"
@@ -3093,6 +3110,7 @@ final class AppState: ObservableObject {
                 var paragraphs = self.ocrParagraphs
                 guard paragraphs.indices.contains(index) else { return }
                 paragraphs[index] = value
+                self.ocrParagraphEditRevision += 1
                 self.setOCRParagraphs(paragraphs)
             }
         )
@@ -3556,13 +3574,16 @@ final class AppState: ObservableObject {
     }
 
     func ocrPDFPreviewZoomPercent(for path: String) -> Double {
-        let stored = ocrPDFPreviewZoomPercents[path] ?? 145
+        let stored = ocrPDFPreviewZoomPercents[path] ?? ocrPDFPreviewLastZoomPercent
         return min(max(stored, 110), 220)
     }
 
     func setOCRPDFPreviewZoomPercent(_ value: Double, for path: String) {
-        guard !path.isEmpty else { return }
-        ocrPDFPreviewZoomPercents[path] = min(max(value, 110), 220)
+        let clampedValue = min(max(value, 110), 220)
+        ocrPDFPreviewLastZoomPercent = clampedValue
+        if !path.isEmpty {
+            ocrPDFPreviewZoomPercents[path] = clampedValue
+        }
         save()
         defaults.synchronize()
     }
@@ -5260,6 +5281,10 @@ final class AppState: ObservableObject {
         logOutput = ""
         pdfTitles = defaults.dictionary(forKey: "pdfTitles") as? [String: String] ?? [:]
         ocrPDFPreviewZoomPercents = loadDoubleDictionary(forKey: "ocrPDFPreviewZoomPercents")
+        ocrPDFPreviewLastZoomPercent = min(max(defaults.double(forKey: "ocrPDFPreviewLastZoomPercent"), 110), 220)
+        if ocrPDFPreviewLastZoomPercent == 110, defaults.object(forKey: "ocrPDFPreviewLastZoomPercent") == nil {
+            ocrPDFPreviewLastZoomPercent = 145
+        }
         frontCoverImagePath = defaults.string(forKey: "frontCoverImagePath") ?? ""
         backCoverImagePath = defaults.string(forKey: "backCoverImagePath") ?? ""
         epubStatus = ""
@@ -5283,6 +5308,7 @@ final class AppState: ObservableObject {
         defaults.removeObject(forKey: "cloudVisionOutput")
         defaults.set(pdfTitles, forKey: "pdfTitles")
         defaults.set(ocrPDFPreviewZoomPercents, forKey: "ocrPDFPreviewZoomPercents")
+        defaults.set(ocrPDFPreviewLastZoomPercent, forKey: "ocrPDFPreviewLastZoomPercent")
         defaults.set(frontCoverImagePath, forKey: "frontCoverImagePath")
         defaults.set(backCoverImagePath, forKey: "backCoverImagePath")
     }
@@ -6667,6 +6693,10 @@ struct PDFListView: View {
         appState.pdfFiles.map(\.id).joined(separator: "\n")
     }
 
+    private var readySectionIDsSignature: String {
+        appState.epubReadySectionIDs.sorted().joined(separator: "\n")
+    }
+
     private func scrollToFirstNotReadySection(with proxy: ScrollViewProxy, force: Bool = false) {
         guard let targetID = appState.firstNotReadySectionID else { return }
         guard force || autoScrolledFolderPath != appState.selectedFolderPath || autoScrolledTargetID != targetID else { return }
@@ -6876,6 +6906,9 @@ struct PDFListView: View {
                             scrollToFirstNotReadySection(with: proxy, force: true)
                         }
                         .onChange(of: sectionIDsSignature) { _, _ in
+                            scrollToFirstNotReadySection(with: proxy)
+                        }
+                        .onChange(of: readySectionIDsSignature) { _, _ in
                             scrollToFirstNotReadySection(with: proxy)
                         }
                     }
@@ -7112,6 +7145,19 @@ struct StepTwoOCRView: View {
                     }
 
                     HStack(spacing: 10) {
+                        OCRIconButton(
+                            title: "Mark Completed",
+                            systemImage: "checkmark.square.fill",
+                            backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                            size: 38
+                        ) {
+                            appState.markSelectedSectionReadyForEPUB()
+                            isSaveAlertPresented = false
+                            appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
+                            windowToCloseAfterSave = nil
+                        }
+                        .disabled(!appState.selectedSectionCanBeMarkedReady)
+
                         Button("OK") {
                             isSaveAlertPresented = false
                             windowToCloseAfterSave = nil
@@ -7519,6 +7565,9 @@ struct OCRPDFPreviewView: NSViewRepresentable {
         if context.coordinator.url != url {
             context.coordinator.url = url
             context.coordinator.document = PDFDocument(url: url)
+            if let draggablePDFView = pdfView as? DraggablePDFView {
+                draggablePDFView.resetRememberedHorizontalOrigin()
+            }
             pdfView.document = context.coordinator.document
         }
 
@@ -7529,7 +7578,11 @@ struct OCRPDFPreviewView: NSViewRepresentable {
         }
 
         let clampedIndex = min(max(pageIndex, 0), document.pageCount - 1)
+        let draggablePDFView = pdfView as? DraggablePDFView
+        draggablePDFView?.rememberCurrentScrollOriginIfNeeded()
+        var changedPage = false
         if let page = document.page(at: clampedIndex), pdfView.currentPage !== page {
+            changedPage = true
             context.coordinator.isProgrammaticPageChange = true
             pdfView.go(to: page)
             context.coordinator.isProgrammaticPageChange = false
@@ -7541,6 +7594,7 @@ struct OCRPDFPreviewView: NSViewRepresentable {
             if abs(pdfView.scaleFactor - targetScale) > 0.01 {
                 pdfView.scaleFactor = targetScale
             }
+            draggablePDFView?.restoreRememberedScrollOrigin(preserveVertical: !changedPage)
         }
     }
 
@@ -7572,6 +7626,8 @@ struct OCRPDFPreviewView: NSViewRepresentable {
 private final class DraggablePDFView: PDFView {
     private var dragStartLocation: NSPoint?
     private var dragStartOrigin: NSPoint?
+    private var rememberedHorizontalOrigin: CGFloat?
+    private var rememberedVerticalOrigin: CGFloat?
 
     override var acceptsFirstResponder: Bool {
         true
@@ -7618,13 +7674,59 @@ private final class DraggablePDFView: PDFView {
 
         clipView.scroll(to: proposedOrigin)
         enclosingScrollView?.reflectScrolledClipView(clipView)
+        rememberScrollOrigin(proposedOrigin)
         NSCursor.closedHand.set()
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        DispatchQueue.main.async { [weak self] in
+            self?.rememberCurrentScrollOrigin()
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
         dragStartLocation = nil
         dragStartOrigin = nil
         NSCursor.openHand.set()
+    }
+
+    func resetRememberedHorizontalOrigin() {
+        rememberedHorizontalOrigin = nil
+        rememberedVerticalOrigin = nil
+    }
+
+    func rememberCurrentScrollOriginIfNeeded() {
+        guard rememberedHorizontalOrigin == nil || rememberedVerticalOrigin == nil else { return }
+        rememberCurrentScrollOrigin()
+    }
+
+    func restoreRememberedScrollOrigin(preserveVertical: Bool) {
+        guard let rememberedHorizontalOrigin,
+              let clipView = enclosingScrollView?.contentView,
+              let documentView = enclosingScrollView?.documentView else {
+            return
+        }
+        let maxX = max(documentView.bounds.width - clipView.bounds.width, 0)
+        let maxY = max(documentView.bounds.height - clipView.bounds.height, 0)
+        let restoredX = min(max(rememberedHorizontalOrigin, 0), maxX)
+        let currentOrigin = clipView.bounds.origin
+        let restoredY = preserveVertical
+            ? min(max(rememberedVerticalOrigin ?? currentOrigin.y, 0), maxY)
+            : currentOrigin.y
+        guard abs(currentOrigin.x - restoredX) > 0.5 || abs(currentOrigin.y - restoredY) > 0.5 else { return }
+        clipView.scroll(to: NSPoint(x: restoredX, y: restoredY))
+        enclosingScrollView?.reflectScrolledClipView(clipView)
+    }
+
+    private func rememberCurrentScrollOrigin() {
+        guard let clipView = enclosingScrollView?.contentView else { return }
+        rememberScrollOrigin(clipView.bounds.origin)
+    }
+
+    private func rememberScrollOrigin(_ origin: NSPoint) {
+        rememberedHorizontalOrigin = origin.x
+        rememberedVerticalOrigin = origin.y
     }
 }
 
@@ -8157,6 +8259,7 @@ private struct ParagraphListItemOffsetPreferenceKey: PreferenceKey {
 struct ParagraphEditorView: View {
     @EnvironmentObject private var appState: AppState
     @State private var lastScrollPreviewIndex: Int? = nil
+    @State private var lastHandledParagraphEditRevision = 0
 
     var body: some View {
         let visibleIndexes = appState.visibleOCRParagraphIndexes
@@ -8190,6 +8293,10 @@ struct ParagraphEditorView: View {
             }
             .coordinateSpace(name: "ocrParagraphScroll")
             .onPreferenceChange(ParagraphListItemOffsetPreferenceKey.self) { offsets in
+                guard appState.ocrParagraphEditRevision == lastHandledParagraphEditRevision else {
+                    lastHandledParagraphEditRevision = appState.ocrParagraphEditRevision
+                    return
+                }
                 guard appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       !offsets.isEmpty else {
                     return
