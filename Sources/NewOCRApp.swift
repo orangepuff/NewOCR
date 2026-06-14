@@ -930,6 +930,22 @@ final class AppState: ObservableObject {
         openOCRWindow()
     }
 
+    func previewMarkdown(for item: PDFFileItem) {
+        selectedPDFPath = item.url.path
+        currentStep = 1
+        isOCRRunning = false
+
+        guard let markdownText = loadAppleVisionMarkdownText() else {
+            showAlert(title: "No Markdown Found", message: "Process this section before opening Preview.")
+            return
+        }
+
+        ocrText = markdownText
+        ocrStatus = "Previewing existing Markdown."
+        logOutput = "Loaded Markdown:\n\(localAppleVisionOutputFolderURL?.path ?? "")"
+        openOCRMarkdownPreviewWindow()
+    }
+
     func openOCRWindow() {
         let initialRect: NSRect
         if shouldOpenOCRWindowFullScreen, let visibleFrame = NSScreen.main?.visibleFrame {
@@ -4775,6 +4791,69 @@ struct NewOCRButtonStyle: ButtonStyle {
     }
 }
 
+struct SectionActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        SectionActionButtonStyleBody(configuration: configuration)
+    }
+}
+
+private struct SectionActionButtonStyleBody: View {
+    let configuration: SectionActionButtonStyle.Configuration
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    private var foregroundColor: Color {
+        isEnabled ? .primary : Color(nsColor: .disabledControlTextColor)
+    }
+
+    private var backgroundColor: Color {
+        if !isEnabled {
+            return Color(nsColor: .controlBackgroundColor).opacity(0.42)
+        }
+        if configuration.isPressed {
+            return Color.accentColor.opacity(0.20)
+        }
+        if isHovered {
+            return Color.accentColor.opacity(0.12)
+        }
+        return Color(nsColor: .controlBackgroundColor)
+    }
+
+    private var borderColor: Color {
+        if !isEnabled {
+            return Color(nsColor: .separatorColor).opacity(0.62)
+        }
+        return Color.accentColor.opacity(isHovered || configuration.isPressed ? 0.78 : 0.48)
+    }
+
+    var body: some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .labelStyle(.titleAndIcon)
+            .lineLimit(1)
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .frame(height: 28)
+            .background(backgroundColor)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(borderColor, lineWidth: 1)
+            )
+            .shadow(
+                color: Color.black.opacity(isEnabled && isHovered ? 0.06 : 0),
+                radius: 4,
+                x: 0,
+                y: 2
+            )
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+
 private struct NewOCRButtonStyleBody: View {
     let configuration: NewOCRButtonStyle.Configuration
     @Environment(\.isEnabled) private var isEnabled
@@ -5303,7 +5382,7 @@ struct PDFListView: View {
                         Text("Title")
                             .frame(width: 260, alignment: .leading)
                         Text("Command")
-                            .frame(width: 260, alignment: .leading)
+                            .frame(width: 348, alignment: .leading)
                     }
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -5372,23 +5451,40 @@ struct PDFListView: View {
                                 .frame(width: 260)
 
                             HStack(spacing: 8) {
-	                                if item.isManualSection {
-	                                    Button("Process") {
-	                                        appState.beginOCR(for: item)
-	                                    }
-	                                } else {
-                                    Button(appState.isScanningHeaderFooter(for: item) ? "Scanning..." : "Scan Header") {
+                                if item.isManualSection {
+                                    Color.clear
+                                        .frame(width: 124, height: 28)
+                                        .accessibilityHidden(true)
+                                } else {
+                                    Button {
                                         appState.scanHeaderFooterSample(for: item)
+                                    } label: {
+                                        Label(appState.isScanningHeaderFooter(for: item) ? "Scanning..." : "Scan Header", systemImage: "text.viewfinder")
                                     }
+                                    .frame(width: 124)
+                                    .buttonStyle(SectionActionButtonStyle())
                                     .disabled(appState.isScanningHeaderFooter(for: item))
-
-                                    Button("Process") {
-                                        appState.beginOCR(for: item)
-                                    }
-                                    .disabled((!appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item))
                                 }
+
+                                Button {
+                                    appState.beginOCR(for: item)
+                                } label: {
+                                    Label("Process", systemImage: "play.fill")
+                                }
+                                .frame(width: 96)
+                                .buttonStyle(SectionActionButtonStyle())
+                                .disabled((!item.isManualSection && !appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item))
+
+                                Button {
+                                    appState.previewMarkdown(for: item)
+                                } label: {
+                                    Label("Preview", systemImage: "eye")
+                                }
+                                .frame(width: 96)
+                                .buttonStyle(SectionActionButtonStyle())
+                                .disabled(!appState.appleVisionMarkdownExists(for: item) || appState.isScanningHeaderFooter(for: item))
                             }
-                            .frame(width: 260, alignment: .leading)
+                            .frame(width: 348, alignment: .leading)
                         }
                         .padding(.vertical, 5)
                     }

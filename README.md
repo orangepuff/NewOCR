@@ -188,9 +188,19 @@ Each section row supports:
 
 - title editing
 - **Process** to open/run OCR for that section
+- **Preview** to open the existing Markdown preview for that section
 - **Scan Header** for section PDFs
 - **+** to add a manual section after that item
 - **X** to remove a section/manual section after confirmation
+
+The command column uses fixed button positions:
+
+- section PDFs reserve positions for **Scan Header**, **Process**, and **Preview**
+- manual sections hide **Scan Header** but keep its space reserved, so **Process** and
+  **Preview** align with PDF rows
+- **Preview** is enabled only when the section already has Markdown output
+- row action buttons use compact icon+text styling with consistent height and
+  accent-colored borders
 
 Display names for real section PDFs include page count:
 
