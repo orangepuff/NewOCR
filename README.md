@@ -513,7 +513,11 @@ The window is a split editor:
 - the split is resizable so the user can give more width to the text editor or
   to the OCR controls and preview as needed
 - the PDF preview control row shows the current source page as
-  `Page 3 / 12` style text, alongside previous/next page and zoom buttons
+  `Page 3 / 12` style text, alongside up/down page and zoom buttons
+- the `Page n / total` text updates when the user scrolls or drags the PDF
+  preview between pages
+- the PDF preview can be dragged with the mouse to pan around the zoomed page,
+  in addition to normal scrolling
 
 Features:
 
@@ -770,6 +774,13 @@ Expected EPUB behavior:
 - create per-chapter XHTML files
 - create navigation/TOC
 - preserve supported Markdown and supported HTML classes
+- after a successful build, show a dark NewOCR-styled popup saying
+  `EPUB was created successfully` with **Open** and **Close**, without showing
+  the EPUB file path
+
+The EPUB success popup's **Open** button should try to open the generated EPUB
+with Apple Books first, then fall back to the system default EPUB opener if
+Books is unavailable. **Close** only dismisses the popup.
 
 The Python converter supports:
 
@@ -923,12 +934,13 @@ Width values may be numeric or `FULL` for full-screen opening.
   text and a larger search icon. Search actions are icon buttons named Replace,
   Remove Search, and Information.
 - The old embedded OCR log area is a PDF preview panel. It uses `PDFKit.PDFView`
-  in single-page mode, shows the selected section PDF, and starts zoomed in so
-  the preview reads like a cropped page inspection view. The preview panel does
-  not show a `PDF Preview` title or OCR status text such as "Loaded existing
-  AppleVision Markdown"; keep vertical space for the PDF itself. Previous/next
-  page navigation, `Page n / total` text, and Zoom In/Zoom Out controls live on
-  one compact row.
+  in vertical continuous-page mode, shows the selected section PDF, and starts
+  zoomed in so the preview reads like a cropped page inspection view. The
+  preview panel does not show a `PDF Preview` title or OCR status text such as
+  "Loaded existing AppleVision Markdown"; keep vertical space for the PDF
+  itself. Up/down page navigation, `Page n / total` text, and Zoom In/Zoom Out
+  controls live on one compact row. The PDF view should support hand-style drag
+  panning so the user can drag the zoomed page to inspect a specific area.
 - The OCR editor keeps an in-memory paragraph-to-source-page map when it loads
   `page*.md`. With an empty search field, paragraph-list scrolling may request a
   preview jump to the nearest visible source page. Paragraph focus/editing always

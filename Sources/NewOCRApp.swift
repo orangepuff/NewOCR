@@ -1520,7 +1520,7 @@ final class AppState: ObservableObject {
                         self.builtEPUBPath = epubPath
                         self.epubStatus = ""
                         self.logOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                        self.isEPUBBuiltAlertPresented = false
+                        self.isEPUBBuiltAlertPresented = true
                     } else {
                         self.ocrStatus = "Could not build EPUB."
                         self.epubStatus = "Could not build EPUB."
@@ -1934,6 +1934,25 @@ final class AppState: ObservableObject {
             return
         }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    func openBuiltEPUBInBooks() {
+        let path = !builtEPUBPath.isEmpty ? builtEPUBPath : (bookEPUBFilePathIfExists ?? "")
+        guard !path.isEmpty else {
+            return
+        }
+
+        let epubURL = URL(fileURLWithPath: path)
+        if let booksURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.iBooksX") {
+            let configuration = NSWorkspace.OpenConfiguration()
+            NSWorkspace.shared.open([epubURL], withApplicationAt: booksURL, configuration: configuration) { _, error in
+                if error != nil {
+                    NSWorkspace.shared.open(epubURL)
+                }
+            }
+        } else {
+            NSWorkspace.shared.open(epubURL)
+        }
     }
 
     func openOCRMarkdownPreviewWindow() {
@@ -6178,14 +6197,6 @@ struct StepOneLoadPDFView: View {
             ConfigEditorView()
                 .environmentObject(appState)
         }
-        .alert("EPUB Built", isPresented: $appState.isEPUBBuiltAlertPresented) {
-            Button("Open File") {
-                appState.openBuiltEPUBFile()
-            }
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(appState.builtEPUBPath)
-        }
         .alert(appState.cssApplyAlertTitle, isPresented: $appState.isCSSAppliedAlertPresented) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -6194,6 +6205,53 @@ struct StepOneLoadPDFView: View {
         .sheet(isPresented: $appState.isBulkOCRProgressPresented) {
             BulkOCRProgressView()
                 .environmentObject(appState)
+        }
+        .overlay {
+            if appState.isEPUBBuiltAlertPresented {
+                Color.black.opacity(0.34)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 18) {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.white.opacity(0.94))
+                                .frame(width: 44, height: 44)
+                            Image(systemName: "book.closed.fill")
+                                .font(.system(size: 24, weight: .semibold))
+                                .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("EPUB was created successfully")
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.headingText)
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            appState.openBuiltEPUBInBooks()
+                        } label: {
+                            Label("Open", systemImage: "book")
+                        }
+
+                        Button("Close") {
+                            appState.isEPUBBuiltAlertPresented = false
+                        }
+                    }
+                    .buttonStyle(NewOCRButtonStyle())
+                }
+                .padding(22)
+                .frame(minWidth: 430, maxWidth: 560)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+            }
         }
         .background(NewOCRMainPalette.windowBackground)
     }
@@ -7155,7 +7213,7 @@ struct OCRPDFPreviewPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                OCRIconButton(title: "Previous Page", systemImage: "chevron.left", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white, size: 34) {
+                OCRIconButton(title: "Previous Page", systemImage: "chevron.up", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white, size: 34) {
                     pageIndex = max(safePageIndex - 1, 0)
                 }
                 .disabled(pageCount <= 1 || safePageIndex <= 0)
@@ -7165,7 +7223,7 @@ struct OCRPDFPreviewPanel: View {
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
                     .frame(minWidth: 96)
 
-                OCRIconButton(title: "Next Page", systemImage: "chevron.right", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white, size: 34) {
+                OCRIconButton(title: "Next Page", systemImage: "chevron.down", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white, size: 34) {
                     pageIndex = min(safePageIndex + 1, max(pageCount - 1, 0))
                 }
                 .disabled(pageCount <= 1 || safePageIndex >= pageCount - 1)
@@ -7200,7 +7258,7 @@ struct OCRPDFPreviewPanel: View {
             if let pdfURL, pageCount > 0 {
                 OCRPDFPreviewView(
                     url: pdfURL,
-                    pageIndex: safePageIndex,
+                    pageIndex: $pageIndex,
                     zoomScale: zoomPercent / 100
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -7235,7 +7293,7 @@ struct OCRPDFPreviewPanel: View {
 
 struct OCRPDFPreviewView: NSViewRepresentable {
     let url: URL
-    let pageIndex: Int
+    @Binding var pageIndex: Int
     let zoomScale: Double
 
     func makeCoordinator() -> Coordinator {
@@ -7243,17 +7301,29 @@ struct OCRPDFPreviewView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> PDFView {
-        let pdfView = PDFView()
-        pdfView.displayMode = .singlePage
+        let pdfView = DraggablePDFView()
+        context.coordinator.pdfView = pdfView
+        pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
-        pdfView.displaysPageBreaks = false
+        pdfView.displaysPageBreaks = true
         pdfView.displayBox = .cropBox
         pdfView.autoScales = false
         pdfView.backgroundColor = NSColor(calibratedWhite: 0.20, alpha: 1)
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.pdfViewPageChanged(_:)),
+            name: Notification.Name.PDFViewPageChanged,
+            object: pdfView
+        )
         return pdfView
     }
 
+    static func dismantleNSView(_ pdfView: PDFView, coordinator: Coordinator) {
+        NotificationCenter.default.removeObserver(coordinator, name: Notification.Name.PDFViewPageChanged, object: pdfView)
+    }
+
     func updateNSView(_ pdfView: PDFView, context: Context) {
+        context.coordinator.pageIndex = $pageIndex
         if context.coordinator.url != url {
             context.coordinator.url = url
             context.coordinator.document = PDFDocument(url: url)
@@ -7268,7 +7338,9 @@ struct OCRPDFPreviewView: NSViewRepresentable {
 
         let clampedIndex = min(max(pageIndex, 0), document.pageCount - 1)
         if let page = document.page(at: clampedIndex), pdfView.currentPage !== page {
+            context.coordinator.isProgrammaticPageChange = true
             pdfView.go(to: page)
+            context.coordinator.isProgrammaticPageChange = false
         }
 
         DispatchQueue.main.async {
@@ -7283,6 +7355,81 @@ struct OCRPDFPreviewView: NSViewRepresentable {
     final class Coordinator {
         var url: URL?
         var document: PDFDocument?
+        weak var pdfView: PDFView?
+        var pageIndex: Binding<Int>?
+        var isProgrammaticPageChange = false
+
+        @objc func pdfViewPageChanged(_ notification: Notification) {
+            guard !isProgrammaticPageChange,
+                  let pdfView,
+                  let document = pdfView.document,
+                  let currentPage = pdfView.currentPage else {
+                return
+            }
+            let index = document.index(for: currentPage)
+            guard index != NSNotFound else { return }
+            DispatchQueue.main.async {
+                if self.pageIndex?.wrappedValue != index {
+                    self.pageIndex?.wrappedValue = index
+                }
+            }
+        }
+    }
+}
+
+private final class DraggablePDFView: PDFView {
+    private var dragStartLocation: NSPoint?
+    private var dragStartOrigin: NSPoint?
+
+    override var acceptsFirstResponder: Bool {
+        true
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let clipView = enclosingScrollView?.contentView else {
+            super.mouseDown(with: event)
+            return
+        }
+        dragStartLocation = event.locationInWindow
+        dragStartOrigin = clipView.bounds.origin
+        NSCursor.closedHand.set()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let clipView = enclosingScrollView?.contentView,
+              let documentView = enclosingScrollView?.documentView,
+              let dragStartLocation,
+              let dragStartOrigin else {
+            super.mouseDragged(with: event)
+            return
+        }
+
+        let currentLocation = event.locationInWindow
+        let deltaX = currentLocation.x - dragStartLocation.x
+        let deltaY = currentLocation.y - dragStartLocation.y
+        let visibleSize = clipView.bounds.size
+        let documentBounds = documentView.bounds
+        let maxX = max(documentBounds.width - visibleSize.width, 0)
+        let maxY = max(documentBounds.height - visibleSize.height, 0)
+        let proposedOrigin = NSPoint(
+            x: min(max(dragStartOrigin.x - deltaX, 0), maxX),
+            y: min(max(dragStartOrigin.y + deltaY, 0), maxY)
+        )
+
+        clipView.scroll(to: proposedOrigin)
+        enclosingScrollView?.reflectScrolledClipView(clipView)
+        NSCursor.closedHand.set()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartLocation = nil
+        dragStartOrigin = nil
+        NSCursor.openHand.set()
     }
 }
 
