@@ -7556,9 +7556,12 @@ private final class DraggablePDFView: PDFView {
         let documentBounds = documentView.bounds
         let maxX = max(documentBounds.width - visibleSize.width, 0)
         let maxY = max(documentBounds.height - visibleSize.height, 0)
+        let proposedY = documentView.isFlipped
+            ? dragStartOrigin.y - deltaY
+            : dragStartOrigin.y + deltaY
         let proposedOrigin = NSPoint(
             x: min(max(dragStartOrigin.x - deltaX, 0), maxX),
-            y: min(max(dragStartOrigin.y + deltaY, 0), maxY)
+            y: min(max(proposedY, 0), maxY)
         )
 
         clipView.scroll(to: proposedOrigin)
