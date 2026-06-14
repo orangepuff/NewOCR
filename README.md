@@ -452,6 +452,10 @@ Features:
 After clicking Save and confirming the success popup, the OCR window should
 close.
 
+If the OCR Preview window is open, closing the OCR window should also close the
+Preview window. This applies to both the OCR window **Close** button and the
+Save-success OK flow.
+
 ## Markdown And Supported HTML
 
 The editor saves `.md` files. It supports Markdown plus a small set of

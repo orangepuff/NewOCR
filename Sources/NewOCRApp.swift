@@ -277,6 +277,7 @@ final class AppState: ObservableObject {
     private let defaults = UserDefaults.standard
     private var isRestoring = false
     private var ocrWindows: [NSWindow] = []
+    private weak var ocrPreviewWindow: NSWindow?
     private var detachedSplitPlannerStates: [SplitPlannerState] = []
     private var activeConfigFileURL: URL?
 
@@ -954,6 +955,16 @@ final class AppState: ObservableObject {
         )
         ocrWindows.append(window)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    func closeOCRWindowsAndPreview(_ window: NSWindow?) {
+        closeOCRMarkdownPreviewWindow()
+        window?.close()
+    }
+
+    func closeOCRMarkdownPreviewWindow() {
+        ocrPreviewWindow?.close()
+        ocrPreviewWindow = nil
     }
 
     func openConfigEditor() {
@@ -1857,6 +1868,7 @@ final class AppState: ObservableObject {
             let previewURL = markdownFolderURL.appendingPathComponent("preview.html")
             try previewHTML(for: ocrText).write(to: previewURL, atomically: true, encoding: .utf8)
 
+            closeOCRMarkdownPreviewWindow()
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 820, height: 720),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -1869,6 +1881,7 @@ final class AppState: ObservableObject {
             window.contentView = NSHostingView(
                 rootView: OCRMarkdownPreviewWindowView(previewURL: previewURL, readAccessURL: markdownFolderURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
             )
+            ocrPreviewWindow = window
             window.makeKeyAndOrderFront(nil)
         } catch {
             ocrStatus = "Could not open preview."
@@ -5537,7 +5550,7 @@ struct StepTwoOCRView: View {
                     .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
 
                     Button("Close") {
-                        NSApp.keyWindow?.close()
+                        appState.closeOCRWindowsAndPreview(NSApp.keyWindow)
                     }
                     .controlSize(.large)
                 }
@@ -5753,7 +5766,7 @@ struct StepTwoOCRView: View {
             .padding(22)
             .alert("Saved Successfully", isPresented: $isSaveAlertPresented) {
                 Button("OK", role: .cancel) {
-                    windowToCloseAfterSave?.close()
+                    appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
                     windowToCloseAfterSave = nil
                 }
             } message: {
