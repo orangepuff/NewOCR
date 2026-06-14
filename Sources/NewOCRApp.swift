@@ -523,7 +523,12 @@ final class AppState: ObservableObject {
             )
             try saveSplitPlan(bookmarkData: bookmarkData, sourcePDFURL: project.sourcePDFURL, projectFolderURL: project.folderURL)
             selectedFolderPath = project.folderURL.path
-            openAddSplitPDFWindow(bookmarkData: bookmarkData, fallbackURL: project.sourcePDFURL, projectFolderURL: project.folderURL)
+            openAddSplitPDFWindow(
+                bookmarkData: bookmarkData,
+                fallbackURL: project.sourcePDFURL,
+                projectFolderURL: project.folderURL,
+                shouldOpenCropWindowBeforeAddSplit: true
+            )
         } catch {
             configStatus = "Could not create new project: \(error.localizedDescription)"
         }
@@ -930,7 +935,12 @@ final class AppState: ObservableObject {
         detachedSplitPlannerStates.append(plannerState)
     }
 
-    private func openAddSplitPDFWindow(bookmarkData: Data, fallbackURL: URL, projectFolderURL: URL) {
+    private func openAddSplitPDFWindow(
+        bookmarkData: Data,
+        fallbackURL: URL,
+        projectFolderURL: URL,
+        shouldOpenCropWindowBeforeAddSplit: Bool = false
+    ) {
         let plannerState = SplitPlannerState(
             bookmarkData: bookmarkData,
             fallbackURL: fallbackURL,
@@ -941,6 +951,7 @@ final class AppState: ObservableObject {
             addSplitWindowWidth: addSplitWindowWidth,
             addSplitWindowHeight: addSplitWindowHeight,
             shouldOpenAddSplitWindowFullScreen: shouldOpenAddSplitWindowFullScreen,
+            shouldOpenCropWindowAfterLoad: shouldOpenCropWindowBeforeAddSplit,
             shouldOpenAddSplitWindowAfterLoad: true
         ) { savedTitles in
             for (url, title) in savedTitles {
@@ -8394,18 +8405,8 @@ struct FilesPopoverView: View {
     }
 }
 
-private struct ParagraphListItemOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: [Int: CGFloat] = [:]
-
-    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
-    }
-}
-
 struct ParagraphEditorView: View {
     @EnvironmentObject private var appState: AppState
-    @State private var lastScrollPreviewIndex: Int? = nil
-    @State private var lastHandledParagraphEditRevision = 0
     @State private var handledOpenFocusRequestID = 0
 
     var body: some View {
@@ -8421,14 +8422,6 @@ struct ParagraphEditorView: View {
                         )
                         .environmentObject(appState)
                         .id(index)
-                        .background(
-                            GeometryReader { itemProxy in
-                                Color.clear.preference(
-                                    key: ParagraphListItemOffsetPreferenceKey.self,
-                                    value: [index: itemProxy.frame(in: .named("ocrParagraphScroll")).midY]
-                                )
-                            }
-                        )
                     }
 
                     if visibleIndexes.isEmpty {
@@ -8445,23 +8438,6 @@ struct ParagraphEditorView: View {
             .onReceive(appState.$ocrWindowOpenFocusRequestID) { requestID in
                 guard requestID > 0, requestID != handledOpenFocusRequestID else { return }
                 focusFirstParagraph(with: proxy)
-            }
-            .onPreferenceChange(ParagraphListItemOffsetPreferenceKey.self) { offsets in
-                guard appState.ocrParagraphEditRevision == lastHandledParagraphEditRevision else {
-                    lastHandledParagraphEditRevision = appState.ocrParagraphEditRevision
-                    return
-                }
-                guard appState.ocrSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      !offsets.isEmpty else {
-                    return
-                }
-                let targetMidY: CGFloat = 170
-                guard let nearest = offsets.min(by: { abs($0.value - targetMidY) < abs($1.value - targetMidY) })?.key,
-                      nearest != lastScrollPreviewIndex else {
-                    return
-                }
-                lastScrollPreviewIndex = nearest
-                appState.previewOCRParagraphSourcePage(nearest)
             }
             .onReceive(appState.$paragraphScrollRequestID) { requestID in
                 guard requestID > 0 else { return }
@@ -8484,9 +8460,7 @@ struct ParagraphEditorView: View {
         let requestID = appState.ocrWindowOpenFocusRequestID
         guard handledOpenFocusRequestID != requestID else { return }
         handledOpenFocusRequestID = requestID
-        lastHandledParagraphEditRevision = appState.ocrParagraphEditRevision
         guard appState.ocrParagraphs.indices.contains(0) else { return }
-        lastScrollPreviewIndex = 0
         DispatchQueue.main.async {
             proxy.scrollTo(0, anchor: .top)
             appState.previewOCRParagraphSourcePage(0)
@@ -8643,7 +8617,6 @@ struct HighlightingTextEditor: NSViewRepresentable {
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !isApplyingMarkdownStyle else { return }
-            parent.onFocus?()
             showMarkdownStylePopoverIfNeeded()
         }
 
@@ -9013,10 +8986,7 @@ struct ParagraphItemView: View {
                             .foregroundStyle(.secondary)
                         HighlightingTextEditor(
                             text: $text,
-                            searchText: appState.ocrSearchText,
-                            onFocus: {
-                                appState.focusOCRParagraphSourcePage(index)
-                            }
+                            searchText: appState.ocrSearchText
                         )
                             .frame(height: max(appState.ocrParagraphTextAreaMinHeight, 86))
                             .overlay(
@@ -9028,10 +8998,7 @@ struct ParagraphItemView: View {
                     VStack(spacing: 0) {
                         HighlightingTextEditor(
                             text: $text,
-                            searchText: appState.ocrSearchText,
-                            onFocus: {
-                                appState.focusOCRParagraphSourcePage(index)
-                            }
+                            searchText: appState.ocrSearchText
                         )
                             .frame(height: currentEditorHeight)
                             .background(
@@ -9524,9 +9491,9 @@ final class SplitPlannerState: ObservableObject {
                     self.bookmarkData = newBookmarkData
                     try? self.saveCurrentSplitPlan()
                     self.loadProjectPDFs()
-                    self.loadPDF()
                     self.status = "Saved cropped PDF. Backup: \(backupURL.lastPathComponent)"
                     completion(true)
+                    self.loadPDF()
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -9590,6 +9557,7 @@ final class SplitPlannerState: ObservableObject {
             if shouldOpenCropWindowAfterLoad {
                 shouldOpenCropWindowAfterLoad = false
                 openCropWindow()
+                return
             }
             if shouldOpenAddSplitWindowAfterLoad {
                 shouldOpenAddSplitWindowAfterLoad = false

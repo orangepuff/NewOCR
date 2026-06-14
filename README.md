@@ -97,7 +97,9 @@ clearly asks for confirmation.
 
 When the user clicks **New**, NewOCR creates a working folder under
 `NEW_PROJECTS_FOLDER` from `config.txt` (default `~/Downloads`). The folder name
-is based on the source PDF name.
+is based on the source PDF name. After the user selects the source PDF, NewOCR
+opens the Crop PDF window first. When the user saves the crop, the Crop PDF
+window closes and the Add Split window opens for the same project.
 
 Typical project:
 
@@ -308,6 +310,10 @@ Crop PDF lets the user select a crop rectangle visually and save a cropped
 working PDF. It should preserve `_original.pdf`.
 
 The crop window may open full screen based on config.
+
+When Crop PDF was opened from the **New** project route, saving the crop should
+close Crop PDF and then open Add Split. Opening Crop from the existing project
+menu should only save/close Crop and must not automatically open Add Split.
 
 ## Manual Sections
 
@@ -576,9 +582,8 @@ Features:
 - Search Text
 - Replace All
 - icon-only status/focus shortcuts for Image, Footnote, and Blockquote
-- when Search Text is empty, scrolling the paragraph list switches the PDF
-  preview to the nearest visible paragraph's source page; focusing or editing a
-  paragraph text box also switches to that paragraph's source page
+- scrolling, focusing, or editing the paragraph list must not switch the PDF
+  preview page
 - paragraph labels show source page numbers only for paragraphs known to come
   from OCR page output, for example `Paragraph 1 (Page 1)`; manual sections,
   newly inserted paragraphs, and paragraphs without a known OCR page keep the
@@ -1007,11 +1012,10 @@ Width values may be numeric or `FULL` for full-screen opening.
   percent is stored per section PDF path so returning to a file restores that
   file's last OCR preview zoom.
 - The OCR editor keeps an in-memory paragraph-to-source-page map when it loads
-  `page*.md`. With an empty search field, paragraph-list scrolling may request a
-  preview jump to the nearest visible source page. Paragraph focus/editing always
-  requests a preview jump. Search filtering must not request scroll-based
-  preview jumps. Saving edited Markdown should preserve known source pages by
-  writing paragraphs back to their mapped `page*.md` files where possible.
+  `page*.md`. Paragraph-list scrolling must not request a PDF preview jump.
+  Paragraph text focus/editing must not request a PDF preview jump either.
+  Saving edited Markdown should preserve known source pages by writing
+  paragraphs back to their mapped `page*.md` files where possible.
 - Paragraph row titles use the known OCR source-page flag before appending
   `(Page n)`. Do not show a guessed page number for manual sections, newly
   inserted paragraphs, user-added images, or paragraphs without a known OCR page
