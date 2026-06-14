@@ -14,6 +14,8 @@ ADD_SPLIT_WINDOW_WIDTH=FULL
 # Used only when ADD_SPLIT_WINDOW_WIDTH is a number.
 ADD_SPLIT_WINDOW_HEIGHT=720
 OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
+# Preview-only text scale percent. This does not affect EPUB output.
+PREVIEW_TEXT_SCALE_PERCENT=170
 
 # New projects made from the New button are created here.
 NEW_PROJECTS_FOLDER=~/Downloads

@@ -262,6 +262,7 @@ final class AppState: ObservableObject {
     @Published var ocrWindowWidth: CGFloat = 820
     @Published var ocrWindowHeight: CGFloat = 620
     @Published var shouldOpenOCRWindowFullScreen: Bool = false
+    @Published var previewTextScalePercent: Double = 130
     @Published var cropPDFWindowWidth: CGFloat = 920
     @Published var cropPDFWindowHeight: CGFloat = 720
     @Published var shouldOpenCropPDFWindowFullScreen: Bool = true
@@ -1883,6 +1884,7 @@ final class AppState: ObservableObject {
         }
 
         do {
+            loadAppConfigValues()
             let previewURL = markdownFolderURL.appendingPathComponent("preview.html")
             try previewHTML(for: ocrText).write(to: previewURL, atomically: true, encoding: .utf8)
 
@@ -1920,13 +1922,16 @@ final class AppState: ObservableObject {
         \(styles)
         </head>
         <body>
+        <main class="newocr-preview-content">
         \(markdownToPreviewHTML(markdown))
+        </main>
         </body>
         </html>
         """
     }
 
     private func previewStylesHTML() -> String {
+        let scalePercent = Int(previewTextScalePercent.rounded())
         guard !selectedPDFPath.isEmpty else {
             return fallbackPreviewStyleHTML()
         }
@@ -1940,6 +1945,7 @@ final class AppState: ObservableObject {
             return """
             <link rel="stylesheet" type="text/css" href="../../../Styles/stylesheet.css">
         <style>
+        .newocr-preview-content { font-size: \(scalePercent)% !important; }
         img { max-width: 100%; height: auto; }
         figure { margin: 1em 0; }
         figcaption { margin-top: 0.5em; }
@@ -1960,9 +1966,11 @@ final class AppState: ObservableObject {
     }
 
     private func fallbackPreviewStyleHTML() -> String {
-        """
+        let scalePercent = Int(previewTextScalePercent.rounded())
+        return """
         <style>
         body { font-family: serif; line-height: 1.55; padding: 24px; }
+        .newocr-preview-content { font-size: \(scalePercent)% !important; }
         p { margin: 0 0 1em 0; }
         img { max-width: 100%; height: auto; }
         figure { margin: 1em 0; }
@@ -4640,6 +4648,7 @@ final class AppState: ObservableObject {
                 try ensureConfigKeyExists("CROP_PDF_WINDOW_HEIGHT", defaultValue: "720", comment: "# Used only when CROP_PDF_WINDOW_WIDTH is a number.")
                 try ensureConfigKeyExists("ADD_SPLIT_WINDOW_WIDTH", defaultValue: "FULL", comment: "# Set ADD_SPLIT_WINDOW_WIDTH=FULL to open the Add Split window at full screen size.")
                 try ensureConfigKeyExists("ADD_SPLIT_WINDOW_HEIGHT", defaultValue: "720", comment: "# Used only when ADD_SPLIT_WINDOW_WIDTH is a number.")
+                try ensureConfigKeyExists("PREVIEW_TEXT_SCALE_PERCENT", defaultValue: "130", comment: "# Preview-only text scale percent. This does not affect EPUB output.")
             }
 
             if !FileManager.default.fileExists(atPath: ocrInstructionFileURL.path) {
@@ -4676,6 +4685,7 @@ final class AppState: ObservableObject {
             mainWindowHeight = CGFloat(parseDouble(values["MAIN_WINDOW_HEIGHT"], defaultValue: 520, minimum: 480))
         }
         ocrParagraphTextAreaMinHeight = CGFloat(parseDouble(values["OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT"], defaultValue: 58, minimum: 40))
+        previewTextScalePercent = min(parseDouble(values["PREVIEW_TEXT_SCALE_PERCENT"], defaultValue: 130, minimum: 80), 220)
         shouldOpenOCRWindowFullScreen = values["OCR_WINDOW_WIDTH"]?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
         if !shouldOpenOCRWindowFullScreen {
             ocrWindowWidth = CGFloat(parseDouble(values["OCR_WINDOW_WIDTH"], defaultValue: 820, minimum: 640))
@@ -4746,6 +4756,8 @@ final class AppState: ObservableObject {
         # Used only when ADD_SPLIT_WINDOW_WIDTH is a number.
         ADD_SPLIT_WINDOW_HEIGHT=720
         OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
+        # Preview-only text scale percent. This does not affect EPUB output.
+        PREVIEW_TEXT_SCALE_PERCENT=130
 
         """
     }

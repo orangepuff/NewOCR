@@ -600,6 +600,18 @@ the same NewOCR Markdown/HTML features as EPUB where practical:
 - left/right/center paragraph classes
 - inline bold/italic
 
+Preview text size is configurable in `config.txt`:
+
+```text
+PREVIEW_TEXT_SCALE_PERCENT=130
+```
+
+The default is 130%. Values below 80 are treated as 130, and values above 220
+are capped at 220. The app reloads this config value when Preview opens. The
+scale is applied to a preview-only content wrapper inside `preview.html`, on top
+of the project stylesheet; EPUB output must not inherit this preview-only font
+size.
+
 ## Apply CSS
 
 Apply CSS updates:
@@ -676,7 +688,9 @@ list has enough vertical space.
 
 ## Config
 
-`config.txt` controls window sizes and new project location.
+`config.txt` controls window sizes, preview scale, and new project location.
+When a feature is made configurable, the setting should be added to `config.txt`
+and documented here so it is visible and hand-editable.
 
 Important keys:
 
@@ -691,6 +705,7 @@ CROP_PDF_WINDOW_HEIGHT=720
 ADD_SPLIT_WINDOW_WIDTH=FULL
 ADD_SPLIT_WINDOW_HEIGHT=720
 OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
+PREVIEW_TEXT_SCALE_PERCENT=130
 NEW_PROJECTS_FOLDER=~/Downloads
 ```
 
@@ -744,6 +759,8 @@ Maintenance rule:
 
 - If you change, fix, add, or remove app behavior, update this README in the
   same work session so it remains the current handoff reference.
+- If you make a feature configurable, keep the configurable value in
+  `config.txt`; do not store it only in hidden app state or only in UI controls.
 - If the change is intentionally too small to affect documented behavior, say
   that clearly in the final response.
 - Keep README updates factual and specific. Document what the app now does, not
