@@ -23,6 +23,7 @@ private struct BookSectionEntry: Codable {
     var type: String
     var path: String?
     var title: String?
+    var readyForEPUB: Bool?
 }
 
 private struct SavedSplitRange: Codable {
@@ -273,6 +274,7 @@ final class AppState: ObservableObject {
             }
         }
     }
+    @Published var epubReadySectionIDs: Set<String> = []
 
     @Published var frontCoverImagePath: String = "" {
         didSet {
@@ -2047,8 +2049,8 @@ final class AppState: ObservableObject {
             return fallbackPreviewStyleHTML()
         }
 
-        let pdfFolderURL = URL(fileURLWithPath: selectedPDFPath).deletingLastPathComponent()
-        let stylesheetURL = pdfFolderURL
+        let projectFolderURL = URL(fileURLWithPath: selectedFolderPath)
+        let stylesheetURL = projectFolderURL
             .appendingPathComponent("Styles", isDirectory: true)
             .appendingPathComponent("stylesheet.css")
 
@@ -2706,6 +2708,22 @@ final class AppState: ObservableObject {
         )
     }
 
+    func epubReadyBinding(for item: PDFFileItem) -> Binding<Bool> {
+        Binding(
+            get: {
+                self.epubReadySectionIDs.contains(item.id)
+            },
+            set: { isReady in
+                if isReady {
+                    self.epubReadySectionIDs.insert(item.id)
+                } else {
+                    self.epubReadySectionIDs.remove(item.id)
+                }
+                self.saveBookSections()
+            }
+        )
+    }
+
     func addManualSection(after item: PDFFileItem) {
         guard !selectedFolderPath.isEmpty else { return }
         let id = "manual-\(UUID().uuidString)"
@@ -2761,6 +2779,7 @@ final class AppState: ObservableObject {
             }
             pdfFiles.removeAll { $0 == item }
             pdfTitles.removeValue(forKey: item.id)
+            epubReadySectionIDs.remove(item.id)
             saveBookSections()
             save()
         } catch {
@@ -5145,6 +5164,7 @@ final class AppState: ObservableObject {
         let entries = loadBookSections()
         var orderedItems: [PDFFileItem] = []
         var usedPaths = Set<String>()
+        var readyIDs = Set<String>()
 
         for entry in entries {
             if entry.type == "manual" {
@@ -5155,12 +5175,18 @@ final class AppState: ObservableObject {
                 if let title = entry.title, !title.isEmpty {
                     pdfTitles[item.id] = title
                 }
+                if entry.readyForEPUB == true {
+                    readyIDs.insert(item.id)
+                }
             } else if let path = entry.path,
                       let item = physicalByPath[path] {
                 orderedItems.append(item)
                 usedPaths.insert(path)
                 if let title = entry.title, !title.isEmpty {
                     pdfTitles[item.id] = title
+                }
+                if entry.readyForEPUB == true {
+                    readyIDs.insert(item.id)
                 }
             }
         }
@@ -5170,6 +5196,7 @@ final class AppState: ObservableObject {
         }
 
         pdfFiles = orderedItems
+        epubReadySectionIDs = readyIDs
     }
 
     private func appleVisionOutputFolderURL(for pdfURL: URL) -> URL {
@@ -5209,14 +5236,16 @@ final class AppState: ObservableObject {
                     id: item.url.deletingPathExtension().lastPathComponent,
                     type: "manual",
                     path: nil,
-                    title: title
+                    title: title,
+                    readyForEPUB: epubReadySectionIDs.contains(item.id)
                 )
             }
             return BookSectionEntry(
                 id: item.url.deletingPathExtension().lastPathComponent,
                 type: "pdf",
                 path: item.url.path,
-                title: title
+                title: title,
+                readyForEPUB: epubReadySectionIDs.contains(item.id)
             )
         }
 
@@ -5476,6 +5505,48 @@ private struct SectionIconButton: View {
         .onDisappear {
             if !isDisabled {
                 NSCursor.arrow.set()
+            }
+        }
+    }
+}
+
+private struct SectionReadyCheckboxButton: View {
+    @Binding var isReady: Bool
+    @State private var isHovered = false
+
+    var body: some View {
+        Button {
+            isReady.toggle()
+        } label: {
+            Image(systemName: isReady ? "checkmark.square.fill" : "square")
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(isReady ? Color(red: 53/255, green: 200/255, blue: 90/255) : Color.white.opacity(0.88))
+                .frame(width: 46, height: 36)
+                .background(isHovered ? Color.white.opacity(0.16) : Color.white.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(isReady ? Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.72) : NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(isHovered ? 0.13 : 0.06), radius: isHovered ? 6 : 3, x: 0, y: isHovered ? 2 : 1)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 46, height: 36)
+        .contentShape(Rectangle())
+        .accessibilityLabel(isReady ? "Ready for EPUB" : "Not ready for EPUB")
+        .help("Ready for EPUB")
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear {
+            if isHovered {
+                NSCursor.arrow.set()
+                isHovered = false
             }
         }
     }
@@ -6372,11 +6443,11 @@ private struct PointingHandCursorModifier: ViewModifier {
 
 struct PDFListView: View {
     @EnvironmentObject private var appState: AppState
-    private let sectionActionColumnWidth: CGFloat = 104
+    private let sectionActionColumnWidth: CGFloat = 156
     private let sectionNameColumnWidth: CGFloat = 365
     private let sectionTitleColumnWidth: CGFloat = 295
     private let sectionCommandColumnWidth: CGFloat = 228
-    private let sectionTableWidth: CGFloat = 1066
+    private let sectionTableWidth: CGFloat = 1118
 
     var body: some View {
         Group {
@@ -6401,6 +6472,8 @@ struct PDFListView: View {
                             ForEach(Array(appState.pdfFiles.enumerated()), id: \.element.id) { index, item in
                                 HStack(spacing: 12) {
                                     HStack(spacing: 6) {
+                                        SectionReadyCheckboxButton(isReady: appState.epubReadyBinding(for: item))
+
                                         SectionUtilityCircleButton(
                                             title: "Remove section",
                                             systemImage: "xmark",

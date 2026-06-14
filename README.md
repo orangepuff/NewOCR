@@ -179,6 +179,7 @@ The section list is the ordered book structure. It can contain:
 
 Each section row supports:
 
+- a user-controlled **Ready for EPUB** checkbox for personal tracking
 - title editing
 - **Process** to open/run OCR for that section
 - **Preview** to open the existing Markdown preview for that section
@@ -206,6 +207,10 @@ Section 008 (10 pages)
 ```
 
 Manual section rows use the manual title when available.
+
+The **Ready for EPUB** checkbox starts unchecked for new sections. It is saved
+with `book-sections.json` as user memory only and must not affect EPUB build
+logic.
 
 ### Removing Section Files
 
@@ -684,8 +689,9 @@ Preview creates:
 AppleVision/MD/<section>/preview.html
 ```
 
-It uses the project stylesheet if available, plus fallback CSS. Preview supports
-the same NewOCR Markdown/HTML features as EPUB where practical:
+It uses the project stylesheet from `Styles/stylesheet.css` if available, plus
+fallback CSS. This applies to both PDF sections and manual sections. Preview
+supports the same NewOCR Markdown/HTML features as EPUB where practical:
 
 - headings
 - paragraphs
@@ -753,6 +759,7 @@ Expected EPUB behavior:
 - include all sections with Markdown
 - include manual sections with Markdown
 - include manual sections in TOC
+- apply the project `Styles/` assets to manual sections and PDF sections
 - use saved UI title first for chapter title
 - fall back to first Markdown heading
 - fall back to display name
