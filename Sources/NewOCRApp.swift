@@ -279,6 +279,7 @@ final class AppState: ObservableObject {
     private var isRestoring = false
     private var ocrWindows: [NSWindow] = []
     private weak var ocrPreviewWindow: NSWindow?
+    private weak var ocrLogWindow: NSWindow?
     private var detachedSplitPlannerStates: [SplitPlannerState] = []
     private var activeConfigFileURL: URL?
 
@@ -972,12 +973,18 @@ final class AppState: ObservableObject {
 
     func closeOCRWindowsAndPreview(_ window: NSWindow?) {
         closeOCRMarkdownPreviewWindow()
+        closeOCRLogWindow()
         window?.close()
     }
 
     func closeOCRMarkdownPreviewWindow() {
         ocrPreviewWindow?.close()
         ocrPreviewWindow = nil
+    }
+
+    func closeOCRLogWindow() {
+        ocrLogWindow?.close()
+        ocrLogWindow = nil
     }
 
     func openConfigEditor() {
@@ -1895,6 +1902,29 @@ final class AppState: ObservableObject {
             ocrStatus = "Could not open preview."
             logOutput = error.localizedDescription
         }
+    }
+
+    func openOCRLogWindow() {
+        if let ocrLogWindow {
+            ocrLogWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Log - \(selectedPDFName)"
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: OCRLogWindowView()
+                .environmentObject(self)
+        )
+        ocrLogWindow = window
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func previewHTML(for markdown: String) -> String {
@@ -5070,18 +5100,23 @@ private class TooltipHostView: NSView {
 
     private func showPopover() {
         guard isEnabled, !title.isEmpty, popover?.isShown != true else { return }
+        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let textWidth = (title as NSString).size(withAttributes: [.font: font]).width
+        let contentWidth = ceil(min(max(72, textWidth + 24), 360))
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = false
         popover.contentViewController = NSHostingController(
             rootView: Text(title)
                 .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: true)
                 .foregroundStyle(Color.black)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .background(Color.white)
         )
-        popover.contentSize = NSSize(width: max(72, min(220, CGFloat(title.count * 8 + 24))), height: 32)
+        popover.contentSize = NSSize(width: contentWidth, height: 32)
         self.popover = popover
         popover.show(relativeTo: bounds, of: self, preferredEdge: .minY)
     }
@@ -6044,11 +6079,6 @@ struct StepTwoOCRView: View {
                     Text("OCR")
                         .font(.system(size: 31, weight: .semibold))
                         .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text(appState.selectedPDFName)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
                 }
 
                 Spacer(minLength: 10)
@@ -6209,7 +6239,7 @@ struct StepTwoOCRView: View {
                     )
             }
         }
-        .padding(14)
+        .padding(10)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
@@ -6235,10 +6265,9 @@ struct StepTwoOCRView: View {
                     }
                     .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
 
-                    OCRIconButton(title: "Load Markdown", systemImage: "arrow.down.doc", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
-                        appState.loadExistingMarkdownAsync()
+                    OCRIconButton(title: "Log", systemImage: "terminal", backgroundColor: Color.white.opacity(0.92)) {
+                        appState.openOCRLogWindow()
                     }
-                    .disabled(appState.isOCRRunning || appState.localAppleVisionOutputFolderPathIfExists == nil)
 
                     if appState.isOCRRunning {
                         OCRIconButton(title: appState.isOCRCancelling ? "Cancelling" : "Cancel OCR", systemImage: "stop.fill", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255)) {
@@ -6299,43 +6328,8 @@ struct StepTwoOCRView: View {
                     .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
             )
 
-            VStack(alignment: .leading, spacing: 9) {
-                Text("Log")
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.headingText)
-
-                HStack(spacing: 10) {
-                    if appState.isOCRRunning {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-
-                    Text(appState.ocrStatus)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(appState.isOCRRunning ? NewOCRMainPalette.secondaryText : NewOCRMainPalette.primaryText)
-                        .lineLimit(2)
-                }
-
-                TextEditor(text: $appState.logOutput)
-                    .font(.system(size: 15, design: .monospaced))
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
-                    .scrollContentBackground(.hidden)
-                    .background(NewOCRMainPalette.fieldBackground)
-                    .frame(maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                    )
-            }
-            .padding(14)
-            .frame(maxHeight: .infinity, alignment: .topLeading)
-            .background(NewOCRMainPalette.panelBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
+            OCRPDFPreviewPanel()
+                .environmentObject(appState)
         }
         .padding(.leading, 14)
     }
@@ -6367,6 +6361,162 @@ struct StepTwoOCRView: View {
         }
         .padding(16)
         .frame(width: 420)
+    }
+}
+
+struct OCRPDFPreviewPanel: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var pageIndex = 0
+    @State private var zoomPercent: Double = 145
+
+    private var pdfURL: URL? {
+        guard !appState.selectedPDFPath.isEmpty,
+              !appState.selectedItemIsManualSection,
+              FileManager.default.fileExists(atPath: appState.selectedPDFPath) else {
+            return nil
+        }
+        return URL(fileURLWithPath: appState.selectedPDFPath)
+    }
+
+    private var pageCount: Int {
+        guard let pdfURL,
+              let document = PDFDocument(url: pdfURL) else {
+            return 0
+        }
+        return document.pageCount
+    }
+
+    private var safePageIndex: Int {
+        min(max(pageIndex, 0), max(pageCount - 1, 0))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                OCRIconButton(title: "Previous Page", systemImage: "chevron.left", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white, size: 34) {
+                    pageIndex = max(safePageIndex - 1, 0)
+                }
+                .disabled(pageCount <= 1 || safePageIndex <= 0)
+
+                Text(pageCount > 0 ? "\(safePageIndex + 1) / \(pageCount)" : "0 / 0")
+                    .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    .frame(minWidth: 58)
+
+                OCRIconButton(title: "Next Page", systemImage: "chevron.right", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white, size: 34) {
+                    pageIndex = min(safePageIndex + 1, max(pageCount - 1, 0))
+                }
+                .disabled(pageCount <= 1 || safePageIndex >= pageCount - 1)
+
+                Spacer(minLength: 0)
+
+                if appState.isOCRRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                OCRIconButton(title: "Zoom Out", systemImage: "minus.magnifyingglass", backgroundColor: Color.white.opacity(0.92), size: 34) {
+                    zoomPercent = max(110, zoomPercent - 15)
+                }
+                .disabled(pdfURL == nil || zoomPercent <= 110)
+
+                Text("\(Int(zoomPercent))%")
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    .frame(width: 44, alignment: .trailing)
+
+                OCRIconButton(title: "Zoom In", systemImage: "plus.magnifyingglass", backgroundColor: Color.white.opacity(0.92), size: 34) {
+                    zoomPercent = min(220, zoomPercent + 15)
+                }
+                .disabled(pdfURL == nil || zoomPercent >= 220)
+            }
+
+            if let pdfURL, pageCount > 0 {
+                OCRPDFPreviewView(
+                    url: pdfURL,
+                    pageIndex: safePageIndex,
+                    zoomScale: zoomPercent / 100
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .onChange(of: appState.selectedPDFPath) { _, _ in
+                    pageIndex = 0
+                }
+            } else {
+                EmptyStateView(title: appState.selectedItemIsManualSection ? "Manual section has no PDF preview." : "No PDF preview available.")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                    )
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+}
+
+struct OCRPDFPreviewView: NSViewRepresentable {
+    let url: URL
+    let pageIndex: Int
+    let zoomScale: Double
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> PDFView {
+        let pdfView = PDFView()
+        pdfView.displayMode = .singlePage
+        pdfView.displayDirection = .vertical
+        pdfView.displaysPageBreaks = false
+        pdfView.displayBox = .cropBox
+        pdfView.autoScales = false
+        pdfView.backgroundColor = NSColor(calibratedWhite: 0.20, alpha: 1)
+        return pdfView
+    }
+
+    func updateNSView(_ pdfView: PDFView, context: Context) {
+        if context.coordinator.url != url {
+            context.coordinator.url = url
+            context.coordinator.document = PDFDocument(url: url)
+            pdfView.document = context.coordinator.document
+        }
+
+        guard let document = context.coordinator.document,
+              document.pageCount > 0 else {
+            pdfView.document = nil
+            return
+        }
+
+        let clampedIndex = min(max(pageIndex, 0), document.pageCount - 1)
+        if let page = document.page(at: clampedIndex), pdfView.currentPage !== page {
+            pdfView.go(to: page)
+        }
+
+        DispatchQueue.main.async {
+            let fitScale = max(pdfView.scaleFactorForSizeToFit, 0.1)
+            let targetScale = min(max(fitScale * zoomScale, pdfView.minScaleFactor), pdfView.maxScaleFactor)
+            if abs(pdfView.scaleFactor - targetScale) > 0.01 {
+                pdfView.scaleFactor = targetScale
+            }
+        }
+    }
+
+    final class Coordinator {
+        var url: URL?
+        var document: PDFDocument?
     }
 }
 
@@ -6547,6 +6697,81 @@ struct OCRMarkdownPreviewWindowView: View {
             WebPreviewView(url: previewURL, readAccessURL: readAccessURL)
         }
         .frame(minWidth: 520, minHeight: 420)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+struct OCRLogWindowView: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "terminal")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("OCR Log")
+                        .font(.system(size: 31, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(appState.selectedPDFName)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 10)
+
+                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
+                    appState.closeOCRLogWindow()
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    if appState.isOCRRunning {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    Text(appState.ocrStatus)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(appState.isOCRRunning ? NewOCRMainPalette.secondaryText : NewOCRMainPalette.primaryText)
+                        .lineLimit(2)
+                    Spacer()
+                }
+
+                TextEditor(text: $appState.logOutput)
+                    .font(.system(size: 16, design: .monospaced))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                    .scrollContentBackground(.hidden)
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                    )
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(NewOCRMainPalette.panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+        }
+        .padding(22)
+        .frame(minWidth: 620, minHeight: 420)
+        .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
     }
 }
@@ -8218,19 +8443,9 @@ struct AddSplitWindowView: View {
 
                 Spacer(minLength: 12)
 
-                Button {
+                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
                     NSApp.keyWindow?.close()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Color.white)
-                        .frame(width: 34, height: 34)
-                        .background(Color(red: 255/255, green: 71/255, blue: 71/255))
-                        .clipShape(Circle())
                 }
-                .buttonStyle(.plain)
-                .help("Close")
-                .modifier(PointingHandCursorModifier(isEnabled: true))
             }
 
             HStack(spacing: 8) {

@@ -438,14 +438,14 @@ and larger OCR editing text.
 
 The window is a split editor:
 
-- left pane: Markdown search, badges, paragraph/plain-text editor
-- right pane: file/OCR controls, selected PDF chip, progress, status, and log
+- left pane: Search Text, badges, paragraph/plain-text editor
+- right pane: file/OCR controls, selected PDF chip, and PDF preview
 - the split is resizable so the user can give more width to the text editor or
-  to the OCR/log controls as needed
+  to the OCR controls and preview as needed
 
 Features:
 
-- Preview Markdown, Save Markdown, Close, Run OCR, Load Markdown, Files,
+- Preview Markdown, Save Markdown, Close, Run OCR, Files, Log,
   Information, Replace, and Remove Search use icon-first buttons with hover help
 - Search Text
 - Replace All
@@ -465,6 +465,11 @@ close.
 If the OCR Preview window is open, closing the OCR window should also close the
 Preview window. This applies to both the OCR window **Close** button and the
 Save-success OK flow.
+
+The OCR Log is opened from a Log icon button instead of living as a large panel
+inside the OCR editor. Clicking Log opens or focuses a separate dark themed log
+window with the OCR status and `logOutput`. Closing the OCR window should also
+close the OCR Log window.
 
 ## Markdown And Supported HTML
 
@@ -797,21 +802,35 @@ Width values may be numeric or `FULL` for full-screen opening.
   window height.
 - OCR editor windows should follow the same visual structure as the main window:
   `NewOCRMainPalette.windowBackground` as the outer background,
-  `panelBackground` for editor/control/log panes, `fieldBackground` for text
-  and log fields, `stroke` borders, white headings, and colorful icon-first
+  `panelBackground` for editor/control/status/preview panes, `fieldBackground` for text,
+  log, and preview fields, `stroke` borders, white headings, and colorful icon-first
   buttons. The OCR header uses the same white 58×58 rounded icon tile pattern as
-  the main and Add Split headers. OCR top actions and side-panel actions use SF
+  the main and Add Split headers, but only shows the `OCR` title in-window; do
+  not show the selected filename under the OCR title. OCR top actions and side-panel actions use SF
   Symbol icon buttons with floating `NSPopover` tooltips instead of text-heavy
   buttons or SwiftUI in-row tooltip labels.
 - The OCR editor content uses `HSplitView`: the Markdown editor is the left
-  pane and OCR controls/log are the right pane. Preserve this split-pane layout
+  pane and OCR controls/PDF preview are the right pane. Preserve this split-pane layout
   when making UI-only changes so the user can resize text vs. controls.
+- The OCR side toolbar does not include a Load Markdown button. Existing
+  Markdown is loaded when opening a processed section; the OCR editor's primary
+  side actions are Files, Run OCR, Log, and Cancel while running.
 - The OCR search row uses a white rounded `Search Text` field with larger black
   text and a larger search icon. Search actions are icon buttons named Replace,
   Remove Search, and Information.
+- The old embedded OCR log area is a PDF preview panel. It uses `PDFKit.PDFView`
+  in single-page mode, shows the selected section PDF, and starts zoomed in so
+  the preview reads like a cropped page inspection view. The preview panel does
+  not show a `PDF Preview` title or OCR status text such as "Loaded existing
+  AppleVision Markdown"; keep vertical space for the PDF itself. Previous/next
+  page navigation and Zoom In/Zoom Out controls live on one compact row.
 - Image, Footnote, and Blockquote detection controls are icon-only status
   buttons. They show a green circle-check when found and a red circle-X when not
   found, and their hover text is shown in a floating `NSPopover` tooltip.
+- The OCR Log window follows the same visual structure as the main, OCR, and Add
+  Split windows: dark outer background, white 58×58 icon tile, title/subtitle
+  header, red rectangular close button with white X, bordered panel, and dark
+  field background for the monospaced log text.
 - OCR editing text is intentionally larger than default AppKit text. Plain text
   and paragraph text editors share `OCRTypography.editorFontSize` and
   `OCRTypography.editorInset`; paragraph auto-height calculations must stay in
@@ -834,7 +853,8 @@ Width values may be numeric or `FULL` for full-screen opening.
   them. The Section title field uses white background, black text, 14pt medium
   weight, yellow tint — identical to the section title field in the main window.
   The From and To fields are 46px wide (3-digit max of 999), monospaced digit.
-  The Close button is red with a white X. The VStack uses
+  The Close button is a red rounded rectangle with a white X, matching the OCR
+  window close button style. The VStack uses
   `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
   .padding(22)` (fills the content area, 22pt insets), then an outer
   `.frame(minWidth: 1100, minHeight: 620)` bounds the NSHostingView fitting
@@ -878,6 +898,13 @@ Maintenance rule:
 
 - If you change, fix, add, or remove app behavior or visible UI, update this
   README in the same work session so it remains the current handoff reference.
+- Keep UI styling consistent across windows. New windows and tool surfaces
+  should reuse `NewOCRMainPalette`, the white 58×58 icon tile header pattern,
+  rounded 7-8pt controls, colorful icon-first buttons, floating `NSPopover`
+  tooltips, and red rectangular close buttons with white X unless the user asks
+  for a different style.
+- Floating tooltip popovers should size to their full text instead of clipping
+  or truncating longer labels.
 - If you make a feature configurable, keep the configurable value in
   `config.txt`; do not store it only in hidden app state or only in UI controls.
 - If the change is intentionally too small to affect documented behavior, say
