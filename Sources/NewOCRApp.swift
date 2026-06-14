@@ -1283,6 +1283,78 @@ final class AppState: ObservableObject {
         }
     }
 
+    func scanHeaderFooterAllSections() {
+        guard canScanHeaderAllSections else { return }
+
+        let sectionItems = pdfFiles.filter { !($0.isManualSection) && FileManager.default.fileExists(atPath: $0.url.path) }
+        guard !sectionItems.isEmpty else {
+            headerFooterScanStatus = "No section PDF files to scan."
+            configStatus = headerFooterScanStatus
+            return
+        }
+
+        isHeaderFooterScanRunning = true
+        activeHeaderFooterScanFileID = nil
+        headerFooterScanProgressPercent = 0
+        headerFooterScanStatus = "Scanning headers for \(sectionItems.count) sections..."
+        configStatus = headerFooterScanStatus
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                for (fileIndex, item) in sectionItems.enumerated() {
+                    DispatchQueue.main.async {
+                        self.activeHeaderFooterScanFileID = item.id
+                        self.headerFooterScanStatus = "Scanning \(fileIndex + 1)/\(sectionItems.count): \(item.fileName)"
+                        self.configStatus = self.headerFooterScanStatus
+                    }
+
+                    let detectedTitle = try self.scanHeaderFooterSample(pdfURL: item.url) { pageIndex, pageCount in
+                        DispatchQueue.main.async {
+                            let completedFiles = Double(fileIndex) / Double(sectionItems.count)
+                            let fileProgress = (Double(pageIndex + 1) / Double(max(1, pageCount))) / Double(sectionItems.count)
+                            self.headerFooterScanProgressPercent = (completedFiles + fileProgress) * 100
+                            self.headerFooterScanStatus = "Scanning \(item.fileName): \(pageIndex + 1)/\(pageCount)"
+                            self.configStatus = self.headerFooterScanStatus
+                        }
+                    }
+
+                    DispatchQueue.main.async {
+                        if let detectedTitle,
+                           self.pdfTitles[item.id, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            self.pdfTitles[item.id] = detectedTitle
+                        }
+                        self.headerFooterScanStatus = "Scanned \(fileIndex + 1)/\(sectionItems.count): \(item.fileName)"
+                        self.configStatus = self.headerFooterScanStatus
+                    }
+                }
+
+                let reportURL = try self.writeHeaderFooterReview(for: sectionItems[0].url)
+                let reportText = try String(contentsOf: reportURL, encoding: .utf8)
+
+                DispatchQueue.main.async {
+                    self.isHeaderFooterScanRunning = false
+                    self.activeHeaderFooterScanFileID = nil
+                    self.headerFooterScanProgressPercent = 100
+                    self.headerFooterScanStatus = "Scanned headers for \(sectionItems.count) sections."
+                    self.configStatus = self.headerFooterScanStatus
+                    self.activeConfigFileURL = reportURL
+                    self.configEditorTitle = "Header/Footer Review"
+                    self.configText = reportText
+                    self.saveBookSections()
+                    self.isConfigEditorPresented = true
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isHeaderFooterScanRunning = false
+                    self.activeHeaderFooterScanFileID = nil
+                    self.headerFooterScanProgressPercent = nil
+                    self.headerFooterScanStatus = "Batch scan header failed."
+                    self.configStatus = "\(self.headerFooterScanStatus) \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     func headerFooterScanned(for item: PDFFileItem) -> Bool {
         loadAppleVisionLineCache(for: item.url).contains { $0.pdfName == item.url.lastPathComponent }
     }
@@ -2412,6 +2484,10 @@ final class AppState: ObservableObject {
 
     var canProcessOCRAllSections: Bool {
         !isOCRRunning && pdfFiles.contains { !($0.isManualSection) && FileManager.default.fileExists(atPath: $0.url.path) }
+    }
+
+    var canScanHeaderAllSections: Bool {
+        !isHeaderFooterScanRunning && !isOCRRunning && pdfFiles.contains { !($0.isManualSection) && FileManager.default.fileExists(atPath: $0.url.path) }
     }
 
     private func markdownFolderURL(for item: PDFFileItem) -> URL {
@@ -6165,6 +6241,15 @@ struct StepOneLoadPDFView: View {
                                 isDisabled: !appState.canProcessOCRAllSections
                             ) {
                                 appState.processOCRAllSections()
+                            }
+                            SectionIconButton(
+                                title: "Scan Header All",
+                                systemImage: "text.viewfinder",
+                                isDisabled: !appState.canScanHeaderAllSections,
+                                backgroundColor: Color.brown.opacity(0.92),
+                                foregroundColor: Color.white
+                            ) {
+                                appState.scanHeaderFooterAllSections()
                             }
                             Spacer()
                         }

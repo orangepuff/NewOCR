@@ -167,6 +167,8 @@ Important actions:
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
 - **Build EPUB**: create EPUB from available section/manual Markdown.
 - **Process OCR All**: OCR all existing section PDF files.
+- **Scan Header All**: scan header/footer candidates for all existing section
+  PDF files and open the shared Header/Footer Review.
 
 The project path display should stay compact and readable.
 
@@ -392,6 +394,15 @@ Expected behavior:
   - stale `header-footer-review.txt`
 - replace existing Markdown with newly generated Markdown
 - show finished successfully when done
+
+### Scan Header All
+
+The **Scan Header All** icon button appears next to **Process OCR All** near the
+Sections count. It scans only real section PDFs that exist, skips manual
+sections, updates the same header/footer scan progress area, saves detected
+titles only when a section title is empty, and opens the shared
+`AppleVision/LineCache/header-footer-review.txt` review after the batch
+finishes.
 
 ## OCR Image Detection
 
