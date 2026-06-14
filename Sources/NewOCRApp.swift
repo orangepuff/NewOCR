@@ -7244,12 +7244,14 @@ final class SplitPlannerState: ObservableObject {
             defer: false
         )
         window.title = "Add Split - \(pdfName)"
+        window.contentMinSize = NSSize(width: 1100, height: 620)
+        window.isReleasedWhenClosed = false
+
         if shouldOpenAddSplitWindowFullScreen {
             window.setFrame(initialRect, display: true)
         } else {
             window.center()
         }
-        window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(
             rootView: AddSplitWindowView()
                 .environmentObject(self)
@@ -7921,6 +7923,39 @@ struct CropPDFWindowView: View {
     }
 }
 
+private struct AddSplitActionButtonStyle: ButtonStyle {
+    let backgroundColor: Color
+    let foregroundColor: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        AddSplitActionButtonBody(configuration: configuration, backgroundColor: backgroundColor, foregroundColor: foregroundColor)
+    }
+}
+
+private struct AddSplitActionButtonBody: View {
+    let configuration: AddSplitActionButtonStyle.Configuration
+    let backgroundColor: Color
+    let foregroundColor: Color
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    var body: some View {
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
+            .foregroundStyle(isEnabled ? foregroundColor : foregroundColor.opacity(0.38))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background(isEnabled ? (configuration.isPressed ? backgroundColor.opacity(0.70) : (isHovered ? backgroundColor.opacity(0.86) : backgroundColor)) : backgroundColor.opacity(0.32))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .onHover { isHovered = $0 }
+            .modifier(PointingHandCursorModifier(isEnabled: isEnabled))
+    }
+}
+
 struct AddSplitWindowView: View {
     @EnvironmentObject private var planner: SplitPlannerState
     @State private var previewPageIndex = 0
@@ -7930,138 +7965,198 @@ struct AddSplitWindowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Add Split")
-                        .font(.largeTitle.weight(.semibold))
-                    HStack(spacing: 8) {
-                        Image(systemName: "doc.richtext")
-                            .foregroundStyle(.red)
-                        Text(planner.pdfName)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text("\(max(planner.pageCount, 0)) pages")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color(nsColor: .quaternaryLabelColor))
-                            .clipShape(Capsule())
+            HStack(alignment: .center, spacing: 16) {
+                HStack(alignment: .center, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.white.opacity(0.94))
+                            .frame(width: 58, height: 58)
+                            .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                        Image(systemName: "scissors")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(Color.black)
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+
+                    HStack(spacing: 9) {
+                        Image(systemName: "doc.richtext")
+                            .font(.system(size: 26, weight: .semibold))
+                            .foregroundStyle(.orange)
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(planner.pdfName)
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.primaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text("\(max(planner.pageCount, 0)) pages")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 11)
+                    .background(NewOCRMainPalette.panelBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                    )
+                    .frame(maxWidth: 300, alignment: .leading)
                 }
 
-                Spacer()
+                Spacer(minLength: 12)
 
-                Button {
-                    NSApp.keyWindow?.close()
-                } label: {
-                    Label("Close", systemImage: "xmark")
-                }
-            }
-
-            HStack(spacing: 12) {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     Button {
                         setPreviewPageIndex(max(previewPageIndex - 1, 0))
                     } label: {
                         Image(systemName: "chevron.left")
                             .font(.title3.weight(.semibold))
-                            .frame(width: 42, height: 24)
                     }
+                    .buttonStyle(AddSplitActionButtonStyle(
+                        backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255),
+                        foregroundColor: .white
+                    ))
                     .disabled(previewPageIndex <= 0 || planner.pageCount == 0)
 
-                    VStack(spacing: 2) {
-                        Text("Current Page")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text("\(min(previewPageIndex + 1, max(planner.pageCount, 1))) / \(max(planner.pageCount, 1))")
-                            .font(.caption.monospacedDigit().weight(.semibold))
-                    }
-                    .frame(width: 96)
+                    Text("\(min(previewPageIndex + 1, max(planner.pageCount, 1))) / \(max(planner.pageCount, 1))")
+                        .font(.system(size: 16, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .frame(minWidth: 68)
 
                     Button {
                         setPreviewPageIndex(min(previewPageIndex + 1, max(planner.pageCount - 1, 0)))
                     } label: {
                         Image(systemName: "chevron.right")
                             .font(.title3.weight(.semibold))
-                            .frame(width: 42, height: 24)
                     }
+                    .buttonStyle(AddSplitActionButtonStyle(
+                        backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255),
+                        foregroundColor: .white
+                    ))
                     .disabled(previewPageIndex >= planner.pageCount - 1 || planner.pageCount == 0)
 
-                    Divider()
-                        .frame(height: 30)
+                    Rectangle()
+                        .fill(NewOCRMainPalette.stroke)
+                        .frame(width: 1, height: 30)
 
                     Button {
                         pageFrom = "\(previewPageIndex + 1)"
                     } label: {
-                        Label("Set From", systemImage: "arrow.right.to.line")
+                        Label("From", systemImage: "arrow.right.to.line")
                     }
+                    .buttonStyle(AddSplitActionButtonStyle(
+                        backgroundColor: Color(red: 184/255, green: 135/255, blue: 98/255),
+                        foregroundColor: .white
+                    ))
                     .disabled(planner.pageCount == 0 || !planner.canAddMoreSplits)
 
                     Button {
                         pageTo = "\(previewPageIndex + 1)"
                     } label: {
-                        Label("Set To", systemImage: "arrow.left.to.line")
+                        Label("To", systemImage: "arrow.left.to.line")
                     }
+                    .buttonStyle(AddSplitActionButtonStyle(
+                        backgroundColor: Color(red: 184/255, green: 135/255, blue: 98/255),
+                        foregroundColor: .white
+                    ))
                     .disabled(planner.pageCount == 0)
 
                     Button {
                         setTitleFromCurrentPage()
                     } label: {
-                        Label("Set Title", systemImage: "textformat")
+                        Label("Title", systemImage: "textformat")
                     }
+                    .buttonStyle(AddSplitActionButtonStyle(
+                        backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255),
+                        foregroundColor: Color(red: 17/255, green: 17/255, blue: 17/255)
+                    ))
                     .disabled(planner.isLoadingPDF || planner.pageCount == 0)
+
+                    Rectangle()
+                        .fill(NewOCRMainPalette.stroke)
+                        .frame(width: 1, height: 30)
+
+                    TextField("Section title", text: $titleText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.black)
+                        .tint(Color.yellow)
+                        .accentColor(Color.yellow)
+                        .frame(minWidth: 170)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(Color.white.opacity(0.94))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                        )
+
+                    TextField("From", text: $pageFrom)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 15).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .frame(width: 46)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(NewOCRMainPalette.fieldBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                        )
+
+                    TextField("To", text: $pageTo)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 15).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .frame(width: 46)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(NewOCRMainPalette.fieldBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                        )
+
+                    Button {
+                        saveSplit()
+                    } label: {
+                        Label("Split", systemImage: "scissors")
+                    }
+                    .buttonStyle(AddSplitActionButtonStyle(
+                        backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                        foregroundColor: Color(red: 17/255, green: 17/255, blue: 17/255)
+                    ))
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(planner.isLoadingPDF || !planner.canAddMoreSplits || planner.pageCount == 0)
                 }
                 .padding(10)
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(NewOCRMainPalette.panelBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
 
-                Spacer(minLength: 0)
-            }
-
-            HStack(alignment: .bottom, spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Title")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    TextField("Section title", text: $titleText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(minWidth: 280)
-                }
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("From")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    TextField("From", text: $pageFrom)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 76)
-                }
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("To")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    TextField("To", text: $pageTo)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 76)
-                }
+                Spacer(minLength: 12)
 
                 Button {
-                    saveSplit()
+                    NSApp.keyWindow?.close()
                 } label: {
-                    Label("Split", systemImage: "scissors")
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color(red: 17/255, green: 17/255, blue: 17/255))
+                        .frame(width: 34, height: 34)
+                        .background(Color(red: 255/255, green: 71/255, blue: 71/255))
+                        .clipShape(Circle())
                 }
-                .keyboardShortcut(.defaultAction)
-                .disabled(planner.isLoadingPDF || !planner.canAddMoreSplits || planner.pageCount == 0)
-
-                Spacer(minLength: 0)
+                .buttonStyle(.plain)
+                .help("Close")
+                .modifier(PointingHandCursorModifier(isEnabled: true))
             }
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             HStack(spacing: 10) {
                 if planner.isLoadingPDF {
@@ -8069,12 +8164,12 @@ struct AddSplitWindowView: View {
                         .controlSize(.small)
                 } else {
                     Image(systemName: planner.status.lowercased().hasPrefix("created") ? "checkmark.circle.fill" : "info.circle")
-                        .foregroundStyle(planner.status.lowercased().hasPrefix("created") ? .green : .secondary)
+                        .foregroundStyle(planner.status.lowercased().hasPrefix("created") ? .green : NewOCRMainPalette.tertiaryText)
                 }
 
                 Text(planner.status)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
@@ -8082,11 +8177,11 @@ struct AddSplitWindowView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(NewOCRMainPalette.panelBackground)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.72), lineWidth: 1)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
             )
 
             if let image = planner.cropPreviewImage(pageIndex: previewPageIndex) {
@@ -8096,27 +8191,33 @@ struct AddSplitWindowView: View {
                         .scaledToFit()
                         .frame(width: proxy.size.width, height: proxy.size.height)
                 }
-                .frame(minWidth: 720, minHeight: 500)
-                .background(Color(nsColor: .textBackgroundColor))
+                .frame(maxWidth: .infinity, minHeight: 500)
+                .background(NewOCRMainPalette.fieldBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
                 )
             } else {
                 ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext", description: Text("Load the source PDF before adding splits."))
-                    .frame(minWidth: 720, minHeight: 500)
+                    .frame(maxWidth: .infinity, minHeight: 500)
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
             }
         }
-        .padding(18)
-        .frame(minWidth: 820, minHeight: 620)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(22)
+        .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
         .onAppear {
             resetRange()
+            DispatchQueue.main.async {
+                guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.last,
+                      let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame else { return }
+                window.setFrame(visibleFrame, display: true)
+            }
         }
-        .onChange(of: planner.pageCount) { _, _ in
-            resetRange()
-        }
+        .onChange(of: planner.pageCount) { _, _ in resetRange() }
+        .frame(minWidth: 1100, minHeight: 620)
     }
 
     private func saveSplit() {

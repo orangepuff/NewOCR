@@ -786,6 +786,32 @@ Width values may be numeric or `FULL` for full-screen opening.
 - OCR editor windows should follow the same visual structure: gray outer editor
   panels, light/darker alternating paragraph rows, and filled accent action
   buttons with white text.
+- The Add Split window uses the same dark `NewOCRMainPalette` color system as the
+  main window: `windowBackground` as the outer background, `panelBackground` for
+  the controls bar, input row, and status bar (each with a `stroke` border),
+  `fieldBackground` for text input fields and the PDF preview area, and palette
+  text roles (`primaryText`, `secondaryText`, `tertiaryText`) for all labels.
+  The divider between nav and action buttons is a `stroke`-colored Rectangle
+  instead of SwiftUI Divider. Text fields use `.textFieldStyle(.plain)` with
+  custom padding and `fieldBackground`/`stroke` styling to match the dark theme.
+- The Add Split window header mirrors the main window header layout: a white
+  58×58 rounded-rect box containing a scissors icon (no large text title), and
+  the PDF name displayed in a `panelBackground`/`stroke` bordered chip alongside
+  an orange `doc.richtext` icon and page count. The entire controls bar — nav
+  chevrons (← X/Y →), From/To/Title set-buttons, and the title/from/to text
+  fields plus the Split button — are all in one single horizontal panel on the
+  same row as the icon and chip. The text fields have no caption labels above
+  them. The Section title field uses white background, black text, 14pt medium
+  weight, yellow tint — identical to the section title field in the main window.
+  The From and To fields are 46px wide (3-digit max of 999), monospaced digit.
+  The Close button is a red circle with a dark X (34×34), matching the
+  section-list utility circle button style. The VStack uses
+  `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+  .padding(22)` (fills the content area, 22pt insets), then an outer
+  `.frame(minWidth: 1100, minHeight: 620)` bounds the NSHostingView fitting
+  size. An `.onAppear` block mirrors the main window: `DispatchQueue.main.async
+  { window.setFrame(visibleFrame) }` to go full-screen after the view is
+  presented. NSWindow has `contentMinSize = (1100, 620)`. Top padding is 22.
 
 ## Known Behavioral Decisions
 
