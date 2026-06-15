@@ -118,6 +118,12 @@ Rules:
 - Preserve existing Markdown features unless the PDF clearly shows they are wrong.
 """
 
+private let defaultLayoutAreasJSON = """
+{
+  "rules": []
+}
+"""
+
 private struct SavedSplitRange: Codable {
     var title: String
     var pageFrom: String
@@ -185,6 +191,86 @@ private struct OCRImageRegion {
     let right: CGFloat
     let bottom: CGFloat
     let top: CGFloat
+}
+
+struct OCRLayoutAreasFile: Codable {
+    var rules: [OCRLayoutAreaRule]
+}
+
+struct OCRLayoutAreaRule: Codable {
+    var type: String
+    var scope: String?
+    var section: String?
+    var page: Int?
+    var rect: OCRLayoutAreaRect
+}
+
+struct OCRLayoutAreaRect: Codable {
+    var left: CGFloat
+    var right: CGFloat
+    var top: CGFloat
+    var bottom: CGFloat
+}
+
+final class LayoutAreaEditorState: ObservableObject {
+    @Published var pdfItems: [PDFFileItem]
+    @Published var selectedPDFPath: String
+    @Published var selectedPage: Int
+    @Published var pageCount: Int
+    @Published var selectedType: String = "blockquote"
+    @Published var selectedScope: String = "all_sections"
+    @Published var selectionRect: CGRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
+    @Published var status: String = ""
+    @Published var savedRuleCount: Int = 0
+
+    init(pdfItems: [PDFFileItem], initialPDF: PDFFileItem, initialPage: Int = 1) {
+        self.pdfItems = pdfItems
+        selectedPDFPath = initialPDF.url.path
+        selectedPage = max(initialPage, 1)
+        pageCount = max(PDFDocument(url: initialPDF.url)?.pageCount ?? 1, 1)
+        selectedPage = min(selectedPage, pageCount)
+    }
+
+    var selectedPDFURL: URL? {
+        pdfItems.first { $0.url.path == selectedPDFPath }?.url
+    }
+
+    var selectedPDFName: String {
+        selectedPDFURL?.lastPathComponent ?? "No PDF"
+    }
+
+    func selectPDFPath(_ path: String) {
+        selectedPDFPath = path
+        updatePageCount()
+    }
+
+    func updatePageCount() {
+        guard let url = selectedPDFURL else {
+            pageCount = 1
+            selectedPage = 1
+            return
+        }
+        pageCount = max(PDFDocument(url: url)?.pageCount ?? 1, 1)
+        selectedPage = min(max(selectedPage, 1), pageCount)
+    }
+
+    var normalizedOCRRect: OCRLayoutAreaRect {
+        let clamped = LayoutAreaEditorState.clampedSelection(selectionRect)
+        return OCRLayoutAreaRect(
+            left: clamped.minX,
+            right: clamped.maxX,
+            top: 1 - clamped.minY,
+            bottom: 1 - clamped.maxY
+        )
+    }
+
+    static func clampedSelection(_ rect: CGRect) -> CGRect {
+        let width = min(max(rect.width, 0.02), 1)
+        let height = min(max(rect.height, 0.02), 1)
+        let x = min(max(rect.minX, 0), 1 - width)
+        let y = min(max(rect.minY, 0), 1 - height)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
 }
 
 private struct OCRPageMarkdown {
@@ -454,6 +540,7 @@ final class AppState: ObservableObject {
     private var ocrCompareWindows: [NSWindow] = []
     private var finalizeAIWindows: [NSWindow] = []
     private var finalizeAIInstructionWindows: [NSWindow] = []
+    private var layoutAreaWindows: [NSWindow] = []
     private weak var codexFinalizeLogWindow: NSWindow?
     private var retainedWindowDelegates: [ObjectIdentifier: WindowCleanupDelegate] = [:]
     private weak var ocrPreviewWindow: NSWindow?
@@ -1214,6 +1301,11 @@ final class AppState: ObservableObject {
             forceCloseWindowAndAttachedSheets(window)
         }
         finalizeAIInstructionWindows.removeAll()
+
+        for window in layoutAreaWindows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        layoutAreaWindows.removeAll()
 
         if let logWin = codexFinalizeLogWindow {
             forceCloseWindowAndAttachedSheets(logWin)
@@ -2091,6 +2183,141 @@ final class AppState: ObservableObject {
         }
     }
 
+    func openLayoutAreasEditor() {
+        guard !selectedFolderPath.isEmpty else {
+            showAlert(title: "No Project Selected", message: "Open a NewOCR project folder before defining layout areas.")
+            return
+        }
+
+        do {
+            _ = try ensureLayoutAreasFile()
+            let selectableItems = pdfFiles.filter { item in
+                !item.isManualSection && FileManager.default.fileExists(atPath: item.url.path)
+            }
+            guard let initialItem = selectableItems.first(where: { $0.url.path == selectedPDFPath }) ?? selectableItems.first else {
+                showAlert(title: "No PDF Sections", message: "Add or split a PDF before defining layout areas.")
+                return
+            }
+
+            let state = LayoutAreaEditorState(pdfItems: selectableItems, initialPDF: initialItem)
+            state.savedRuleCount = currentLayoutAreaRuleCount()
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Define Layout Areas"
+            window.contentMinSize = NSSize(width: 1040, height: 760)
+            window.isReleasedWhenClosed = false
+
+            let hostingView = NSHostingView(
+                rootView: LayoutAreaEditorWindowView(state: state)
+                    .environmentObject(self)
+            )
+            hostingView.sizingOptions = []
+            window.contentView = hostingView
+
+            if let visibleFrame = NSScreen.main?.visibleFrame {
+                window.setFrame(visibleFrame, display: true)
+            } else {
+                window.center()
+            }
+            layoutAreaWindows.append(window)
+            trackRetainedWindow(window)
+            window.makeKeyAndOrderFront(nil)
+        } catch {
+            showAlert(title: "Could Not Open Layout Areas", message: error.localizedDescription)
+        }
+    }
+
+    func openLayoutAreasJSONEditor() {
+        do {
+            let url = try ensureLayoutAreasFile()
+            openTextConfig(title: "Layout Areas", url: url)
+        } catch {
+            showAlert(title: "Could Not Open Layout Areas", message: error.localizedDescription)
+        }
+    }
+
+    private func layoutAreasFileURL() -> URL? {
+        guard !selectedFolderPath.isEmpty else { return nil }
+        return URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("AppleVision", isDirectory: true)
+            .appendingPathComponent("layout-areas.json")
+    }
+
+    private func ensureLayoutAreasFile() throws -> URL {
+        guard let url = layoutAreasFileURL() else {
+            throw NSError(domain: "NewOCR.LayoutAreas", code: 1, userInfo: [NSLocalizedDescriptionKey: "No project folder selected."])
+        }
+        let folder = url.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: folder.path) {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try defaultLayoutAreasJSON.write(to: url, atomically: true, encoding: .utf8)
+        }
+        return url
+    }
+
+    func layoutAreaPreviewImage(pdfURL: URL, pageNumber: Int) -> NSImage? {
+        guard let document = PDFDocument(url: pdfURL),
+              let page = document.page(at: max(pageNumber - 1, 0)),
+              let image = try? renderPDFPageToCGImage(page, scale: 2.0) else {
+            return nil
+        }
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+
+    func saveLayoutAreaRule(type: String, scope: String, sectionURL: URL, pageNumber: Int, rect: OCRLayoutAreaRect) throws -> Int {
+        let url = try ensureLayoutAreasFile()
+        var areas = try loadLayoutAreasFileForEditing(from: url)
+        let cleanScope = scope == "all_sections" ? "all_sections" : nil
+        let cleanSection = scope == "section" ? sectionURL.lastPathComponent : nil
+        let rule = OCRLayoutAreaRule(
+            type: type,
+            scope: cleanScope,
+            section: cleanSection,
+            page: pageNumber,
+            rect: rect
+        )
+        areas.rules.append(rule)
+        try writeLayoutAreasFile(areas, to: url)
+        return areas.rules.count
+    }
+
+    func clearLayoutAreaRules() throws {
+        let url = try ensureLayoutAreasFile()
+        try writeLayoutAreasFile(OCRLayoutAreasFile(rules: []), to: url)
+    }
+
+    private func currentLayoutAreaRuleCount() -> Int {
+        guard let url = layoutAreasFileURL(),
+              let areas = try? loadLayoutAreasFileForEditing(from: url) else {
+            return 0
+        }
+        return areas.rules.count
+    }
+
+    private func loadLayoutAreasFileForEditing(from url: URL) throws -> OCRLayoutAreasFile {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return OCRLayoutAreasFile(rules: [])
+        }
+        let data = try Data(contentsOf: url)
+        if data.isEmpty {
+            return OCRLayoutAreasFile(rules: [])
+        }
+        return try JSONDecoder().decode(OCRLayoutAreasFile.self, from: data)
+    }
+
+    private func writeLayoutAreasFile(_ areas: OCRLayoutAreasFile, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(areas)
+        try data.write(to: url, options: .atomic)
+    }
+
     func removeHeaderFooterReviewItem(_ item: String) {
         var lines = configText.components(separatedBy: .newlines)
         lines.removeAll { line in
@@ -2809,6 +3036,7 @@ final class AppState: ObservableObject {
             self.ocrCompareWindows.removeAll { $0 === closedWindow }
             self.finalizeAIWindows.removeAll { $0 === closedWindow }
             self.finalizeAIInstructionWindows.removeAll { $0 === closedWindow }
+            self.layoutAreaWindows.removeAll { $0 === closedWindow }
             self.retainedWindowDelegates.removeValue(forKey: ObjectIdentifier(closedWindow))
         }
         retainedWindowDelegates[key] = delegate
@@ -4598,8 +4826,9 @@ final class AppState: ObservableObject {
         let bottomCount = parseLineCount(filterBottomLines, defaultValue: 1)
         let titleMatchTopLineCount = ocrTitleMatchTopLineCount
         let filterValues = parseFilterValues(filteredText)
+        let layoutRules = loadOCRLayoutAreaRules(for: pdfURL)
         var rawPages: [[OCRLine]] = []
-        var pageImageRegions: [[OCRImageRegion]] = []
+        var pageImages: [CGImage] = []
         var allPageLines: [OCRLine] = []
         var allPageImageRegions: [OCRImageRegion] = []
 
@@ -4614,14 +4843,8 @@ final class AppState: ObservableObject {
 
             let image = try renderPDFPageToCGImage(page)
             let rawLines = try recognizeTextWithAppleVision(in: image)
-            let imageRegions = try detectImageRegions(
-                in: image,
-                textLines: rawLines,
-                pageNumber: pageIndex + 1,
-                outputFolder: mdFolder
-            )
             rawPages.append(rawLines)
-            pageImageRegions.append(imageRegions)
+            pageImages.append(image)
 
             DispatchQueue.main.async {
                 let percent = (Double(pageIndex + 1) / Double(pageCount)) * 50
@@ -4636,6 +4859,15 @@ final class AppState: ObservableObject {
         var pageMarkdownItems: [OCRPageMarkdown] = []
 
         for (pageIndex, rawLines) in rawPages.enumerated() {
+            let pageNumber = pageIndex + 1
+            let pageLayoutRules = matchingLayoutAreaRules(layoutRules, pdfURL: pdfURL, pageNumber: pageNumber)
+            let pageImage = pageImages.indices.contains(pageIndex) ? pageImages[pageIndex] : nil
+            let imageRegions = try imageRegionsFromLayoutRules(
+                layoutAreaRules(pageLayoutRules, type: "image"),
+                in: pageImage,
+                pageNumber: pageNumber,
+                outputFolder: mdFolder
+            )
             let filteredLines = removeTopBottomLines(
                 rawLines,
                 topCount: topCount,
@@ -4645,19 +4877,20 @@ final class AppState: ObservableObject {
                 titleMatchTopLineCount: pageIndex == 0 ? titleMatchTopLineCount : 0,
                 repeatedHeaderFooterKeys: repeatedHeaderFooterKeys
             )
-            let imageRegions = pageImageRegions.indices.contains(pageIndex) ? pageImageRegions[pageIndex] : []
             let filteredTextLines = filteredLines.filter { line in
-                !imageRegions.contains { imageRegion in
+                !layoutAreaRules(pageLayoutRules, type: "ignore").contains { rule in
+                    lineOverlapsLayoutArea(line, rule.rect, threshold: 0.30)
+                }
+                && !imageRegions.contains { imageRegion in
                     normalizedOverlapArea(line, imageRegion) >= 0.18
                 }
             }
             removedLines += rawLines.count - filteredTextLines.count
-            let builtPageText = buildMarkdownPage(from: filteredTextLines, imageRegions: imageRegions)
+            let builtPageText = buildMarkdownPage(from: filteredTextLines, imageRegions: imageRegions, layoutRules: pageLayoutRules)
             let pageText = pageIndex == 0
-                ? applyMarkdownTitle(documentTitle, to: builtPageText, replaceExistingHeading: true)
+                ? applyMarkdownTitle(documentTitle, to: builtPageText, replaceExistingHeading: layoutAreaRules(pageLayoutRules, type: "header").isEmpty)
                 : builtPageText
 
-            let pageNumber = pageIndex + 1
             pageMarkdownItems.append(
                 OCRPageMarkdown(
                     pageNumber: pageNumber,
@@ -4760,383 +4993,73 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func detectImageRegions(
-        in image: CGImage,
-        textLines: [OCRLine],
+    private func imageRegionsFromLayoutRules(
+        _ imageRules: [OCRLayoutAreaRule],
+        in image: CGImage?,
         pageNumber: Int,
         outputFolder: URL
     ) throws -> [OCRImageRegion] {
-        let width = image.width
-        let height = image.height
-        guard width > 0, height > 0 else { return [] }
-
-        guard let dataProvider = image.dataProvider,
-              let data = dataProvider.data,
-              let bytes = CFDataGetBytePtr(data) else {
+        guard !imageRules.isEmpty,
+              let image,
+              image.width > 0,
+              image.height > 0 else {
             return []
         }
-
-        let bytesPerRow = image.bytesPerRow
-        let bitsPerPixel = image.bitsPerPixel
-        let bytesPerPixel = max(1, bitsPerPixel / 8)
-        guard bytesPerPixel >= 3 else { return [] }
-
-        let cellSize = max(8, min(width, height) / 160)
-        let gridWidth = max(1, Int(ceil(Double(width) / Double(cellSize))))
-        let gridHeight = max(1, Int(ceil(Double(height) / Double(cellSize))))
-        var active = Array(repeating: false, count: gridWidth * gridHeight)
-
-        func isTextMasked(pixelX: Int, pixelY: Int) -> Bool {
-            let normalizedX = CGFloat(pixelX) / CGFloat(width)
-            let normalizedY = 1 - (CGFloat(pixelY) / CGFloat(height))
-            return textLines.contains { line in
-                let horizontalPadding = max(0.006, line.width * 0.10)
-                let verticalPadding = max(0.006, line.height * 0.80)
-                return normalizedX >= line.left - horizontalPadding
-                    && normalizedX <= line.right + horizontalPadding
-                    && normalizedY >= line.bottom - verticalPadding
-                    && normalizedY <= line.top + verticalPadding
-            }
-        }
-
-        for gridY in 0..<gridHeight {
-            for gridX in 0..<gridWidth {
-                let startX = gridX * cellSize
-                let startY = gridY * cellSize
-                let endX = min(width, startX + cellSize)
-                let endY = min(height, startY + cellSize)
-                var sampleCount = 0
-                var visualCount = 0
-                var darkLineCount = 0
-                let stride = max(2, cellSize / 4)
-
-                var y = startY
-                while y < endY {
-                    var x = startX
-                    while x < endX {
-                        sampleCount += 1
-                        if !isTextMasked(pixelX: x, pixelY: y) {
-                            let offset = y * bytesPerRow + x * bytesPerPixel
-                            let red = Int(bytes[offset])
-                            let green = Int(bytes[offset + 1])
-                            let blue = Int(bytes[offset + 2])
-                            let brightness = (red + green + blue) / 3
-                            let channelSpread = max(red, green, blue) - min(red, green, blue)
-                            if brightness < 238 || channelSpread > 22 {
-                                visualCount += 1
-                            }
-                            if brightness < 180 {
-                                darkLineCount += 1
-                            }
-                        }
-                        x += stride
-                    }
-                    y += stride
-                }
-
-                if sampleCount > 0 {
-                    let visualRatio = Double(visualCount) / Double(sampleCount)
-                    let darkLineRatio = Double(darkLineCount) / Double(sampleCount)
-                    if visualRatio >= 0.18 || darkLineRatio >= 0.08 {
-                        active[gridY * gridWidth + gridX] = true
-                    }
-                }
-            }
-        }
-
-        var visited = Array(repeating: false, count: active.count)
-        var regions: [CGRect] = []
-
-        for startIndex in active.indices where active[startIndex] && !visited[startIndex] {
-            var queue = [startIndex]
-            visited[startIndex] = true
-            var minX = startIndex % gridWidth
-            var maxX = minX
-            var minY = startIndex / gridWidth
-            var maxY = minY
-            var activeCellCount = 0
-
-            while let index = queue.popLast() {
-                activeCellCount += 1
-                let x = index % gridWidth
-                let y = index / gridWidth
-                minX = min(minX, x)
-                maxX = max(maxX, x)
-                minY = min(minY, y)
-                maxY = max(maxY, y)
-
-                for (nextX, nextY) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
-                    guard nextX >= 0, nextX < gridWidth, nextY >= 0, nextY < gridHeight else { continue }
-                    let nextIndex = nextY * gridWidth + nextX
-                    if active[nextIndex] && !visited[nextIndex] {
-                        visited[nextIndex] = true
-                        queue.append(nextIndex)
-                    }
-                }
-            }
-
-            let pixelRect = CGRect(
-                x: max(0, minX * cellSize - cellSize),
-                y: max(0, minY * cellSize - cellSize),
-                width: min(width, (maxX + 2) * cellSize) - max(0, minX * cellSize - cellSize),
-                height: min(height, (maxY + 2) * cellSize) - max(0, minY * cellSize - cellSize)
-            )
-            let pageArea = CGFloat(width * height)
-            let regionArea = pixelRect.width * pixelRect.height
-            let isLargeEnough = pixelRect.width >= CGFloat(width) * 0.15
-                && pixelRect.height >= CGFloat(height) * 0.08
-                && regionArea >= pageArea * 0.018
-                && activeCellCount >= 8
-            if isLargeEnough {
-                regions.append(pixelRect)
-            }
-        }
-
-        let expandedRegions = mergeOverlappingPixelRegions(regions, pageWidth: width, pageHeight: height)
-            .map {
-                expandedPixelRegionForEmbeddedFigureText(
-                    $0,
-                    pageWidth: width,
-                    pageHeight: height,
-                    textLines: textLines
-                )
-            }
-            .map {
-                paddedPixelRegionForImageCrop($0, pageWidth: width, pageHeight: height)
-            }
-            .map { clampPixelRegion($0, pageWidth: width, pageHeight: height) }
-
-        let mergedRegions = mergeOverlappingPixelRegions(expandedRegions, pageWidth: width, pageHeight: height)
-            .map {
-                paddedPixelRegionForImageCrop($0, pageWidth: width, pageHeight: height)
-            }
-            .map { clampPixelRegion($0, pageWidth: width, pageHeight: height) }
-            .filter {
-                !isScannedTextPageImageRegion(
-                    $0,
-                    pageWidth: width,
-                    pageHeight: height,
-                    textLines: textLines
-                )
-            }
-        guard !mergedRegions.isEmpty else { return [] }
 
         let imagesFolder = outputFolder.appendingPathComponent("Images", isDirectory: true)
         try FileManager.default.createDirectory(at: imagesFolder, withIntermediateDirectories: true)
 
-        return try mergedRegions.enumerated().compactMap { index, pixelRect in
-            let cropRect = CGRect(
-                x: max(0, floor(pixelRect.minX)),
-                y: max(0, floor(pixelRect.minY)),
-                width: min(CGFloat(width) - floor(pixelRect.minX), ceil(pixelRect.width)),
-                height: min(CGFloat(height) - floor(pixelRect.minY), ceil(pixelRect.height))
-            )
-            guard cropRect.width > 1, cropRect.height > 1,
-                  let croppedImage = image.cropping(to: cropRect) else {
-                return nil
-            }
-
-            let fileName = "page\(pageNumber)-image\(index + 1).png"
-            let imageURL = imagesFolder.appendingPathComponent(fileName)
-            try writePNG(croppedImage, to: imageURL)
-
-            let left = cropRect.minX / CGFloat(width)
-            let right = cropRect.maxX / CGFloat(width)
-            let top = 1 - (cropRect.minY / CGFloat(height))
-            let bottom = 1 - (cropRect.maxY / CGFloat(height))
-            return OCRImageRegion(
-                markdown: "![Page \(pageNumber) image \(index + 1)](Images/\(fileName))",
-                imageURL: imageURL,
-                left: left,
-                right: right,
-                bottom: bottom,
-                top: top
-            )
-        }
-    }
-
-    private func mergeOverlappingPixelRegions(_ regions: [CGRect], pageWidth: Int, pageHeight: Int) -> [CGRect] {
-        var merged: [CGRect] = []
-        for region in regions.sorted(by: { $0.minY < $1.minY }) {
-            if let index = merged.firstIndex(where: { shouldMergeImageRegions($0, region, pageWidth: pageWidth, pageHeight: pageHeight) }) {
-                merged[index] = merged[index].union(region)
-            } else {
-                merged.append(region)
-            }
-        }
-        return merged.sorted {
-            if abs($0.minY - $1.minY) > 12 {
-                return $0.minY < $1.minY
-            }
-            return $0.minX < $1.minX
-        }
-    }
-
-    private func shouldMergeImageRegions(_ first: CGRect, _ second: CGRect, pageWidth: Int, pageHeight: Int) -> Bool {
-        if first.intersects(second) {
-            return true
-        }
-
-        let closePadding = max(CGFloat(18), CGFloat(min(pageWidth, pageHeight)) / 42)
-        if first.insetBy(dx: -closePadding, dy: -closePadding).intersects(second) {
-            return true
-        }
-
-        let verticalOverlap = max(0, min(first.maxY, second.maxY) - max(first.minY, second.minY))
-        let minHeight = max(1, min(first.height, second.height))
-        let minWidth = max(1, min(first.width, second.width))
-        let horizontalOverlap = max(0, min(first.maxX, second.maxX) - max(first.minX, second.minX))
-        let horizontalGap = max(0, max(first.minX, second.minX) - min(first.maxX, second.maxX))
-        let verticalGap = max(0, max(first.minY, second.minY) - min(first.maxY, second.maxY))
-        let sameVisualBand = verticalOverlap / minHeight >= 0.28
-        let bridgeableHorizontalGap = horizontalGap <= max(CGFloat(42), CGFloat(pageWidth) / 10)
-        if sameVisualBand && bridgeableHorizontalGap {
-            return true
-        }
-
-        let stackedFigureParts = horizontalOverlap / minWidth >= 0.18
-            && verticalGap <= max(CGFloat(52), CGFloat(pageHeight) / 7)
-            && first.union(second).height <= CGFloat(pageHeight) * 0.45
-            && first.union(second).width <= CGFloat(pageWidth) * 0.88
-        return stackedFigureParts
-    }
-
-    private func expandedPixelRegionForEmbeddedFigureText(
-        _ region: CGRect,
-        pageWidth: Int,
-        pageHeight: Int,
-        textLines: [OCRLine]
-    ) -> CGRect {
-        let width = CGFloat(pageWidth)
-        let height = CGFloat(pageHeight)
-        var expanded = region.insetBy(dx: -max(10, width * 0.018), dy: -max(10, height * 0.012))
-        let maxPasses = 4
-
-        for _ in 0..<maxPasses {
-            var changed = false
-            for line in textLines {
-                let lineRect = pixelRect(for: line, pageWidth: pageWidth, pageHeight: pageHeight)
-                let paddedLineRect = lineRect.insetBy(dx: -max(4, width * 0.008), dy: -max(4, height * 0.006))
-                guard shouldAbsorbTextLineIntoImageRegion(paddedLineRect, imageRegion: expanded, pageWidth: pageWidth, pageHeight: pageHeight) else {
-                    continue
+        return try imageRules
+            .sorted {
+                if abs($0.rect.top - $1.rect.top) > 0.01 {
+                    return $0.rect.top > $1.rect.top
                 }
-                let union = expanded.union(paddedLineRect)
-                if !union.equalTo(expanded) {
-                    expanded = union
-                    changed = true
+                return $0.rect.left < $1.rect.left
+            }
+            .enumerated()
+            .compactMap { index, rule in
+                let cropRect = pixelCropRect(for: rule.rect, imageWidth: image.width, imageHeight: image.height)
+                guard cropRect.width > 1, cropRect.height > 1,
+                      let croppedImage = image.cropping(to: cropRect) else {
+                    return nil
                 }
+
+                let fileName = "page\(pageNumber)-image\(index + 1).png"
+                let imageURL = imagesFolder.appendingPathComponent(fileName)
+                try writePNG(croppedImage, to: imageURL)
+
+                let left = cropRect.minX / CGFloat(image.width)
+                let right = cropRect.maxX / CGFloat(image.width)
+                let top = 1 - (cropRect.minY / CGFloat(image.height))
+                let bottom = 1 - (cropRect.maxY / CGFloat(image.height))
+                return OCRImageRegion(
+                    markdown: "![Page \(pageNumber) image \(index + 1)](Images/\(fileName))",
+                    imageURL: imageURL,
+                    left: left,
+                    right: right,
+                    bottom: bottom,
+                    top: top
+                )
             }
-            if !changed {
-                break
-            }
-        }
-
-        return expanded
     }
 
-    private func shouldAbsorbTextLineIntoImageRegion(
-        _ lineRect: CGRect,
-        imageRegion: CGRect,
-        pageWidth: Int,
-        pageHeight: Int
-    ) -> Bool {
-        let pageArea = CGFloat(pageWidth * pageHeight)
-        let textArea = max(1, lineRect.width * lineRect.height)
-        let intersection = imageRegion.intersection(lineRect)
-        if !intersection.isNull && intersection.width * intersection.height / textArea >= 0.18 {
-            return true
-        }
-
-        let horizontalOverlap = max(0, min(imageRegion.maxX, lineRect.maxX) - max(imageRegion.minX, lineRect.minX))
-        let verticalOverlap = max(0, min(imageRegion.maxY, lineRect.maxY) - max(imageRegion.minY, lineRect.minY))
-        let horizontalOverlapRatio = horizontalOverlap / max(1, min(imageRegion.width, lineRect.width))
-        let verticalOverlapRatio = verticalOverlap / max(1, min(imageRegion.height, lineRect.height))
-        let horizontalGap = max(0, max(imageRegion.minX, lineRect.minX) - min(imageRegion.maxX, lineRect.maxX))
-        let verticalGap = max(0, max(imageRegion.minY, lineRect.minY) - min(imageRegion.maxY, lineRect.maxY))
-
-        let closeHorizontalLabel = verticalOverlapRatio >= 0.18
-            && horizontalGap <= max(CGFloat(28), CGFloat(pageWidth) / 16)
-            && lineRect.width * lineRect.height <= pageArea * 0.035
-        let closeVerticalLabel = horizontalOverlapRatio >= 0.18
-            && verticalGap <= max(CGFloat(24), CGFloat(pageHeight) / 28)
-            && lineRect.width * lineRect.height <= pageArea * 0.035
-        let centeredNearbyLabel = lineRect.midX >= imageRegion.minX - CGFloat(pageWidth) * 0.04
-            && lineRect.midX <= imageRegion.maxX + CGFloat(pageWidth) * 0.04
-            && verticalGap <= max(CGFloat(36), CGFloat(pageHeight) * 0.075)
-            && lineRect.width * lineRect.height <= pageArea * 0.035
-        return closeHorizontalLabel || closeVerticalLabel || centeredNearbyLabel
-    }
-
-    private func pixelRect(for line: OCRLine, pageWidth: Int, pageHeight: Int) -> CGRect {
-        let width = CGFloat(pageWidth)
-        let height = CGFloat(pageHeight)
-        let x = max(0, line.left * width)
-        let y = max(0, (1 - line.top) * height)
-        let right = min(width, line.right * width)
-        let bottom = min(height, (1 - line.bottom) * height)
-        return CGRect(x: x, y: y, width: max(0, right - x), height: max(0, bottom - y))
-    }
-
-    private func clampPixelRegion(_ region: CGRect, pageWidth: Int, pageHeight: Int) -> CGRect {
-        let width = CGFloat(pageWidth)
-        let height = CGFloat(pageHeight)
-        let x = max(0, min(width, region.minX))
-        let y = max(0, min(height, region.minY))
-        let maxX = max(x, min(width, region.maxX))
-        let maxY = max(y, min(height, region.maxY))
-        return CGRect(x: x, y: y, width: maxX - x, height: maxY - y)
-    }
-
-    private func paddedPixelRegionForImageCrop(_ region: CGRect, pageWidth: Int, pageHeight: Int) -> CGRect {
-        let width = CGFloat(pageWidth)
-        let height = CGFloat(pageHeight)
-        let horizontalPadding = max(CGFloat(14), width * 0.025)
-        let verticalPadding = max(CGFloat(12), height * 0.018)
-        return region.insetBy(dx: -horizontalPadding, dy: -verticalPadding)
-    }
-
-    private func isScannedTextPageImageRegion(
-        _ pixelRect: CGRect,
-        pageWidth: Int,
-        pageHeight: Int,
-        textLines: [OCRLine]
-    ) -> Bool {
-        let meaningfulTextLines = textLines.filter {
-            $0.text.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
-                && $0.width >= 0.03
-                && $0.height >= 0.004
-        }
-        guard meaningfulTextLines.count >= 4 else { return false }
-
-        let width = CGFloat(pageWidth)
-        let height = CGFloat(pageHeight)
-        let left = max(0, pixelRect.minX / width)
-        let right = min(1, pixelRect.maxX / width)
-        let top = 1 - max(0, pixelRect.minY / height)
-        let bottom = 1 - min(1, pixelRect.maxY / height)
-        let regionWidth = max(0, right - left)
-        let regionHeight = max(0, top - bottom)
-        let regionArea = regionWidth * regionHeight
-        let isPageSized = regionWidth >= 0.65
-            && regionHeight >= 0.45
-            && regionArea >= 0.35
-        guard isPageSized else { return false }
-
-        let overlappingLineCount = meaningfulTextLines.filter { line in
-            let overlapLeft = max(line.left, left)
-            let overlapRight = min(line.right, right)
-            let overlapBottom = max(line.bottom, bottom)
-            let overlapTop = min(line.top, top)
-            guard overlapRight > overlapLeft, overlapTop > overlapBottom else {
-                return false
-            }
-            let overlapArea = (overlapRight - overlapLeft) * (overlapTop - overlapBottom)
-            let lineArea = max(0.0001, line.width * line.height)
-            return overlapArea / lineArea >= 0.50
-        }.count
-        let overlapRatio = Double(overlappingLineCount) / Double(meaningfulTextLines.count)
-
-        return overlappingLineCount >= 4 && overlapRatio >= 0.60
+    private func pixelCropRect(for rect: OCRLayoutAreaRect, imageWidth: Int, imageHeight: Int) -> CGRect {
+        let width = CGFloat(imageWidth)
+        let height = CGFloat(imageHeight)
+        let left = min(max(rect.left, 0), 1)
+        let right = min(max(rect.right, left), 1)
+        let top = min(max(rect.top, 0), 1)
+        let bottom = min(max(rect.bottom, 0), top)
+        let x = floor(left * width)
+        let y = floor((1 - top) * height)
+        let maxX = ceil(right * width)
+        let maxY = ceil((1 - bottom) * height)
+        return CGRect(
+            x: max(0, x),
+            y: max(0, y),
+            width: min(width, maxX) - max(0, x),
+            height: min(height, maxY) - max(0, y)
+        )
     }
 
     private func writePNG(_ image: CGImage, to url: URL) throws {
@@ -5695,11 +5618,20 @@ final class AppState: ObservableObject {
 
     private enum OCRMarkdownBlock {
         case text(OCRLine)
+        case header(OCRLine)
+        case blockquote(OCRLine)
+        case footnote(OCRLine)
         case image(OCRImageRegion)
 
         var top: CGFloat {
             switch self {
             case .text(let line):
+                return line.top
+            case .header(let line):
+                return line.top
+            case .blockquote(let line):
+                return line.top
+            case .footnote(let line):
                 return line.top
             case .image(let imageRegion):
                 return imageRegion.top
@@ -5710,15 +5642,26 @@ final class AppState: ObservableObject {
             switch self {
             case .text(let line):
                 return line.left
+            case .header(let line):
+                return line.left
+            case .blockquote(let line):
+                return line.left
+            case .footnote(let line):
+                return line.left
             case .image(let imageRegion):
                 return imageRegion.left
             }
         }
     }
 
-    private func buildMarkdownPage(from lines: [OCRLine], imageRegions: [OCRImageRegion]) -> String {
-        if imageRegions.isEmpty, isDisplayQuotePage(lines) {
-            return buildDisplayQuoteMarkdown(from: lines)
+    private func buildMarkdownPage(from lines: [OCRLine], imageRegions: [OCRImageRegion], layoutRules: [OCRLayoutAreaRule] = []) -> String {
+        let headerRules = layoutAreaRules(layoutRules, type: "header")
+        let blockquoteRules = layoutAreaRules(layoutRules, type: "blockquote")
+        let footnoteRules = layoutAreaRules(layoutRules, type: "footnote")
+        let hasForcedLayout = !headerRules.isEmpty || !blockquoteRules.isEmpty || !footnoteRules.isEmpty
+
+        if hasForcedLayout {
+            return buildMarkdownPageWithForcedLayout(from: lines, imageRegions: imageRegions, headerRules: headerRules, blockquoteRules: blockquoteRules, footnoteRules: footnoteRules)
         }
 
         if imageRegions.isEmpty {
@@ -5748,6 +5691,15 @@ final class AppState: ObservableObject {
             switch block {
             case .text(let line):
                 pendingTextLines.append(line)
+            case .header(let line):
+                flushText()
+                rendered.append("## \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            case .blockquote(let line):
+                flushText()
+                rendered.append("> \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            case .footnote(let line):
+                flushText()
+                rendered.append(footnoteMarkdownLine(from: line.text, fallbackLabel: "note1"))
             case .image(let imageRegion):
                 flushText()
                 rendered.append(imageRegion.markdown)
@@ -5758,80 +5710,91 @@ final class AppState: ObservableObject {
         return rendered.joined(separator: "\n\n")
     }
 
-    private func isDisplayQuotePage(_ lines: [OCRLine]) -> Bool {
-        let meaningfulLines = lines.filter {
-            let text = $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.count >= 2 && !isPageNumberLine(text)
-        }
-        guard (2...8).contains(meaningfulLines.count) else {
-            return false
-        }
-
-        let minLeft = meaningfulLines.map(\.left).min() ?? 0
-        let maxRight = meaningfulLines.map(\.right).max() ?? 1
-        let blockWidth = maxRight - minLeft
-        let minBottom = meaningfulLines.map(\.bottom).min() ?? 0
-        let maxTop = meaningfulLines.map(\.top).max() ?? 1
-        let blockHeight = maxTop - minBottom
-        let blockCenterX = (minLeft + maxRight) / 2
-        let blockCenterY = (minBottom + maxTop) / 2
-        let centeredLineCount = meaningfulLines.filter { abs($0.centerX - 0.5) <= 0.11 }.count
-        let narrowLineCount = meaningfulLines.filter { $0.width <= 0.72 }.count
-        let hasAuthorAttribution = meaningfulLines.contains { isQuoteAttributionLine($0.text) }
-        let hasMultiLineQuote = meaningfulLines.count >= 3
-
-        return blockWidth <= 0.76
-            && blockHeight <= 0.34
-            && blockCenterX >= 0.38
-            && blockCenterX <= 0.62
-            && blockCenterY >= 0.28
-            && blockCenterY <= 0.72
-            && Double(centeredLineCount) / Double(meaningfulLines.count) >= 0.70
-            && Double(narrowLineCount) / Double(meaningfulLines.count) >= 0.70
-            && (hasAuthorAttribution || hasMultiLineQuote)
-    }
-
-    private func buildDisplayQuoteMarkdown(from lines: [OCRLine]) -> String {
-        let meaningfulLines = lines
-            .filter {
-                let text = $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                return text.count >= 2 && !isPageNumberLine(text)
+    private func buildMarkdownPageWithForcedLayout(
+        from lines: [OCRLine],
+        imageRegions: [OCRImageRegion],
+        headerRules: [OCRLayoutAreaRule],
+        blockquoteRules: [OCRLayoutAreaRule],
+        footnoteRules: [OCRLayoutAreaRule]
+    ) -> String {
+        var blocks: [OCRMarkdownBlock] = lines.map { line in
+            if headerRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
+                return .header(line)
             }
-            .sorted {
-                if abs($0.top - $1.top) > 0.01 {
-                    return $0.top > $1.top
-                }
-                return $0.left < $1.left
+            if blockquoteRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
+                return .blockquote(line)
             }
+            if footnoteRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
+                return .footnote(line)
+            }
+            return .text(line)
+        } + imageRegions.map { .image($0) }
+
+        blocks.sort {
+            if abs($0.top - $1.top) > 0.01 {
+                return $0.top > $1.top
+            }
+            return $0.left < $1.left
+        }
 
         var rendered: [String] = []
-        for (index, line) in meaningfulLines.enumerated() {
-            let text = normalizedDisplayQuoteLine(line.text)
-            if index > 0, isQuoteAttributionLine(text), rendered.last != ">" {
-                rendered.append(">")
+        var pendingTextLines: [OCRLine] = []
+        var pendingQuoteLines: [OCRLine] = []
+        var pendingFootnoteLines: [OCRLine] = []
+
+        func flushText() {
+            let text = buildContinuousParagraphs(from: pendingTextLines)
+            if !text.isEmpty {
+                rendered.append(text)
             }
-            rendered.append("> \(text)")
+            pendingTextLines.removeAll()
         }
-        return rendered.joined(separator: "\n")
-    }
 
-    private func normalizedDisplayQuoteLine(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func isQuoteAttributionLine(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 2 else { return false }
-        if trimmed.hasPrefix("-") || trimmed.hasPrefix("—") || trimmed.hasPrefix("–") {
-            return true
+        func flushQuote() {
+            if !pendingQuoteLines.isEmpty {
+                rendered.append(buildBlockquoteMarkdown(from: pendingQuoteLines))
+                pendingQuoteLines.removeAll()
+            }
         }
-        let latinCount = trimmed.unicodeScalars.filter {
-            CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz").contains($0)
-        }.count
-        let letterCount = trimmed.unicodeScalars.filter {
-            CharacterSet.letters.contains($0)
-        }.count
-        return latinCount >= 3 && letterCount > 0 && Double(latinCount) / Double(letterCount) >= 0.70
+
+        func flushFootnote() {
+            if !pendingFootnoteLines.isEmpty {
+                rendered.append(buildFootnoteMarkdown(from: pendingFootnoteLines))
+                pendingFootnoteLines.removeAll()
+            }
+        }
+
+        for block in blocks {
+            switch block {
+            case .text(let line):
+                flushQuote()
+                flushFootnote()
+                pendingTextLines.append(line)
+            case .header(let line):
+                flushText()
+                flushQuote()
+                flushFootnote()
+                rendered.append("## \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            case .blockquote(let line):
+                flushText()
+                flushFootnote()
+                pendingQuoteLines.append(line)
+            case .footnote(let line):
+                flushText()
+                flushQuote()
+                pendingFootnoteLines.append(line)
+            case .image(let imageRegion):
+                flushText()
+                flushQuote()
+                flushFootnote()
+                rendered.append(imageRegion.markdown)
+            }
+        }
+        flushText()
+        flushQuote()
+        flushFootnote()
+
+        return rendered.joined(separator: "\n\n")
     }
 
     private func normalizedOverlapArea(_ line: OCRLine, _ imageRegion: OCRImageRegion) -> CGFloat {
@@ -5843,6 +5806,56 @@ final class AppState: ObservableObject {
         let overlap = (right - left) * (top - bottom)
         let lineArea = max(0.0001, line.width * line.height)
         return overlap / lineArea
+    }
+
+    private func loadOCRLayoutAreaRules(for pdfURL: URL) -> [OCRLayoutAreaRule] {
+        guard let url = layoutAreasFileURL(),
+              let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) else {
+            return []
+        }
+        return decoded.rules.filter { rule in
+            let type = rule.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard ["header", "blockquote", "image", "footnote", "ignore"].contains(type) else { return false }
+            return rule.rect.left < rule.rect.right && rule.rect.bottom < rule.rect.top
+        }
+    }
+
+    private func matchingLayoutAreaRules(_ rules: [OCRLayoutAreaRule], pdfURL: URL, pageNumber: Int) -> [OCRLayoutAreaRule] {
+        let fileName = pdfURL.lastPathComponent
+        let stem = pdfURL.deletingPathExtension().lastPathComponent
+        return rules.filter { rule in
+            if let page = rule.page, page != pageNumber {
+                return false
+            }
+            if let section = rule.section?.trimmingCharacters(in: .whitespacesAndNewlines), !section.isEmpty {
+                return section == fileName || section == stem
+            }
+            let scope = rule.scope?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "all_sections"
+            return scope == "all_sections" || scope == "all" || scope == "project"
+        }
+    }
+
+    private func layoutAreaRules(_ rules: [OCRLayoutAreaRule], type: String) -> [OCRLayoutAreaRule] {
+        rules.filter { $0.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == type }
+    }
+
+    private func lineOverlapsLayoutArea(_ line: OCRLine, _ rect: OCRLayoutAreaRect, threshold: CGFloat) -> Bool {
+        let left = max(line.left, rect.left)
+        let right = min(line.right, rect.right)
+        let bottom = max(line.bottom, rect.bottom)
+        let top = min(line.top, rect.top)
+        if right > left, top > bottom {
+            let overlap = (right - left) * (top - bottom)
+            let lineArea = max(0.0001, line.width * line.height)
+            if overlap / lineArea >= threshold {
+                return true
+            }
+        }
+        return line.centerX >= rect.left
+            && line.centerX <= rect.right
+            && ((line.bottom + line.top) / 2) >= rect.bottom
+            && ((line.bottom + line.top) / 2) <= rect.top
     }
 
     private func firstTextLineContinuesPreviousPage(_ lines: [OCRLine]) -> Bool {
@@ -5980,29 +5993,8 @@ final class AppState: ObservableObject {
         var current = ""
         var previousLine: OCRLine?
         var centeredBodyMode = false
-        let openingEpigraphRange = openingEpigraphRange(
-            in: lines,
-            normalLeft: normalLeft,
-            normalRight: normalRight,
-            normalWidth: normalWidth,
-            blockCenter: blockCenter,
-            averageHeight: averageHeight
-        )
 
         for (index, line) in lines.enumerated() {
-            if let openingEpigraphRange, openingEpigraphRange.contains(index) {
-                if index == openingEpigraphRange.lowerBound {
-                    if !current.isEmpty {
-                        paragraphs.append(current)
-                        current = ""
-                    }
-                    paragraphs.append(buildBlockquoteMarkdown(from: Array(lines[openingEpigraphRange])))
-                    previousLine = nil
-                    centeredBodyMode = false
-                }
-                continue
-            }
-
             if isHeadingLine(
                 line,
                 index: index,
@@ -6077,99 +6069,38 @@ final class AppState: ObservableObject {
         return paragraphs.joined(separator: "\n\n")
     }
 
-    private func openingEpigraphRange(
-        in lines: [OCRLine],
-        normalLeft: CGFloat,
-        normalRight: CGFloat,
-        normalWidth: CGFloat,
-        blockCenter: CGFloat,
-        averageHeight: CGFloat
-    ) -> Range<Int>? {
-        guard lines.count >= 5, normalWidth > 0 else {
-            return nil
-        }
-
-        var start = 0
-        while start < min(4, lines.count) {
-            let line = lines[start]
-            if isChapterNumberHeadingLine(
-                line,
-                index: start,
-                lines: lines,
-                normalWidth: normalWidth,
-                blockCenter: blockCenter,
-                averageHeight: averageHeight
-            ) || isHeadingLine(
-                line,
-                index: start,
-                lines: lines,
-                normalWidth: normalWidth,
-                blockCenter: blockCenter,
-                averageHeight: averageHeight
-            ) {
-                start += 1
-            } else {
-                break
-            }
-        }
-
-        guard start > 0, start < lines.count - 2 else {
-            return nil
-        }
-
-        var end = start
-        while end < min(lines.count, start + 5), isOpeningEpigraphLine(lines[end], normalLeft: normalLeft, normalRight: normalRight, normalWidth: normalWidth, blockCenter: blockCenter) {
-            end += 1
-        }
-
-        let count = end - start
-        guard (2...5).contains(count), end < lines.count else {
-            return nil
-        }
-
-        let previousLine = lines[start - 1]
-        let firstQuoteLine = lines[start]
-        let lastQuoteLine = lines[end - 1]
-        let nextBodyLine = lines[end]
-        let gapBefore = previousLine.bottom - firstQuoteLine.top
-        let gapAfter = lastQuoteLine.bottom - nextBodyLine.top
-        let separatedBefore = gapBefore >= max(averageHeight * 1.15, 0.022)
-        let separatedAfter = gapAfter >= max(averageHeight * 1.15, 0.022)
-        let nextLooksLikeBody = !isOpeningEpigraphLine(nextBodyLine, normalLeft: normalLeft, normalRight: normalRight, normalWidth: normalWidth, blockCenter: blockCenter)
-            && (nextBodyLine.width >= normalWidth * 0.72 || nextBodyLine.left <= normalLeft + max(0.05, normalWidth * 0.12))
-
-        guard separatedBefore, separatedAfter, nextLooksLikeBody else {
-            return nil
-        }
-
-        return start..<end
-    }
-
-    private func isOpeningEpigraphLine(
-        _ line: OCRLine,
-        normalLeft: CGFloat,
-        normalRight: CGFloat,
-        normalWidth: CGFloat,
-        blockCenter: CGFloat
-    ) -> Bool {
-        let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.count >= 2, !isPageNumberLine(text) else {
-            return false
-        }
-
-        let centerThreshold = max(0.055, normalWidth * 0.14)
-        let centered = abs(line.centerX - 0.5) <= 0.12 || abs(line.centerX - blockCenter) <= centerThreshold
-        let narrow = line.width <= normalWidth * 0.82
-        let insetFromBody = line.left >= normalLeft + max(0.035, normalWidth * 0.08)
-            && line.right <= normalRight - max(0.025, normalWidth * 0.05)
-        return centered && narrow && insetFromBody
-    }
-
     private func buildBlockquoteMarkdown(from lines: [OCRLine]) -> String {
         lines.map {
             "> \($0.text.trimmingCharacters(in: .whitespacesAndNewlines))"
         }
         .joined(separator: "\n")
+    }
+
+    private func buildFootnoteMarkdown(from lines: [OCRLine]) -> String {
+        lines.enumerated().map { index, line in
+            footnoteMarkdownLine(from: line.text, fallbackLabel: "note\(index + 1)")
+        }
+        .joined(separator: "\n")
+    }
+
+    private func footnoteMarkdownLine(from text: String, fallbackLabel: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "[^\(fallbackLabel)]:"
+        }
+
+        let pattern = #"^([0-9๐-๙]+|[*†‡])[\.)\]\s]*(.*)$"#
+        if let regex = try? NSRegularExpression(pattern: pattern),
+           let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)),
+           match.numberOfRanges >= 3,
+           let labelRange = Range(match.range(at: 1), in: trimmed),
+           let bodyRange = Range(match.range(at: 2), in: trimmed) {
+            let label = String(trimmed[labelRange])
+            let body = String(trimmed[bodyRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return "[^\(label)]: \(body.isEmpty ? trimmed : body)"
+        }
+
+        return "[^\(fallbackLabel)]: \(trimmed)"
     }
 
     private func hasDetectedBlankLineGap(between previousLine: OCRLine, and currentLine: OCRLine, averageHeight: CGFloat) -> Bool {
@@ -7431,6 +7362,15 @@ struct StepOneLoadPDFView: View {
                                 close: close
                             ) {
                                 appState.applyStylesheet()
+                            }
+
+                            TopBarDropdownRow(
+                                title: "Define Layout Areas",
+                                systemImage: "rectangle.dashed",
+                                isDisabled: appState.selectedFolderPath.isEmpty,
+                                close: close
+                            ) {
+                                appState.openLayoutAreasEditor()
                             }
 
                             TopBarDropdownRow(
@@ -9454,7 +9394,7 @@ struct OCRSearchGuidelinePopoverView: View {
             Text("Type normal text to show only paragraphs containing that text. Matching text stays highlighted.")
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("Type exactly Image to show only detected image paragraphs.")
+            Text("Type exactly Image to show image paragraphs.")
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("Type exactly Footnote to show paragraphs with footnote markers and footnote items.")
@@ -11494,6 +11434,498 @@ final class SplitPlannerState: ObservableObject {
             .compactMap { $0.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
     }
+}
+
+struct LayoutAreaEditorWindowView: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject var state: LayoutAreaEditorState
+
+    private let areaTypes: [(id: String, label: String, icon: String)] = [
+        ("header", "Header", "textformat.size"),
+        ("blockquote", "Quote", "quote.bubble"),
+        ("image", "Image", "photo"),
+        ("footnote", "Footnote", "text.badge.plus"),
+        ("ignore", "Ignore", "eye.slash")
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            header
+            controls
+            statusBar
+            preview
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(.top, 120)
+        .padding(.horizontal, 22)
+        .padding(.bottom, 22)
+        .frame(minWidth: 1040, minHeight: 760)
+        .background(NewOCRMainPalette.windowBackground)
+        .buttonStyle(NewOCRButtonStyle())
+        .onChange(of: state.selectedPage) { _, newValue in
+            state.selectedPage = min(max(newValue, 1), max(state.pageCount, 1))
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(0.94))
+                    .frame(width: 58, height: 58)
+                    .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                Image(systemName: "rectangle.dashed")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(Color.black)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Define Layout Areas")
+                    .font(.largeTitle.weight(.semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Text(state.selectedPDFName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+
+            OCRIconButton(
+                title: "Advanced JSON",
+                systemImage: "curlybraces",
+                backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255),
+                foregroundColor: .black,
+                size: 44
+            ) {
+                appState.openLayoutAreasJSONEditor()
+            }
+
+            OCRIconButton(
+                title: "Clear Rules",
+                systemImage: "trash",
+                backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                foregroundColor: .white,
+                size: 44
+            ) {
+                clearRules()
+            }
+
+            OCRIconButton(
+                title: "Save Area",
+                systemImage: "square.and.arrow.down",
+                backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                foregroundColor: .black,
+                size: 44
+            ) {
+                saveCurrentArea()
+            }
+            .keyboardShortcut(.defaultAction)
+
+            OCRIconButton(
+                title: "Close",
+                systemImage: "xmark",
+                backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                foregroundColor: .white,
+                size: 44
+            ) {
+                NSApp.keyWindow?.close()
+            }
+        }
+    }
+
+    private var statusBar: some View {
+        HStack {
+            Text(state.status.isEmpty ? "Draw an area, choose the type, then save it." : state.status)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 14) {
+                Picker("Section", selection: Binding(
+                    get: { state.selectedPDFPath },
+                    set: { state.selectPDFPath($0) }
+                )) {
+                    ForEach(state.pdfItems) { item in
+                        Text(item.fileName).tag(item.url.path)
+                    }
+                }
+                .controlSize(.large)
+                .font(.system(size: 16, weight: .semibold))
+                .frame(minWidth: 280, maxWidth: .infinity)
+
+                Text("\(state.savedRuleCount) saved")
+                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    .frame(minWidth: 82, alignment: .trailing)
+            }
+
+            HStack(spacing: 14) {
+                Text("Page")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+
+                Stepper(
+                    "\(state.selectedPage) / \(max(state.pageCount, 1))",
+                    value: $state.selectedPage,
+                    in: 1...max(state.pageCount, 1)
+                )
+                .controlSize(.large)
+                .font(.system(size: 16, weight: .semibold).monospacedDigit())
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+                .frame(width: 150, alignment: .leading)
+
+                Spacer(minLength: 12)
+
+                Picker("Scope", selection: $state.selectedScope) {
+                    Text("All Sections").tag("all_sections")
+                    Text("This Section").tag("section")
+                }
+                .pickerStyle(.segmented)
+                .controlSize(.large)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 300)
+            }
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 104, maximum: 128), spacing: 12)],
+                alignment: .leading,
+                spacing: 12
+            ) {
+                ForEach(areaTypes, id: \.id) { type in
+                    LayoutAreaTypeButton(
+                        title: type.label,
+                        systemImage: type.icon,
+                        isSelected: state.selectedType == type.id
+                    ) {
+                        state.selectedType = type.id
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+
+    private var preview: some View {
+        Group {
+            if let url = state.selectedPDFURL,
+               let image = appState.layoutAreaPreviewImage(pdfURL: url, pageNumber: state.selectedPage) {
+                GeometryReader { proxy in
+                    let imageFrame = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size)
+
+                    ZStack(alignment: .topLeading) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+
+                        LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
+                    }
+                }
+                .frame(minWidth: 820, minHeight: 520)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(NewOCRMainPalette.fieldBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+            } else {
+                ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
+                    .frame(minWidth: 820, minHeight: 520)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+        }
+    }
+
+    private func saveCurrentArea() {
+        guard let url = state.selectedPDFURL else { return }
+        do {
+            let count = try appState.saveLayoutAreaRule(
+                type: state.selectedType,
+                scope: state.selectedScope,
+                sectionURL: url,
+                pageNumber: state.selectedPage,
+                rect: state.normalizedOCRRect
+            )
+            state.savedRuleCount = count
+            state.status = "Saved \(displayName(for: state.selectedType)) area for page \(state.selectedPage)."
+        } catch {
+            state.status = "Could not save: \(error.localizedDescription)"
+        }
+    }
+
+    private func clearRules() {
+        let alert = NSAlert()
+        alert.messageText = "Clear Layout Rules?"
+        alert.informativeText = "This removes all saved header, quote, image, footnote, and ignore layout areas for the current project."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try appState.clearLayoutAreaRules()
+            state.savedRuleCount = 0
+            state.status = "Cleared layout rules."
+        } catch {
+            state.status = "Could not clear rules: \(error.localizedDescription)"
+        }
+    }
+
+    private func displayName(for type: String) -> String {
+        switch type {
+        case "header":
+            return "header"
+        case "blockquote":
+            return "quote"
+        case "image":
+            return "image"
+        case "footnote":
+            return "footnote"
+        case "ignore":
+            return "ignore"
+        default:
+            return "layout"
+        }
+    }
+}
+
+private struct LayoutAreaTypeButton: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 24, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+            }
+            .foregroundStyle(isSelected ? Color.white : NewOCRMainPalette.primaryText)
+            .frame(width: 104, height: 64)
+            .background(isSelected ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color.white.opacity(0.18) : NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct LayoutAreaOverlayView: View {
+    @Binding var selectionRect: CGRect
+    let imageFrame: CGRect
+    @State private var dragStartRect: CGRect? = nil
+    @State private var drawStartPoint: CGPoint? = nil
+    private let handleSize: CGFloat = 14
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Rectangle()
+                .fill(Color.clear)
+                .contentShape(Rectangle())
+                .frame(width: imageFrame.width, height: imageFrame.height)
+                .position(x: imageFrame.midX, y: imageFrame.midY)
+                .gesture(drawGesture)
+
+            outsideShade
+
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.10))
+                .border(Color.accentColor, width: 2)
+                .frame(width: selectionFrame.width, height: selectionFrame.height)
+                .position(x: selectionFrame.midX, y: selectionFrame.midY)
+                .gesture(moveGesture)
+
+            cropHandle(.topLeft)
+            cropHandle(.topRight)
+            cropHandle(.bottomLeft)
+            cropHandle(.bottomRight)
+        }
+        .frame(width: imageFrame.maxX, height: imageFrame.maxY, alignment: .topLeading)
+    }
+
+    private var normalizedRect: CGRect {
+        LayoutAreaEditorState.clampedSelection(selectionRect)
+    }
+
+    private var selectionFrame: CGRect {
+        let rect = normalizedRect
+        return CGRect(
+            x: imageFrame.minX + rect.minX * imageFrame.width,
+            y: imageFrame.minY + rect.minY * imageFrame.height,
+            width: rect.width * imageFrame.width,
+            height: rect.height * imageFrame.height
+        )
+    }
+
+    private var outsideShade: some View {
+        Path { path in
+            path.addRect(imageFrame)
+            path.addRect(selectionFrame)
+        }
+        .fill(Color.black.opacity(0.28), style: FillStyle(eoFill: true))
+        .allowsHitTesting(false)
+    }
+
+    private var drawGesture: some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { value in
+                let currentPoint = clampedPoint(value.location)
+                if drawStartPoint == nil {
+                    drawStartPoint = clampedPoint(value.startLocation)
+                }
+                let startPoint = drawStartPoint ?? currentPoint
+                selectionRect = normalizedRect(from: startPoint, to: currentPoint)
+            }
+            .onEnded { _ in
+                drawStartPoint = nil
+                selectionRect = LayoutAreaEditorState.clampedSelection(selectionRect)
+            }
+    }
+
+    private var moveGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                if dragStartRect == nil {
+                    dragStartRect = normalizedRect
+                }
+                let start = dragStartRect ?? normalizedRect
+                let dx = value.translation.width / max(imageFrame.width, 1)
+                let dy = value.translation.height / max(imageFrame.height, 1)
+                selectionRect = LayoutAreaEditorState.clampedSelection(
+                    CGRect(x: start.minX + dx, y: start.minY + dy, width: start.width, height: start.height)
+                )
+            }
+            .onEnded { _ in
+                dragStartRect = nil
+            }
+    }
+
+    private func cropHandle(_ corner: CropCorner) -> some View {
+        Circle()
+            .fill(Color.accentColor)
+            .frame(width: handleSize, height: handleSize)
+            .position(handlePosition(for: corner))
+            .gesture(handleGesture(corner))
+    }
+
+    private func handlePosition(for corner: CropCorner) -> CGPoint {
+        switch corner {
+        case .topLeft:
+            return CGPoint(x: selectionFrame.minX, y: selectionFrame.minY)
+        case .topRight:
+            return CGPoint(x: selectionFrame.maxX, y: selectionFrame.minY)
+        case .bottomLeft:
+            return CGPoint(x: selectionFrame.minX, y: selectionFrame.maxY)
+        case .bottomRight:
+            return CGPoint(x: selectionFrame.maxX, y: selectionFrame.maxY)
+        }
+    }
+
+    private func handleGesture(_ corner: CropCorner) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                if dragStartRect == nil {
+                    dragStartRect = normalizedRect
+                }
+
+                let start = dragStartRect ?? normalizedRect
+                let dx = value.translation.width / max(imageFrame.width, 1)
+                let dy = value.translation.height / max(imageFrame.height, 1)
+                var minX = start.minX
+                var maxX = start.maxX
+                var minY = start.minY
+                var maxY = start.maxY
+
+                switch corner {
+                case .topLeft:
+                    minX += dx
+                    minY += dy
+                case .topRight:
+                    maxX += dx
+                    minY += dy
+                case .bottomLeft:
+                    minX += dx
+                    maxY += dy
+                case .bottomRight:
+                    maxX += dx
+                    maxY += dy
+                }
+
+                selectionRect = clampedFromEdges(minX: minX, minY: minY, maxX: maxX, maxY: maxY)
+            }
+            .onEnded { _ in
+                dragStartRect = nil
+            }
+    }
+
+    private func clampedPoint(_ point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: min(max(point.x, imageFrame.minX), imageFrame.maxX),
+            y: min(max(point.y, imageFrame.minY), imageFrame.maxY)
+        )
+    }
+
+    private func normalizedRect(from start: CGPoint, to end: CGPoint) -> CGRect {
+        let minX = (min(start.x, end.x) - imageFrame.minX) / max(imageFrame.width, 1)
+        let maxX = (max(start.x, end.x) - imageFrame.minX) / max(imageFrame.width, 1)
+        let minY = (min(start.y, end.y) - imageFrame.minY) / max(imageFrame.height, 1)
+        let maxY = (max(start.y, end.y) - imageFrame.minY) / max(imageFrame.height, 1)
+        return clampedFromEdges(minX: minX, minY: minY, maxX: maxX, maxY: maxY)
+    }
+
+    private func clampedFromEdges(minX: CGFloat, minY: CGFloat, maxX: CGFloat, maxY: CGFloat) -> CGRect {
+        let lowerX = min(max(minX, 0), 0.98)
+        let lowerY = min(max(minY, 0), 0.98)
+        let upperX = max(min(maxX, 1), lowerX + 0.02)
+        let upperY = max(min(maxY, 1), lowerY + 0.02)
+        return CGRect(x: lowerX, y: lowerY, width: upperX - lowerX, height: upperY - lowerY)
+    }
+}
+
+private func layoutAreaAspectFitRect(imageSize: NSSize, containerSize: CGSize) -> CGRect {
+    guard imageSize.width > 0, imageSize.height > 0, containerSize.width > 0, containerSize.height > 0 else {
+        return CGRect(origin: .zero, size: containerSize)
+    }
+
+    let scale = min(containerSize.width / imageSize.width, containerSize.height / imageSize.height)
+    let width = imageSize.width * scale
+    let height = imageSize.height * scale
+    return CGRect(
+        x: (containerSize.width - width) / 2,
+        y: (containerSize.height - height) / 2,
+        width: width,
+        height: height
+    )
 }
 
 struct CropPDFWindowView: View {

@@ -167,6 +167,8 @@ Important actions:
 - **Crop**: open the crop window for the working PDF.
 - **Revert Original**: restore from `_original.pdf` and clear generated output.
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
+- **Define Layout Areas**: draw project-wide OCR layout-area rules for forcing
+  header, blockquote, image, footnote, or ignore behavior across sections.
 - **Codex Review**: run local Codex on selected sections to edit their
   existing page Markdown files in place.
 - **Build EPUB**: create EPUB from available section/manual Markdown.
@@ -453,111 +455,136 @@ titles only when a section title is empty, and opens the shared
 `AppleVision/LineCache/header-footer-review.txt` review after the batch
 finishes.
 
-## OCR Image Detection
+## OCR Layout-Driven Special Areas
 
-NewOCR detects image regions from rendered PDF pages and can insert Markdown
-image references such as:
+NewOCR does not automatically detect images, blockquotes, or footnotes during
+OCR. Those special areas are controlled by **Edit PDF > Define Layout Areas** so
+the user can draw the exact page area that should become an image, quote,
+footnote, header, or ignored text.
 
-```md
-![Page 1 image 1](Images/page1-image1.png)
+Process OCR still detects large vertical gaps between OCR text lines as blank
+paragraph breaks. The surrounding text paragraphs stay unchanged, and NewOCR
+inserts a separate `<br/>` paragraph between them so the visible blank row is
+preserved.
+
+Page-boundary paragraph merging must not merge Markdown blockquotes or images
+with normal body text. If either side of a possible page-boundary merge starts
+with `>` or `![`, NewOCR keeps the paragraphs separate.
+
+## OCR Layout Areas
+
+**Edit PDF > Define Layout Areas** opens a project-wide visual editor. Choose a
+sample section/page, select **Header**, **Quote**, **Image**, **Footnote**, or
+**Ignore**, drag the rectangle over the page area, choose whether it applies to
+**All Sections** or only **This Section**, then click **Save Area**.
+
+The editor writes the project layout rules automatically to:
+
+```text
+AppleVision/layout-areas.json
 ```
 
-Important fix/behavior:
+This is a main-window action because the same rules can apply across all
+sections. The JSON file is still available from the editor's **Advanced** button
+for debugging or manual adjustment.
 
-- OCR text is priority.
-- Image-region detection runs during OCR on rendered PDF pages, including pages
-  that also contain recognized text.
-- NewOCR masks Apple Vision text boxes before looking for non-text visual
-  regions, so detected OCR text is not treated as an image candidate.
-- After candidate visual regions are found, NewOCR merges nearby fragments in
-  the same visual band and stacked fragments that belong to one diagram, then
-  expands the crop to include OCR text boxes embedded inside or very near the
-  figure. It re-merges after expansion and pads the final crop, so route maps,
-  charts, or train-line diagrams are less likely to be saved as partial images.
-  This keeps diagram labels inside the saved image instead of leaving them as
-  separate OCR text.
-- OCR text that overlaps a final image region is removed from the page Markdown,
-  so text inside a detected image is not duplicated as normal OCR text.
-- A full-page scanned text page must not be replaced by a full-page image.
-- Real smaller images, figures, diagrams, and illustrations can be extracted
-  from pages with or without meaningful OCR text. Users can still add or remove
-  images manually from the OCR editor when automatic detection is imperfect.
-- Process OCR should detect a large vertical gap between OCR text lines as a
-  blank-line paragraph break. The surrounding text paragraphs stay unchanged,
-  and NewOCR inserts a separate `<br/>` paragraph between them so the visible
-  blank row is preserved.
+Supported rule types:
 
-This keeps image detection in the OCR workflow, where NewOCR has rendered page
-pixels and Apple Vision text boxes available. Codex Review should not detect or
-extract images.
+- `header` — OCR lines in the rectangle are written as Markdown headings.
+- `blockquote` — OCR lines in the rectangle are written as Markdown
+  blockquotes with `>`.
+- `image` — the rectangle is cropped from the rendered PDF page, saved to
+  `Images/`, and inserted as Markdown image syntax.
+- `footnote` — OCR lines in the rectangle are written as Markdown footnote
+  definitions.
+- `ignore` — OCR lines in the rectangle are removed from Markdown.
 
-## OCR Blockquote Detection
+Advanced JSON example:
 
-NewOCR detects conservative display-quote pages during OCR and writes them as
-Markdown blockquotes. This is intended for pages like a centered quote card, not
-for ordinary body pages.
-
-Conditions for automatic display-quote blockquote output:
-
-- the page has no detected image regions
-- the page has 2 to 8 meaningful OCR text lines after page-number lines are
-  ignored
-- the combined text block is narrow, at most about 76% of the page width
-- the combined text block is not tall, at most about 34% of the page height
-- the combined text block is centered horizontally and vertically in the page's
-  readable middle zone
-- at least about 70% of the lines are centered near the page center
-- at least about 70% of the lines are individually narrow
-- the page has either at least 3 quote lines or an author attribution line
-  detected by a leading dash/emdash/en dash or mostly Latin-letter author text
-
-When these conditions match, NewOCR preserves line breaks and writes:
-
-```md
-> Quote line 1
-> Quote line 2
->
-> — Author
+```json
+{
+  "rules": [
+    {
+      "type": "blockquote",
+      "scope": "all_sections",
+      "page": 1,
+      "rect": {
+        "left": 0.20,
+        "right": 0.88,
+        "top": 0.78,
+        "bottom": 0.66
+      }
+    },
+    {
+      "type": "image",
+      "scope": "all_sections",
+      "page": 1,
+      "rect": {
+        "left": 0.14,
+        "right": 0.86,
+        "top": 0.64,
+        "bottom": 0.40
+      }
+    },
+    {
+      "type": "header",
+      "section": "section-003.pdf",
+      "page": 1,
+      "rect": {
+        "left": 0.18,
+        "right": 0.90,
+        "top": 0.90,
+        "bottom": 0.80
+      }
+    }
+  ]
+}
 ```
 
-This detector is intentionally narrow. Inline paragraph-level blockquotes on
-normal text pages should still be handled by later OCR layout work or manual
-editing.
+Coordinates are normalized page coordinates from `0.0` to `1.0`, using the same
+coordinate style as OCR boxes: `left`/`right` are horizontal positions, `top` is
+near the top of the page, and `bottom` is below it. A rule matches a line when
+the line overlaps the rectangle enough or the line center falls inside it.
 
-NewOCR also detects conservative opening epigraph blocks on normal chapter
-pages. This is intended for pages where a chapter number/title is followed by a
-short centered quote or setup text before the first normal body paragraph.
+Rule scope:
 
-Conditions for automatic opening-epigraph blockquote output:
+- `scope: "all_sections"` applies to every section in the project.
+- `section: "section-003.pdf"` or `section: "section-003"` limits the rule to
+  one section.
+- `page` limits the rule to a page number inside each matching section.
 
-- the page starts with a detected chapter number and/or heading
-- the first heading line may be moderately wide when it is centered near the top,
-  because Thai chapter titles can be wider than short English headings
-- immediately below the heading, there are 2 to 5 candidate quote lines
-- each candidate line is centered near the page/body center
-- each candidate line is narrower than the normal body text lane
-- each candidate line is inset from the normal body text left/right edges
-- there is a visible vertical gap before the quote block and another visible
-  vertical gap after it
-- the line after the quote block looks like normal body text, meaning it is
-  wider or begins near the normal body text left edge
+OCR priority:
 
-When these conditions match, NewOCR preserves the epigraph line breaks and
-writes:
+1. Apply normal header/footer and user text filters.
+2. Remove lines matched by `ignore` layout areas.
+3. Crop image layout areas and remove OCR text that overlaps those image areas.
+4. Force remaining lines matched by `header` areas to headings.
+5. Force remaining lines matched by `blockquote` areas to blockquotes.
+6. Force remaining lines matched by `footnote` areas to footnote definitions.
+7. Run normal paragraph and blank-line Markdown behavior for the rest.
 
-```md
-## Chapter Title
+The visual editor is the recommended workflow. Direct JSON editing is intended
+for debugging or unusual layout rules.
 
-> Epigraph line 1
-> Epigraph line 2
-> Epigraph line 3
+UI notes:
 
-First normal body paragraph...
-```
-
-Page-boundary paragraph merging must not merge Markdown blockquotes with normal
-body text. If either side of a possible page-boundary merge starts with `>`,
-NewOCR keeps the paragraphs separate.
+- Define Layout Areas should stay visually consistent with Crop/Add Split/Detect
+  Split windows: full-size dark working window, white header icon tile, large
+  readable title/subtitle, `OCRIconButton` command icons, bordered dark panels,
+  and a large expanding PDF preview area.
+- Define Layout Areas known-good window values: `NSWindow` content rect
+  `1180x820`, `contentMinSize = NSSize(width: 1040, height: 760)`,
+  `NSHostingView.sizingOptions = []`, open with `window.setFrame(visibleFrame,
+  display: true)`, root view top padding `120`, horizontal padding `22`, bottom
+  padding `22`, and root minimum frame `1040x760`.
+- Keep the controls from being cut off: the Section picker and saved-rule count
+  live on one row, Page and Scope live on a second row, and the layout-type
+  buttons use an adaptive wrapping grid. Do not collapse these back into one
+  fixed-width horizontal command row.
+- Advanced JSON, Clear Rules, Save Area, and Close are top-header
+  `OCRIconButton` commands, matching Crop/Split-style windows. Do not move
+  primary commands to a bottom footer where an expanding preview can push them
+  off-screen.
 
 ### User-Added Images
 
@@ -570,7 +597,7 @@ AppleVision/MD/<section>/Images/
 ```
 
 Then NewOCR inserts an image paragraph before or after the current paragraph
-using the same Markdown shape as OCR-detected images:
+using the same Markdown shape as layout-area images:
 
 ```md
 ![Alt text](Images/image-file.png)
@@ -1033,7 +1060,8 @@ paragraph gaps, blockquote formatting, and footnote formatting. It also tells
 Codex to return a concise marked completion report instead of a verbose
 transcript. The system task block controls file paths and is not editable from
 the Codex Instruction window. Codex Review must not detect, extract, crop, add,
-remove, or rename images; image detection is handled by OCR.
+remove, or rename images; image areas are controlled by NewOCR layout areas or
+manual OCR editor actions.
 
 ### Known Behavioral Decisions — Codex Review
 
@@ -1041,8 +1069,8 @@ remove, or rename images; image detection is handled by OCR.
   If the result is bad, re-run OCR for that section to regenerate clean files.
 - The system task block (file paths and Markdown file list) is always appended
   at runtime and cannot be disabled from the Codex Instruction window.
-- Codex Review does not perform image detection or extraction. Run OCR again to
-  regenerate automatic OCR-detected images, or use the OCR editor's manual image
+- Codex Review does not perform image detection or extraction. Use Define
+  Layout Areas for OCR-time image crops, or use the OCR editor's manual image
   tools for corrections.
 - `stdin` is `/dev/null` so Codex always runs non-interactively.
 - The Codex Log window stays open after a run finishes so the user can review
@@ -1195,8 +1223,8 @@ Key notes:
 - Buttons should be clear, friendly, and consistent.
 - The main top bar groups commands into compact menus instead of many separate
   buttons: Project contains New, Open, Revert Original, and Open Config; Edit
-  PDF contains Add Split, Crop, Apply CSS, Codex Review, and Clear Scan
-  Report; Build EPUB and Close remain single top-level commands. View EPUB appears in Project when
+  PDF contains Add Split, Crop, Apply CSS, Define Layout Areas, Codex Review,
+  and Clear Scan Report; Build EPUB and Close remain single top-level commands. View EPUB appears in Project when
   a built EPUB file exists. Top-bar dropdowns are custom popovers, not native
   macOS menus, so rows can use larger text and visible hover/pressed
   highlighting. Project and Edit PDF open immediately when the pointer enters
@@ -1298,6 +1326,48 @@ Key notes:
   not show the selected filename under the OCR title. OCR top actions and side-panel actions use SF
   Symbol icon buttons with floating `NSPopover` tooltips instead of text-heavy
   buttons or SwiftUI in-row tooltip labels.
+- New standalone tool windows should follow the Crop/Add Split/Detect Split
+  dark-window pattern by default. Use these concrete implementation defaults:
+  create an `NSWindow` with `contentRect: NSRect(x: 0, y: 0, width: 1180,
+  height: 820)` unless the window has a documented reason for another size; set
+  `styleMask` to `[.titled, .closable, .miniaturizable, .resizable]`; set
+  `contentMinSize` to at least `NSSize(width: 1040, height: 760)` for visual
+  crop/preview tools or `NSSize(width: 1100, height: 620)` for split/list tools;
+  create an `NSHostingView`, set `hostingView.sizingOptions = []`, assign it to
+  `window.contentView`, then call `window.setFrame(visibleFrame, display: true)`
+  when opening full-size. Do not set the SwiftUI view's fixed width equal to the
+  screen width.
+- New standalone tool views should use:
+  `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)`,
+  then explicit padding, then a minimum frame. For manually-created full-size
+  windows whose content can sit under the macOS title bar, use an explicit top
+  clearance. Define Layout Areas uses `.padding(.top, 120)`,
+  `.padding(.horizontal, 22)`, `.padding(.bottom, 22)`, and
+  `.frame(minWidth: 1040, minHeight: 760)`. This value was screenshot-tested;
+  use it as the starting point for similar full-window tools.
+- Use `NewOCRMainPalette.windowBackground` as the outer background,
+  `panelBackground` plus `stroke` for command/status panels, and
+  `fieldBackground` for the main preview/work area. Header layout should use a
+  white rounded icon tile, normally `58x58`, with a black SF Symbol around 28pt,
+  plus large readable title/subtitle text. Use `NewOCRMainPalette.primaryText`
+  for primary text and `secondaryText` for subtitles on dark backgrounds.
+- Primary commands such as Save, Close, Clear, Detect, Split, or Advanced should
+  use `OCRIconButton` icon-only controls with floating tooltips, not text-heavy
+  buttons. Put primary commands in the header/top command row so an expanding
+  preview cannot push them off-screen. Destructive commands use red with white
+  icons, Save/confirm uses green with black icons, close uses red with white X,
+  and secondary/advanced commands can use the existing pastel pink treatment.
+- Do not put too many fixed-width controls in one horizontal command row. If a
+  tool has several controls, split them into multiple rows or use an adaptive
+  `LazyVGrid`/wrapping toolbar so controls never get cut off on smaller visible
+  frames. Prefer flexible preview/work areas with
+  `.frame(maxWidth: .infinity, maxHeight: .infinity)` so the usable surface grows
+  when the window is large.
+- Before finishing any new standalone window or significant window restyle,
+  launch the rebuilt app, open the actual window, and inspect a real screenshot.
+  Verify the header icon/title are fully visible below the macOS title bar, top
+  commands are visible, controls are not clipped, and the preview/work area is
+  using the available space. Do not rely only on compilation.
 - The OCR editor content uses `HSplitView`: the Markdown editor is the left
   pane and OCR controls/PDF preview are the right pane. Preserve this split-pane layout
   when making UI-only changes so the user can resize text vs. controls.
