@@ -491,6 +491,74 @@ This keeps image detection in the OCR workflow, where NewOCR has rendered page
 pixels and Apple Vision text boxes available. Codex Review should not detect or
 extract images.
 
+## OCR Blockquote Detection
+
+NewOCR detects conservative display-quote pages during OCR and writes them as
+Markdown blockquotes. This is intended for pages like a centered quote card, not
+for ordinary body pages.
+
+Conditions for automatic display-quote blockquote output:
+
+- the page has no detected image regions
+- the page has 2 to 8 meaningful OCR text lines after page-number lines are
+  ignored
+- the combined text block is narrow, at most about 76% of the page width
+- the combined text block is not tall, at most about 34% of the page height
+- the combined text block is centered horizontally and vertically in the page's
+  readable middle zone
+- at least about 70% of the lines are centered near the page center
+- at least about 70% of the lines are individually narrow
+- the page has either at least 3 quote lines or an author attribution line
+  detected by a leading dash/emdash/en dash or mostly Latin-letter author text
+
+When these conditions match, NewOCR preserves line breaks and writes:
+
+```md
+> Quote line 1
+> Quote line 2
+>
+> — Author
+```
+
+This detector is intentionally narrow. Inline paragraph-level blockquotes on
+normal text pages should still be handled by later OCR layout work or manual
+editing.
+
+NewOCR also detects conservative opening epigraph blocks on normal chapter
+pages. This is intended for pages where a chapter number/title is followed by a
+short centered quote or setup text before the first normal body paragraph.
+
+Conditions for automatic opening-epigraph blockquote output:
+
+- the page starts with a detected chapter number and/or heading
+- the first heading line may be moderately wide when it is centered near the top,
+  because Thai chapter titles can be wider than short English headings
+- immediately below the heading, there are 2 to 5 candidate quote lines
+- each candidate line is centered near the page/body center
+- each candidate line is narrower than the normal body text lane
+- each candidate line is inset from the normal body text left/right edges
+- there is a visible vertical gap before the quote block and another visible
+  vertical gap after it
+- the line after the quote block looks like normal body text, meaning it is
+  wider or begins near the normal body text left edge
+
+When these conditions match, NewOCR preserves the epigraph line breaks and
+writes:
+
+```md
+## Chapter Title
+
+> Epigraph line 1
+> Epigraph line 2
+> Epigraph line 3
+
+First normal body paragraph...
+```
+
+Page-boundary paragraph merging must not merge Markdown blockquotes with normal
+body text. If either side of a possible page-boundary merge starts with `>`,
+NewOCR keeps the paragraphs separate.
+
 ### User-Added Images
 
 In the OCR paragraph editor, **Actions** supports **Add Image Before** and

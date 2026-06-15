@@ -5717,6 +5717,10 @@ final class AppState: ObservableObject {
     }
 
     private func buildMarkdownPage(from lines: [OCRLine], imageRegions: [OCRImageRegion]) -> String {
+        if imageRegions.isEmpty, isDisplayQuotePage(lines) {
+            return buildDisplayQuoteMarkdown(from: lines)
+        }
+
         if imageRegions.isEmpty {
             return buildContinuousParagraphs(from: lines)
         }
@@ -5752,6 +5756,82 @@ final class AppState: ObservableObject {
         flushText()
 
         return rendered.joined(separator: "\n\n")
+    }
+
+    private func isDisplayQuotePage(_ lines: [OCRLine]) -> Bool {
+        let meaningfulLines = lines.filter {
+            let text = $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.count >= 2 && !isPageNumberLine(text)
+        }
+        guard (2...8).contains(meaningfulLines.count) else {
+            return false
+        }
+
+        let minLeft = meaningfulLines.map(\.left).min() ?? 0
+        let maxRight = meaningfulLines.map(\.right).max() ?? 1
+        let blockWidth = maxRight - minLeft
+        let minBottom = meaningfulLines.map(\.bottom).min() ?? 0
+        let maxTop = meaningfulLines.map(\.top).max() ?? 1
+        let blockHeight = maxTop - minBottom
+        let blockCenterX = (minLeft + maxRight) / 2
+        let blockCenterY = (minBottom + maxTop) / 2
+        let centeredLineCount = meaningfulLines.filter { abs($0.centerX - 0.5) <= 0.11 }.count
+        let narrowLineCount = meaningfulLines.filter { $0.width <= 0.72 }.count
+        let hasAuthorAttribution = meaningfulLines.contains { isQuoteAttributionLine($0.text) }
+        let hasMultiLineQuote = meaningfulLines.count >= 3
+
+        return blockWidth <= 0.76
+            && blockHeight <= 0.34
+            && blockCenterX >= 0.38
+            && blockCenterX <= 0.62
+            && blockCenterY >= 0.28
+            && blockCenterY <= 0.72
+            && Double(centeredLineCount) / Double(meaningfulLines.count) >= 0.70
+            && Double(narrowLineCount) / Double(meaningfulLines.count) >= 0.70
+            && (hasAuthorAttribution || hasMultiLineQuote)
+    }
+
+    private func buildDisplayQuoteMarkdown(from lines: [OCRLine]) -> String {
+        let meaningfulLines = lines
+            .filter {
+                let text = $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return text.count >= 2 && !isPageNumberLine(text)
+            }
+            .sorted {
+                if abs($0.top - $1.top) > 0.01 {
+                    return $0.top > $1.top
+                }
+                return $0.left < $1.left
+            }
+
+        var rendered: [String] = []
+        for (index, line) in meaningfulLines.enumerated() {
+            let text = normalizedDisplayQuoteLine(line.text)
+            if index > 0, isQuoteAttributionLine(text), rendered.last != ">" {
+                rendered.append(">")
+            }
+            rendered.append("> \(text)")
+        }
+        return rendered.joined(separator: "\n")
+    }
+
+    private func normalizedDisplayQuoteLine(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isQuoteAttributionLine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else { return false }
+        if trimmed.hasPrefix("-") || trimmed.hasPrefix("—") || trimmed.hasPrefix("–") {
+            return true
+        }
+        let latinCount = trimmed.unicodeScalars.filter {
+            CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz").contains($0)
+        }.count
+        let letterCount = trimmed.unicodeScalars.filter {
+            CharacterSet.letters.contains($0)
+        }.count
+        return latinCount >= 3 && letterCount > 0 && Double(latinCount) / Double(letterCount) >= 0.70
     }
 
     private func normalizedOverlapArea(_ line: OCRLine, _ imageRegion: OCRImageRegion) -> CGFloat {
@@ -5828,7 +5908,8 @@ final class AppState: ObservableObject {
         let current = current.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !previous.isEmpty, !current.isEmpty else { return false }
         guard !previous.hasPrefix("#"), !previous.hasPrefix("!["),
-              !current.hasPrefix("#"), !current.hasPrefix("![") else {
+              !previous.hasPrefix(">"),
+              !current.hasPrefix("#"), !current.hasPrefix("!["), !current.hasPrefix(">") else {
             return false
         }
         return true
@@ -5899,8 +5980,29 @@ final class AppState: ObservableObject {
         var current = ""
         var previousLine: OCRLine?
         var centeredBodyMode = false
+        let openingEpigraphRange = openingEpigraphRange(
+            in: lines,
+            normalLeft: normalLeft,
+            normalRight: normalRight,
+            normalWidth: normalWidth,
+            blockCenter: blockCenter,
+            averageHeight: averageHeight
+        )
 
         for (index, line) in lines.enumerated() {
+            if let openingEpigraphRange, openingEpigraphRange.contains(index) {
+                if index == openingEpigraphRange.lowerBound {
+                    if !current.isEmpty {
+                        paragraphs.append(current)
+                        current = ""
+                    }
+                    paragraphs.append(buildBlockquoteMarkdown(from: Array(lines[openingEpigraphRange])))
+                    previousLine = nil
+                    centeredBodyMode = false
+                }
+                continue
+            }
+
             if isHeadingLine(
                 line,
                 index: index,
@@ -5973,6 +6075,101 @@ final class AppState: ObservableObject {
         }
 
         return paragraphs.joined(separator: "\n\n")
+    }
+
+    private func openingEpigraphRange(
+        in lines: [OCRLine],
+        normalLeft: CGFloat,
+        normalRight: CGFloat,
+        normalWidth: CGFloat,
+        blockCenter: CGFloat,
+        averageHeight: CGFloat
+    ) -> Range<Int>? {
+        guard lines.count >= 5, normalWidth > 0 else {
+            return nil
+        }
+
+        var start = 0
+        while start < min(4, lines.count) {
+            let line = lines[start]
+            if isChapterNumberHeadingLine(
+                line,
+                index: start,
+                lines: lines,
+                normalWidth: normalWidth,
+                blockCenter: blockCenter,
+                averageHeight: averageHeight
+            ) || isHeadingLine(
+                line,
+                index: start,
+                lines: lines,
+                normalWidth: normalWidth,
+                blockCenter: blockCenter,
+                averageHeight: averageHeight
+            ) {
+                start += 1
+            } else {
+                break
+            }
+        }
+
+        guard start > 0, start < lines.count - 2 else {
+            return nil
+        }
+
+        var end = start
+        while end < min(lines.count, start + 5), isOpeningEpigraphLine(lines[end], normalLeft: normalLeft, normalRight: normalRight, normalWidth: normalWidth, blockCenter: blockCenter) {
+            end += 1
+        }
+
+        let count = end - start
+        guard (2...5).contains(count), end < lines.count else {
+            return nil
+        }
+
+        let previousLine = lines[start - 1]
+        let firstQuoteLine = lines[start]
+        let lastQuoteLine = lines[end - 1]
+        let nextBodyLine = lines[end]
+        let gapBefore = previousLine.bottom - firstQuoteLine.top
+        let gapAfter = lastQuoteLine.bottom - nextBodyLine.top
+        let separatedBefore = gapBefore >= max(averageHeight * 1.15, 0.022)
+        let separatedAfter = gapAfter >= max(averageHeight * 1.15, 0.022)
+        let nextLooksLikeBody = !isOpeningEpigraphLine(nextBodyLine, normalLeft: normalLeft, normalRight: normalRight, normalWidth: normalWidth, blockCenter: blockCenter)
+            && (nextBodyLine.width >= normalWidth * 0.72 || nextBodyLine.left <= normalLeft + max(0.05, normalWidth * 0.12))
+
+        guard separatedBefore, separatedAfter, nextLooksLikeBody else {
+            return nil
+        }
+
+        return start..<end
+    }
+
+    private func isOpeningEpigraphLine(
+        _ line: OCRLine,
+        normalLeft: CGFloat,
+        normalRight: CGFloat,
+        normalWidth: CGFloat,
+        blockCenter: CGFloat
+    ) -> Bool {
+        let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 2, !isPageNumberLine(text) else {
+            return false
+        }
+
+        let centerThreshold = max(0.055, normalWidth * 0.14)
+        let centered = abs(line.centerX - 0.5) <= 0.12 || abs(line.centerX - blockCenter) <= centerThreshold
+        let narrow = line.width <= normalWidth * 0.82
+        let insetFromBody = line.left >= normalLeft + max(0.035, normalWidth * 0.08)
+            && line.right <= normalRight - max(0.025, normalWidth * 0.05)
+        return centered && narrow && insetFromBody
+    }
+
+    private func buildBlockquoteMarkdown(from lines: [OCRLine]) -> String {
+        lines.map {
+            "> \($0.text.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+        .joined(separator: "\n")
     }
 
     private func hasDetectedBlankLineGap(between previousLine: OCRLine, and currentLine: OCRLine, averageHeight: CGFloat) -> Bool {
@@ -6063,7 +6260,8 @@ final class AppState: ObservableObject {
         }
 
         let isNearTop = line.centerX.isFinite && line.bottom >= 0.42
-        let isShort = line.width <= normalWidth * 0.65
+        let headingWidthLimit = index == 0 ? normalWidth * 0.74 : normalWidth * 0.65
+        let isShort = line.width <= headingWidthLimit
         let isCentered = abs(line.centerX - blockCenter) <= max(0.04, normalWidth * 0.12)
         let nextLine = lines.indices.contains(index + 1) ? lines[index + 1] : nil
         let previousLine = lines.indices.contains(index - 1) ? lines[index - 1] : nil
