@@ -577,14 +577,23 @@ UI notes:
   `NSHostingView.sizingOptions = []`, open with `window.setFrame(visibleFrame,
   display: true)`, root view top padding `120`, horizontal padding `22`, bottom
   padding `22`, and root minimum frame `1040x760`.
-- Keep the controls from being cut off: the Section picker and saved-rule count
-  live on one row, Page and Scope live on a second row, and the layout-type
-  buttons use an adaptive wrapping grid. Do not collapse these back into one
-  fixed-width horizontal command row.
+- Use a split working layout. The left panel is the section file list, about
+  `300` points wide, with large clickable rows (`minHeight: 68`) for selecting
+  the active section PDF. Do not use a compact Section dropdown for this window.
+  The right side gets the remaining width and contains Page/Scope controls,
+  layout-type buttons, status, and the expanding PDF preview.
+- Keep the controls from being cut off: Page and Scope live on the first control
+  row, and the layout-type buttons use an adaptive wrapping grid. Do not
+  collapse these back into one fixed-width horizontal command row.
+- Do not use the native AppKit segmented picker for Scope on this dark surface;
+  its text can inherit dark colors and become unreadable. Use the custom
+  SwiftUI segmented control style with explicit light text and a clear selected
+  background.
 - Advanced JSON, Clear Rules, Save Area, and Close are top-header
   `OCRIconButton` commands, matching Crop/Split-style windows. Do not move
   primary commands to a bottom footer where an expanding preview can push them
-  off-screen.
+  off-screen. Put the saved-rule count in this top header immediately before
+  the command buttons, using large readable header text.
 
 ### User-Added Images
 
@@ -1357,6 +1366,12 @@ Key notes:
   preview cannot push them off-screen. Destructive commands use red with white
   icons, Save/confirm uses green with black icons, close uses red with white X,
   and secondary/advanced commands can use the existing pastel pink treatment.
+- For windows that operate across many section PDFs, prefer a left navigation
+  panel over a dropdown. Use a narrow fixed-width list (`~280-320` points) with
+  rows large enough to click comfortably (`~64-72` points high), then place the
+  actual editing/preview surface in a flexible right pane. Keep summary text
+  such as "`0 saved`" in the header command row, before the icon buttons, so it
+  stays visible while the preview area grows.
 - Do not put too many fixed-width controls in one horizontal command row. If a
   tool has several controls, split them into multiple rows or use an adaptive
   `LazyVGrid`/wrapping toolbar so controls never get cut off on smaller visible

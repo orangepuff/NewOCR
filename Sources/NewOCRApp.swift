@@ -222,12 +222,16 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var selectionRect: CGRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
     @Published var status: String = ""
     @Published var savedRuleCount: Int = 0
+    private var pdfPageCounts: [String: Int] = [:]
 
     init(pdfItems: [PDFFileItem], initialPDF: PDFFileItem, initialPage: Int = 1) {
         self.pdfItems = pdfItems
+        pdfPageCounts = Dictionary(uniqueKeysWithValues: pdfItems.map { item in
+            (item.url.path, max(PDFDocument(url: item.url)?.pageCount ?? 1, 1))
+        })
         selectedPDFPath = initialPDF.url.path
         selectedPage = max(initialPage, 1)
-        pageCount = max(PDFDocument(url: initialPDF.url)?.pageCount ?? 1, 1)
+        pageCount = pdfPageCounts[initialPDF.url.path] ?? 1
         selectedPage = min(selectedPage, pageCount)
     }
 
@@ -237,6 +241,10 @@ final class LayoutAreaEditorState: ObservableObject {
 
     var selectedPDFName: String {
         selectedPDFURL?.lastPathComponent ?? "No PDF"
+    }
+
+    var selectedPDFItem: PDFFileItem? {
+        pdfItems.first { $0.url.path == selectedPDFPath }
     }
 
     func selectPDFPath(_ path: String) {
@@ -250,8 +258,17 @@ final class LayoutAreaEditorState: ObservableObject {
             selectedPage = 1
             return
         }
-        pageCount = max(PDFDocument(url: url)?.pageCount ?? 1, 1)
+        if let cachedPageCount = pdfPageCounts[url.path] {
+            pageCount = cachedPageCount
+        } else {
+            pageCount = max(PDFDocument(url: url)?.pageCount ?? 1, 1)
+            pdfPageCounts[url.path] = pageCount
+        }
         selectedPage = min(max(selectedPage, 1), pageCount)
+    }
+
+    func pageCount(for item: PDFFileItem) -> Int {
+        pdfPageCounts[item.url.path] ?? 1
     }
 
     var normalizedOCRRect: OCRLayoutAreaRect {
@@ -11451,9 +11468,17 @@ struct LayoutAreaEditorWindowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
-            controls
-            statusBar
-            preview
+            HStack(alignment: .top, spacing: 16) {
+                sectionList
+
+                VStack(alignment: .leading, spacing: 16) {
+                    controls
+                    statusBar
+                    preview
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .padding(.top, 120)
@@ -11491,6 +11516,12 @@ struct LayoutAreaEditorWindowView: View {
             }
 
             Spacer()
+
+            Text("\(state.savedRuleCount) saved")
+                .font(.system(size: 18, weight: .semibold).monospacedDigit())
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+                .lineLimit(1)
+                .frame(minWidth: 96, alignment: .trailing)
 
             OCRIconButton(
                 title: "Advanced JSON",
@@ -11535,6 +11566,54 @@ struct LayoutAreaEditorWindowView: View {
         }
     }
 
+    private var sectionList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.orange)
+                Text("Sections")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Spacer()
+                Text("\(state.pdfItems.count)")
+                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+            }
+
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(state.pdfItems) { item in
+                        LayoutAreaSectionRow(
+                            item: item,
+                            isSelected: item.url.path == state.selectedPDFPath,
+                            pageCount: state.pageCount(for: item)
+                        ) {
+                            state.selectPDFPath(item.url.path)
+                        }
+                    }
+                }
+                .padding(8)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+        }
+        .padding(12)
+        .frame(width: 300)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+
     private var statusBar: some View {
         HStack {
             Text(state.status.isEmpty ? "Draw an area, choose the type, then save it." : state.status)
@@ -11557,25 +11636,6 @@ struct LayoutAreaEditorWindowView: View {
     private var controls: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 14) {
-                Picker("Section", selection: Binding(
-                    get: { state.selectedPDFPath },
-                    set: { state.selectPDFPath($0) }
-                )) {
-                    ForEach(state.pdfItems) { item in
-                        Text(item.fileName).tag(item.url.path)
-                    }
-                }
-                .controlSize(.large)
-                .font(.system(size: 16, weight: .semibold))
-                .frame(minWidth: 280, maxWidth: .infinity)
-
-                Text("\(state.savedRuleCount) saved")
-                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    .frame(minWidth: 82, alignment: .trailing)
-            }
-
-            HStack(spacing: 14) {
                 Text("Page")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(NewOCRMainPalette.primaryText)
@@ -11592,14 +11652,14 @@ struct LayoutAreaEditorWindowView: View {
 
                 Spacer(minLength: 12)
 
-                Picker("Scope", selection: $state.selectedScope) {
-                    Text("All Sections").tag("all_sections")
-                    Text("This Section").tag("section")
+                HStack(spacing: 8) {
+                    Text("Scope")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+
+                    LayoutAreaScopePicker(selection: $state.selectedScope)
+                        .frame(width: 300)
                 }
-                .pickerStyle(.segmented)
-                .controlSize(.large)
-                .font(.system(size: 15, weight: .semibold))
-                .frame(width: 300)
             }
 
             LazyVGrid(
@@ -11737,6 +11797,114 @@ private struct LayoutAreaTypeButton: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct LayoutAreaScopePicker: View {
+    @Binding var selection: String
+    private let options = [
+        ("all_sections", "All Sections"),
+        ("section", "This Section")
+    ]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(options, id: \.0) { option in
+                Button {
+                    selection = option.0
+                } label: {
+                    Text(option.1)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(selection == option.0 ? Color.white : NewOCRMainPalette.primaryText)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .padding(.horizontal, 12)
+                        .background(segmentBackground(for: option.0))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .background(NewOCRMainPalette.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+
+    private func segmentBackground(for id: String) -> Color {
+        selection == id
+            ? Color(red: 30/255, green: 139/255, blue: 238/255)
+            : NewOCRMainPalette.rowBackground.opacity(0.65)
+    }
+}
+
+private struct LayoutAreaSectionRow: View {
+    let item: PDFFileItem
+    let isSelected: Bool
+    let pageCount: Int
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .frame(width: 28)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.url.deletingPathExtension().lastPathComponent)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(pageCount > 0 ? "\(pageCount) pages" : item.fileName)
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+            .background(rowBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.stroke, lineWidth: isSelected ? 2 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+    }
+
+    private var rowBackground: Color {
+        if isSelected {
+            return Color(red: 30/255, green: 139/255, blue: 238/255).opacity(0.30)
+        }
+        if isHovered {
+            return NewOCRMainPalette.rowBackground
+        }
+        return NewOCRMainPalette.panelBackground
     }
 }
 
