@@ -283,6 +283,13 @@ Detect Split:
   Editing From should immediately refresh that row's preview thumbnail. Editable
   fields should use the same white, black-text, yellow-tint text-field style as
   Add Split fields, with a narrower text column so the preview stays prominent.
+- Detect Split checkboxes use the same large icon-button checkbox style as the
+  main Section List so they are easy to see and click. Selected checkboxes and
+  selected row borders use blue. The header includes icon-only **Select All**
+  and **Unselect All** buttons for checking or clearing every detected range.
+- The first detected range's Title field should not appear focused/highlighted
+  when the Detect Split popup opens; clear the initial first responder after
+  layout when this issue appears in new editable popup/list surfaces.
 - **Split** creates checked ranges in batch as sequential `section-###.pdf`
   files and closes the Add Split window.
 - **Close** only closes the Detect Split popup.
@@ -985,6 +992,10 @@ Width values may be numeric or `FULL` for full-screen opening.
 - The first Section List title field should not appear focused/highlighted when
   the main window opens. The main window clears the initial first responder
   after layout; users can still click any title field to edit normally.
+- Any new editable list or popup with text fields should avoid opening with the
+  first field visibly focused/highlighted. If this appears during testing, clear
+  the initial first responder after layout while preserving normal click-to-edit
+  behavior.
 - Section List utility buttons should match the rectangular action-button style:
   remove uses a red rounded rectangle with a white X, add uses a green rounded
   rectangle with a dark plus, and both use the same approximate button size as

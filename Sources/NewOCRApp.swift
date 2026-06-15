@@ -5719,6 +5719,28 @@ struct ContentView: View {
     }
 }
 
+private struct ClearInitialFirstResponderView: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        guard !context.coordinator.didClear else { return }
+        context.coordinator.didClear = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            nsView.window?.makeFirstResponder(nil)
+        }
+    }
+
+    final class Coordinator {
+        var didClear = false
+    }
+}
+
 struct NewOCRButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         NewOCRButtonStyleBody(configuration: configuration)
@@ -5857,31 +5879,33 @@ private struct SectionIconButton: View {
     }
 }
 
-private struct SectionReadyCheckboxButton: View {
-    @Binding var isReady: Bool
+private struct NewOCRLargeCheckboxButton: View {
+    let title: String
+    @Binding var isChecked: Bool
+    var checkedColor: Color = Color(red: 53/255, green: 200/255, blue: 90/255)
     @State private var isHovered = false
 
     var body: some View {
         Button {
-            isReady.toggle()
+            isChecked.toggle()
         } label: {
-            Image(systemName: isReady ? "checkmark.square.fill" : "square")
+            Image(systemName: isChecked ? "checkmark.square.fill" : "square")
                 .font(.system(size: 23, weight: .semibold))
-                .foregroundStyle(isReady ? Color(red: 53/255, green: 200/255, blue: 90/255) : Color.white.opacity(0.88))
+                .foregroundStyle(isChecked ? checkedColor : Color.white.opacity(0.88))
                 .frame(width: 46, height: 36)
                 .background(isHovered ? Color.white.opacity(0.16) : Color.white.opacity(0.10))
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(isReady ? Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.72) : NewOCRMainPalette.stroke, lineWidth: 1)
+                        .stroke(isChecked ? checkedColor.opacity(0.72) : NewOCRMainPalette.stroke, lineWidth: 1)
                 )
                 .shadow(color: Color.black.opacity(isHovered ? 0.13 : 0.06), radius: isHovered ? 6 : 3, x: 0, y: isHovered ? 2 : 1)
         }
         .buttonStyle(.plain)
         .frame(width: 46, height: 36)
         .contentShape(Rectangle())
-        .accessibilityLabel(isReady ? "Ready for EPUB" : "Not ready for EPUB")
-        .help("Ready for EPUB")
+        .accessibilityLabel(title)
+        .help(title)
         .onHover { hovering in
             isHovered = hovering
             if hovering {
@@ -5896,6 +5920,19 @@ private struct SectionReadyCheckboxButton: View {
                 isHovered = false
             }
         }
+    }
+}
+
+private let detectSplitSelectionBlue = Color(red: 72/255, green: 168/255, blue: 255/255)
+
+private struct SectionReadyCheckboxButton: View {
+    @Binding var isReady: Bool
+
+    var body: some View {
+        NewOCRLargeCheckboxButton(
+            title: isReady ? "Ready for EPUB" : "Not ready for EPUB",
+            isChecked: $isReady
+        )
     }
 }
 
@@ -10515,6 +10552,14 @@ struct DetectSplitWindowView: View {
         ranges.filter { selectedIDs.contains($0.id) }.count
     }
 
+    private var hasUnselectedRanges: Bool {
+        selectedCount < ranges.count
+    }
+
+    private var hasSelectedRanges: Bool {
+        selectedCount > 0
+    }
+
     private var statusFont: Font {
         .system(size: 15, weight: .semibold)
     }
@@ -10542,6 +10587,28 @@ struct DetectSplitWindowView: View {
                 }
 
                 Spacer()
+
+                OCRIconButton(
+                    title: "Select All",
+                    systemImage: "checkmark.square.fill",
+                    backgroundColor: detectSplitSelectionBlue,
+                    foregroundColor: .white,
+                    size: 38
+                ) {
+                    selectedIDs = Set(ranges.map(\.id))
+                }
+                .disabled(ranges.isEmpty || !hasUnselectedRanges)
+
+                OCRIconButton(
+                    title: "Unselect All",
+                    systemImage: "square",
+                    backgroundColor: detectSplitSelectionBlue,
+                    foregroundColor: .white,
+                    size: 38
+                ) {
+                    selectedIDs.removeAll()
+                }
+                .disabled(ranges.isEmpty || !hasSelectedRanges)
 
                 OCRIconButton(title: "Split", systemImage: "scissors", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255), size: 38) {
                     splitAction()
@@ -10611,6 +10678,7 @@ struct DetectSplitWindowView: View {
         .frame(width: 1240)
         .frame(minHeight: 680)
         .background(NewOCRMainPalette.windowBackground)
+        .background(ClearInitialFirstResponderView())
         .buttonStyle(NewOCRButtonStyle())
     }
 }
@@ -10622,9 +10690,11 @@ private struct DetectSplitRangeRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Toggle("", isOn: $isSelected)
-                .labelsHidden()
-                .toggleStyle(.checkbox)
+            NewOCRLargeCheckboxButton(
+                title: isSelected ? "Selected for split" : "Not selected for split",
+                isChecked: $isSelected,
+                checkedColor: detectSplitSelectionBlue
+            )
 
             if let thumbnail {
                 Image(nsImage: thumbnail)
@@ -10678,7 +10748,7 @@ private struct DetectSplitRangeRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isSelected ? Color(red: 255/255, green: 182/255, blue: 216/255) : NewOCRMainPalette.stroke, lineWidth: 1)
+                .stroke(isSelected ? detectSplitSelectionBlue : NewOCRMainPalette.stroke, lineWidth: 1)
         )
     }
 }
