@@ -18,6 +18,16 @@ OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
 OCR_TITLE_MATCH_TOP_LINES=3
 # Preview-only text scale percent. This does not affect EPUB output.
 PREVIEW_TEXT_SCALE_PERCENT=170
+# Codex executable used by Edit PDF > Finalize with Codex.
+CODEX_EXECUTABLE_PATH=/Applications/Codex.app/Contents/Resources/codex
+# Prompt file used by Edit PDF > Finalize with Codex.
+CODEX_FINALIZE_PROMPT_FILE=codex-finalize-prompt.txt
+# Maximum number of Markdown sections NewOCR can edit in one Codex run.
+CODEX_FINALIZE_MAX_SECTIONS=5
+# Model used by Finalize with Codex. Leave blank to use whatever model is set in
+# ~/.codex/config.toml. Set a value only if your account and provider support it,
+# e.g. CODEX_FINALIZE_MODEL=gpt-4o (API key accounts) or CODEX_FINALIZE_MODEL=o4-mini.
+CODEX_FINALIZE_MODEL=gpt-5.4-mini
 
 # New projects made from the New button are created here.
 NEW_PROJECTS_FOLDER=~/Downloads

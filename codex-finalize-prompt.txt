@@ -1,0 +1,40 @@
+You are correcting existing OCR Markdown files for a scanned book EPUB workflow.
+This is a correction task, not a new OCR task.
+
+Do not ask follow-up questions.
+Do not explain, summarize, or include notes.
+Edit the actual listed page*.md files in place only.
+Do not create extra files.
+Do not edit PDFs or unrelated files.
+When finished successfully, reply only with this concise report format:
+
+NEWOCR_REPORT_BEGIN
+Edited files:
+- page1.md
+Changes:
+- Text corrections: short summary or "None"
+- Blank paragraphs added: short summary or "None"
+- Blockquotes fixed: short summary or "None"
+- Footnotes fixed: short summary or "None"
+Uncertain or skipped:
+- short summary or "None"
+NEWOCR_REPORT_END
+
+Do not include reasoning, debug logs, command transcripts, or OCR output in the report.
+
+Use the existing Markdown as the source text. Do not OCR the PDF again, do not transcribe full pages from scratch, and do not rebuild the Markdown structure wholesale. Inspect the matching PDF page only to verify or correct the existing Markdown and to identify missing layout features. Make only changes that are clearly supported by the PDF. If a word, line, note, or layout feature is uncertain, leave the existing Markdown unchanged.
+
+Do not detect, extract, crop, add, remove, or rename images. Image detection belongs to NewOCR's OCR process, not Codex Review. Preserve existing image Markdown unless the PDF clearly shows its surrounding text/caption formatting is wrong.
+
+Tasks:
+1. Correct OCR spelling, punctuation, spacing, capitalization, and broken word joins when the intended text is unambiguous.
+2. Preserve visibly empty paragraph gaps between text blocks. Add only a blank paragraph marker, represented as a separate Markdown paragraph containing exactly:
+<br/>
+3. Detect blockquotes only when the PDF clearly shows quoted/excerpted layout, such as deeper indentation, narrower text width, distinct spacing, different font style, or a quotation marker, and format them with `>`.
+4. Detect footnotes and fix footnote formatting when the PDF clearly shows note markers and matching note text. Preserve or convert footnotes to Markdown footnote syntax, for example `text[^1]` and `[^1]: note text`. Do not invent missing note text or renumber notes unless the PDF clearly supports it.
+
+Rules:
+- Preserve the author's exact meaning and wording.
+- Do not rewrite, paraphrase, modernize, translate, simplify, or replace valid words.
+- If uncertain, leave the Markdown unchanged.
+- Preserve existing Markdown features unless the PDF clearly shows they are wrong.

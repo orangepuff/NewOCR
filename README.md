@@ -167,6 +167,8 @@ Important actions:
 - **Crop**: open the crop window for the working PDF.
 - **Revert Original**: restore from `_original.pdf` and clear generated output.
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
+- **Codex Review**: run local Codex on selected sections to edit their
+  existing page Markdown files in place.
 - **Build EPUB**: create EPUB from available section/manual Markdown.
 - **Process OCR All**: OCR existing section PDF files that are not checked
   **Ready for EPUB**.
@@ -463,21 +465,31 @@ image references such as:
 Important fix/behavior:
 
 - OCR text is priority.
-- If Apple Vision recognizes meaningful text on a page, NewOCR must not emit any
-  OCR-detected image Markdown for that page.
-- Image-region detection should run only for pages where no meaningful OCR text
-  is detected.
+- Image-region detection runs during OCR on rendered PDF pages, including pages
+  that also contain recognized text.
+- NewOCR masks Apple Vision text boxes before looking for non-text visual
+  regions, so detected OCR text is not treated as an image candidate.
+- After candidate visual regions are found, NewOCR merges nearby fragments in
+  the same visual band and stacked fragments that belong to one diagram, then
+  expands the crop to include OCR text boxes embedded inside or very near the
+  figure. It re-merges after expansion and pads the final crop, so route maps,
+  charts, or train-line diagrams are less likely to be saved as partial images.
+  This keeps diagram labels inside the saved image instead of leaving them as
+  separate OCR text.
+- OCR text that overlaps a final image region is removed from the page Markdown,
+  so text inside a detected image is not duplicated as normal OCR text.
 - A full-page scanned text page must not be replaced by a full-page image.
-- Real smaller images, figures, diagrams, and illustrations are extracted only
-  on pages without meaningful OCR text. Users can still add images manually from
-  the OCR editor when a text page also needs an image.
+- Real smaller images, figures, diagrams, and illustrations can be extracted
+  from pages with or without meaningful OCR text. Users can still add or remove
+  images manually from the OCR editor when automatic detection is imperfect.
 - Process OCR should detect a large vertical gap between OCR text lines as a
   blank-line paragraph break. The surrounding text paragraphs stay unchanged,
   and NewOCR inserts a separate `<br/>` paragraph between them so the visible
   blank row is preserved.
 
-This prevents pages or paragraphs from becoming image-only Markdown when text
-OCR succeeded.
+This keeps image detection in the OCR workflow, where NewOCR has rendered page
+pixels and Apple Vision text boxes available. Codex Review should not detect or
+extract images.
 
 ### User-Added Images
 
@@ -539,14 +551,20 @@ This should only remove top/bottom lines that match the entered filter text.
 When the working folder changes, filtered text should be cleared so a filter
 from one book does not affect another book.
 
-During OCR, NewOCR also checks the first configured OCR lines on each page
-against the section title. `OCR_TITLE_MATCH_TOP_LINES=3` means the first three
-OCR text lines are checked. If a top line matches the title words in order, for
-example section title `Do my best` matching OCR text like `Do 01 my best`, that
-line is removed before Markdown is created. If OCR splits the title across
-multiple top lines, such as one line containing `28 ความสำเร็จที่` and the next
-line containing `ไร้ความหมายที่สุด`, NewOCR matches the combined top lines and
-removes all title lines that formed the match.
+During OCR, NewOCR also checks the first configured OCR lines on the first page
+only against the section title. `OCR_TITLE_MATCH_TOP_LINES=3` means the first
+three OCR text lines on page 1 are checked. If a top line matches the title
+words in order, for example section title `Do my best` matching OCR text like
+`Do 01 my best`, that line is removed before Markdown is created. If OCR splits
+the title across multiple top lines on page 1, such as one line containing
+`28 ความสำเร็จที่` and the next line containing `ไร้ความหมายที่สุด`, NewOCR
+matches the combined top lines and removes all title lines that formed the
+match.
+
+Title removal must be length-aware: remove only close title/header matches, not
+a normal body sentence that merely contains the section title. For example, a
+first body line beginning with `สถานีทาคาระซึกะมินามิงุจิเป็น...` must stay in
+Markdown even though the section title is `สถานีทาคาระซึกะมินามิงุจิ`.
 
 ### Scan Header
 
@@ -808,6 +826,169 @@ scale is applied to a preview-only content wrapper inside `preview.html`, on top
 of the project stylesheet; EPUB output must not inherit this preview-only font
 size.
 
+## Codex Review
+
+**Edit PDF > Codex Review** opens a dark NewOCR-styled auxiliary window
+for local Codex Markdown correction. This workflow does not use Safari or manual
+file uploads. It runs `codex exec` against the current project folder and edits
+the selected section's existing `page*.md` files in place. It is a correction
+workflow, not a second OCR pass: Codex should use the existing Markdown as the
+source text and inspect the PDF only to verify text corrections, blank paragraph
+gaps, blockquotes, and footnotes. Image detection belongs to the OCR process,
+not Codex Review.
+
+### Window Controls
+
+- show each section/manual section with all existing Markdown page files from
+  its Markdown folder, usually `AppleVision/MD/<section>/page*.md`
+- show a large checkbox for each section; selecting a section includes all of
+  that section's page Markdown files
+- allow selecting more than one section, capped by `CODEX_FINALIZE_MAX_SECTIONS`
+  from `config.txt` (default `5`)
+- provide an **Open PDF** icon button for each section
+- provide a **Preview** icon button for each Markdown file
+- provide a **Show Files** icon button that reveals the Markdown file and
+  matching section PDF in Finder
+- provide a **Codex Instruction** icon button that opens the configured prompt
+  file from `CODEX_FINALIZE_PROMPT_FILE`; this editor hides the prompt file
+  path in the header, uses an icon-only Save button, opens as a separate
+  retained auxiliary window, and must not close the Codex Review window
+- provide an **Info (i)** icon button that opens the Codex Log window at any
+  time, including after a run has finished
+- provide a **Run Codex** icon button that runs local Codex on the selected
+  sections; clicking Run also opens the Codex Log window automatically
+
+### Codex Log Window
+
+The Codex Log window shows real-time output streamed from the `codex exec`
+process. It opens automatically when Run Codex is clicked and can also be
+opened at any time with the Info button in the Codex Review header.
+
+The log header shows:
+
+```text
+Starting Codex on N section(s)...
+Executable: /Applications/Codex.app/Contents/Resources/codex
+Model: gpt-5.5  (or the value of CODEX_FINALIZE_MODEL)
+Project: /path/to/project
+```
+
+The log scrolls automatically as output arrives. A spinner appears while Codex
+is running. A `--- Done ---` or `--- Error ---` footer is appended when the
+process exits, then the log is saved automatically. The log is the verbose
+debug/investigation artifact, not the normal user-facing result.
+
+On a successful run, Codex returns a concise `NEWOCR_REPORT_BEGIN` /
+`NEWOCR_REPORT_END` report block. NewOCR extracts only that report text and
+shows it to the user in a **Codex Review Finished** dialog. The report should
+summarize edited files, text corrections, blank paragraphs, blockquotes,
+footnotes, and uncertain/skipped items without including debug logs or command
+output.
+
+When the run finishes, NewOCR automatically writes the current log text to:
+
+```text
+AppleVision/codex-review-log.txt
+```
+
+inside the active project folder.
+
+**Download Log** (blue download button) — reveals the automatically saved log
+file in Finder. Enabled only after the current run has finished and the log has
+been saved.
+
+Each time Run Codex starts, any existing `codex-review-log.txt` is deleted and
+`savedLogURL` is cleared so the Download Log button resets. This keeps the
+project folder from accumulating old log files. Only one Codex Review log is
+kept for the current process. To keep a particular log, copy or rename the file
+before running Codex again.
+
+### Codex Exec Command
+
+NewOCR launches Codex as:
+
+```sh
+codex exec \
+  --skip-git-repo-check \
+  --sandbox workspace-write \
+  -c shell_environment_policy.inherit=all \
+  [-m <CODEX_FINALIZE_MODEL>] \
+  --cd <project-folder> \
+  "<prompt>"
+```
+
+- `--skip-git-repo-check` allows running outside a Git repository.
+- `--sandbox workspace-write` restricts Codex's shell commands to write only
+  within the project folder and `/tmp`; reads are unrestricted.
+- `-c shell_environment_policy.inherit=all` passes the full login-shell
+  environment (Homebrew PATH, etc.) to every command Codex runs.
+- `-m <model>` is only added when `CODEX_FINALIZE_MODEL` is non-empty; when
+  blank Codex uses the model from `~/.codex/config.toml`.
+- `stdin` is set to `/dev/null` so Codex never blocks waiting for interactive
+  input.
+
+The process environment is enriched before launch so that `HOME`, `TMPDIR`,
+`CODEX_HOME`, and `PATH` (including `/opt/homebrew/bin`) are always set even
+when the app is opened from Finder or the Dock.
+
+### Model Selection
+
+`CODEX_FINALIZE_MODEL` in `config.txt` controls which model Codex uses:
+
+```text
+CODEX_FINALIZE_MODEL=
+```
+
+- **Leave blank** (default) — Codex uses whatever model is set in
+  `~/.codex/config.toml`. This is the safest option and works for all account
+  types including ChatGPT accounts.
+- **Set a model name** — only set a value if your account and provider support
+  it. API-key accounts can use names like `gpt-4o` or `gpt-4o-mini`. ChatGPT
+  accounts support names like `gpt-5.5` or `gpt-5.4-mini` but not API-specific
+  names; an unsupported name produces an error visible in the Codex Log.
+
+### Prompt File
+
+The prompt file (`CODEX_FINALIZE_PROMPT_FILE`, default `codex-finalize-prompt.txt`
+in the project folder) is created with NewOCR's default instructions on first
+use. The user can edit and save it from the **Codex Instruction** window. The
+Codex Review window reloads it fresh before every run.
+
+NewOCR always appends a system task block to the prompt at runtime. This block
+includes:
+
+- The exact path of each section PDF.
+- The list of Markdown page files to edit.
+
+The user-editable prompt file controls correction rules: text cleanup, blank
+paragraph gaps, blockquote formatting, and footnote formatting. It also tells
+Codex to return a concise marked completion report instead of a verbose
+transcript. The system task block controls file paths and is not editable from
+the Codex Instruction window. Codex Review must not detect, extract, crop, add,
+remove, or rename images; image detection is handled by OCR.
+
+### Known Behavioral Decisions — Codex Review
+
+- Finalize edits Markdown files directly; there is no proposed-copy/apply step.
+  If the result is bad, re-run OCR for that section to regenerate clean files.
+- The system task block (file paths and Markdown file list) is always appended
+  at runtime and cannot be disabled from the Codex Instruction window.
+- Codex Review does not perform image detection or extraction. Run OCR again to
+  regenerate automatic OCR-detected images, or use the OCR editor's manual image
+  tools for corrections.
+- `stdin` is `/dev/null` so Codex always runs non-interactively.
+- The Codex Log window stays open after a run finishes so the user can review
+  output. It is closed when the main Codex Review window closes or when the app
+  quits.
+- Each new run deletes the previous `AppleVision/codex-review-log.txt`,
+  clears `savedLogURL`, and creates a fresh log automatically when the run
+  finishes. Only one log file is kept at a time.
+- The log window has no manual Save Log button. The Download Log button is
+  disabled until the current run's log has been saved automatically.
+- Successful runs show a concise completion report extracted from Codex's
+  `NEWOCR_REPORT_BEGIN` / `NEWOCR_REPORT_END` output. The raw Codex log remains
+  available only through Download Log for debugging.
+
 ## Apply CSS
 
 Apply CSS updates:
@@ -920,10 +1101,25 @@ ADD_SPLIT_WINDOW_HEIGHT=720
 OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
 OCR_TITLE_MATCH_TOP_LINES=3
 PREVIEW_TEXT_SCALE_PERCENT=170
+CODEX_EXECUTABLE_PATH=/Applications/Codex.app/Contents/Resources/codex
+CODEX_FINALIZE_PROMPT_FILE=codex-finalize-prompt.txt
+CODEX_FINALIZE_MAX_SECTIONS=5
+CODEX_FINALIZE_MODEL=
 NEW_PROJECTS_FOLDER=~/Downloads
 ```
 
 Width values may be numeric or `FULL` for full-screen opening.
+
+Key notes:
+
+- `CODEX_FINALIZE_MODEL` — leave blank to use the model from
+  `~/.codex/config.toml`. Set a model name only when your Codex account and
+  provider support it. ChatGPT accounts do not support API model names such as
+  `gpt-4o-mini`; use names available in ChatGPT (e.g. `gpt-5.5`,
+  `gpt-5.4-mini`). An unsupported name shows an error in the Codex Log.
+- `CODEX_FINALIZE_PROMPT_FILE` — path to the editable instruction file used by
+  Codex Review. Relative paths are resolved from the project folder.
+  The file is created with default instructions if it does not exist.
 
 ## Current UI Principles
 
@@ -931,8 +1127,8 @@ Width values may be numeric or `FULL` for full-screen opening.
 - Buttons should be clear, friendly, and consistent.
 - The main top bar groups commands into compact menus instead of many separate
   buttons: Project contains New, Open, Revert Original, and Open Config; Edit
-  PDF contains Add Split, Crop, Apply CSS, and Clear Scan Report; Build EPUB
-  and Close remain single top-level commands. View EPUB appears in Project when
+  PDF contains Add Split, Crop, Apply CSS, Codex Review, and Clear Scan
+  Report; Build EPUB and Close remain single top-level commands. View EPUB appears in Project when
   a built EPUB file exists. Top-bar dropdowns are custom popovers, not native
   macOS menus, so rows can use larger text and visible hover/pressed
   highlighting. Project and Edit PDF open immediately when the pointer enters
@@ -970,6 +1166,9 @@ Width values may be numeric or `FULL` for full-screen opening.
   labels, disabled controls, and purely decorative elements should keep the
   normal cursor.
 - Use icons where they help scanning.
+- New command buttons should use the existing icon-button style by default,
+  including Save actions, unless plain text is required for a native macOS
+  control or the user explicitly asks for text.
 - Do not let decorative UI reduce section-list space.
 - Do not alter behavior while only making UI more beautiful.
 - Main workflows should be reachable from the main window.
