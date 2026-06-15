@@ -288,11 +288,11 @@ Detect Split:
   selected row borders use blue. The header includes icon-only **Select All**
   and **Unselect All** buttons for checking or clearing every detected range.
 - The first detected range's Title field should not appear focused/highlighted
-  when the Detect Split popup opens; clear the initial first responder after
+  when the Detect Split window opens; clear the initial first responder after
   layout when this issue appears in new editable popup/list surfaces.
 - **Split** creates checked ranges in batch as sequential `section-###.pdf`
   files and closes the Add Split window.
-- **Close** only closes the Detect Split popup.
+- **Close** only closes the Detect Split window.
 
 ### Add Split Navigation Rules
 
@@ -973,6 +973,11 @@ Width values may be numeric or `FULL` for full-screen opening.
 - Do not let decorative UI reduce section-list space.
 - Do not alter behavior while only making UI more beautiful.
 - Main workflows should be reachable from the main window.
+- Quitting/closing the application from the Dock or app-level termination path
+  should force-close all NewOCR windows, including OCR, Preview, Compare, Log,
+  Crop, Add Split, Detect Split, and popup/sheet windows. Modal sheets must be
+  dismissed before their parent windows close so users do not need to close the
+  sheet manually first.
 - Section area should have as much useful space as possible.
 - Use restrained neutral surfaces, subtle borders, and small shadows to separate
   the main window, Section List surface, header row, and command/action lane.
@@ -1120,6 +1125,10 @@ These are intentional and should not be changed casually:
 - Save in OCR window shows `Save successfully`; the icon-only Mark Completed
   button appears before OK, checks **Ready for EPUB**, and closes the OCR window.
   OK stays in the OCR window, and Close closes the OCR window after save.
+- Dock/app-level Quit force-closes all retained NewOCR windows before
+  termination so auxiliary OCR, Compare, Preview, Log, Crop, and Add Split
+  windows do not remain open. Detect Split is a retained standalone auxiliary
+  window, not an attached sheet, so app-level close can close it directly.
 
 ## Development Notes For Future Assistants
 

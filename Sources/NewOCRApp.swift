@@ -156,6 +156,14 @@ private final class WindowCleanupDelegate: NSObject, NSWindowDelegate {
     }
 }
 
+private func forceCloseWindowAndAttachedSheets(_ window: NSWindow) {
+    while let sheet = window.attachedSheet {
+        window.endSheet(sheet)
+        sheet.close()
+    }
+    window.close()
+}
+
 private extension String {
     func trimmingLeadingCharacters(in characterSet: CharacterSet) -> String {
         guard let index = firstIndex(where: { character in
@@ -1074,6 +1082,30 @@ final class AppState: ObservableObject {
         closeOCRMarkdownPreviewWindow()
         closeOCRLogWindow()
         window?.close()
+    }
+
+    func closeAllApplicationWindows() {
+        closeOCRMarkdownPreviewWindow()
+        closeOCRLogWindow()
+
+        for window in ocrWindows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        ocrWindows.removeAll()
+
+        for window in ocrCompareWindows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        ocrCompareWindows.removeAll()
+
+        for plannerState in detachedSplitPlannerStates {
+            plannerState.closeAllWindows()
+        }
+        detachedSplitPlannerStates.removeAll()
+
+        for window in NSApp.windows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
     }
 
     func closeOCRMarkdownPreviewWindow() {
@@ -9196,6 +9228,16 @@ struct SplitPlanRange: Identifiable, Equatable {
     var file: String? = nil
 }
 
+final class DetectSplitSelectionState: ObservableObject {
+    @Published var ranges: [SplitPlanRange]
+    @Published var selectedIDs: Set<UUID>
+
+    init(ranges: [SplitPlanRange]) {
+        self.ranges = ranges
+        self.selectedIDs = Set(ranges.map(\.id))
+    }
+}
+
 private struct PDFBookmarkSplitPoint {
     let title: String
     let pageNumber: Int
@@ -9217,6 +9259,8 @@ final class SplitPlannerState: ObservableObject {
     private var pdfDocument: PDFDocument?
     private var cropWindows: [NSWindow] = []
     private var addSplitWindows: [NSWindow] = []
+    private var detectSplitWindows: [NSWindow] = []
+    private var retainedWindowDelegates: [ObjectIdentifier: WindowCleanupDelegate] = [:]
     private let cropWindowWidth: CGFloat
     private let cropWindowHeight: CGFloat
     private let shouldOpenCropWindowFullScreen: Bool
@@ -9342,9 +9386,75 @@ final class SplitPlannerState: ObservableObject {
 
     func closeAddSplitWindows() {
         for window in addSplitWindows {
-            window.close()
+            forceCloseWindowAndAttachedSheets(window)
         }
         addSplitWindows.removeAll()
+    }
+
+    func closeAllWindows() {
+        for window in cropWindows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        cropWindows.removeAll()
+        for window in detectSplitWindows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        detectSplitWindows.removeAll()
+        closeAddSplitWindows()
+    }
+
+    func openDetectSplitWindow() {
+        let ranges = detectedBookmarkSplitRanges()
+        let state = DetectSplitSelectionState(ranges: ranges)
+        var window: NSWindow?
+        let detectWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1240, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window = detectWindow
+        detectWindow.title = "Detect Split - \(pdfName)"
+        detectWindow.contentMinSize = NSSize(width: 1100, height: 620)
+        detectWindow.isReleasedWhenClosed = false
+        detectWindow.contentView = NSHostingView(
+            rootView: DetectSplitWindowView(
+                state: state,
+                thumbnail: { [weak self] range in
+                    guard let self, let from = Int(range.pageFrom) else { return nil }
+                    return self.cropPreviewImage(pageIndex: from - 1, size: CGSize(width: 520, height: 680))
+                },
+                splitAction: { [weak self] in
+                    guard let self else { return }
+                    let selectedRanges = state.ranges.filter { state.selectedIDs.contains($0.id) }
+                    self.addDetectedSplits(selectedRanges) { saved in
+                        if saved {
+                            window?.close()
+                        }
+                    }
+                },
+                closeAction: {
+                    window?.close()
+                }
+            )
+            .environmentObject(self)
+        )
+        detectWindow.center()
+        detectSplitWindows.append(detectWindow)
+        trackRetainedWindow(detectWindow, removeFrom: \.detectSplitWindows)
+        detectWindow.makeKeyAndOrderFront(nil)
+    }
+
+    private func trackRetainedWindow(_ window: NSWindow, removeFrom keyPath: ReferenceWritableKeyPath<SplitPlannerState, [NSWindow]>) {
+        let key = ObjectIdentifier(window)
+        let delegate = WindowCleanupDelegate { [weak self] closedWindow in
+            guard let self else { return }
+            closedWindow.contentView = nil
+            self[keyPath: keyPath].removeAll { $0 === closedWindow }
+            self.retainedWindowDelegates.removeValue(forKey: ObjectIdentifier(closedWindow))
+        }
+        retainedWindowDelegates[key] = delegate
+        window.delegate = delegate
     }
 
     func nextAddSplitFromPage() -> Int {
@@ -10234,9 +10344,6 @@ struct AddSplitWindowView: View {
     @State private var titleText = ""
     @State private var pageFrom = "1"
     @State private var pageTo = ""
-    @State private var isDetectSplitPresented = false
-    @State private var detectedSplitRanges: [SplitPlanRange] = []
-    @State private var selectedDetectedSplitIDs: Set<UUID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -10455,35 +10562,10 @@ struct AddSplitWindowView: View {
             resetRange()
         }
         .onChange(of: planner.pageCount) { _, _ in resetRange() }
-        .sheet(isPresented: $isDetectSplitPresented) {
-            DetectSplitWindowView(
-                ranges: $detectedSplitRanges,
-                selectedIDs: $selectedDetectedSplitIDs,
-                thumbnail: { range in
-                    guard let from = Int(range.pageFrom) else { return nil }
-                    return planner.cropPreviewImage(pageIndex: from - 1, size: CGSize(width: 520, height: 680))
-                },
-                splitAction: {
-                    let ranges = detectedSplitRanges.filter { selectedDetectedSplitIDs.contains($0.id) }
-                    planner.addDetectedSplits(ranges) { saved in
-                        if saved {
-                            isDetectSplitPresented = false
-                        }
-                    }
-                },
-                closeAction: {
-                    isDetectSplitPresented = false
-                }
-            )
-            .environmentObject(planner)
-        }
     }
 
     private func showDetectSplit() {
-        let ranges = planner.detectedBookmarkSplitRanges()
-        detectedSplitRanges = ranges
-        selectedDetectedSplitIDs = Set(ranges.map(\.id))
-        isDetectSplitPresented = true
+        planner.openDetectSplitWindow()
     }
 
     private func saveSplit() {
@@ -10542,18 +10624,17 @@ struct AddSplitWindowView: View {
 
 struct DetectSplitWindowView: View {
     @EnvironmentObject private var planner: SplitPlannerState
-    @Binding var ranges: [SplitPlanRange]
-    @Binding var selectedIDs: Set<UUID>
+    @ObservedObject var state: DetectSplitSelectionState
     let thumbnail: (SplitPlanRange) -> NSImage?
     let splitAction: () -> Void
     let closeAction: () -> Void
 
     private var selectedCount: Int {
-        ranges.filter { selectedIDs.contains($0.id) }.count
+        state.ranges.filter { state.selectedIDs.contains($0.id) }.count
     }
 
     private var hasUnselectedRanges: Bool {
-        selectedCount < ranges.count
+        selectedCount < state.ranges.count
     }
 
     private var hasSelectedRanges: Bool {
@@ -10581,7 +10662,7 @@ struct DetectSplitWindowView: View {
                     Text("Detect Split")
                         .font(.largeTitle.weight(.semibold))
                         .foregroundStyle(NewOCRMainPalette.primaryText)
-                    Text(ranges.isEmpty ? "No PDF bookmarks found" : "\(ranges.count) bookmark ranges found")
+                    Text(state.ranges.isEmpty ? "No PDF bookmarks found" : "\(state.ranges.count) bookmark ranges found")
                         .font(statusFont)
                         .foregroundStyle(NewOCRMainPalette.tertiaryText)
                 }
@@ -10595,9 +10676,9 @@ struct DetectSplitWindowView: View {
                     foregroundColor: .white,
                     size: 38
                 ) {
-                    selectedIDs = Set(ranges.map(\.id))
+                    state.selectedIDs = Set(state.ranges.map(\.id))
                 }
-                .disabled(ranges.isEmpty || !hasUnselectedRanges)
+                .disabled(state.ranges.isEmpty || !hasUnselectedRanges)
 
                 OCRIconButton(
                     title: "Unselect All",
@@ -10606,9 +10687,9 @@ struct DetectSplitWindowView: View {
                     foregroundColor: .white,
                     size: 38
                 ) {
-                    selectedIDs.removeAll()
+                    state.selectedIDs.removeAll()
                 }
-                .disabled(ranges.isEmpty || !hasSelectedRanges)
+                .disabled(state.ranges.isEmpty || !hasSelectedRanges)
 
                 OCRIconButton(title: "Split", systemImage: "scissors", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255), size: 38) {
                     splitAction()
@@ -10620,7 +10701,7 @@ struct DetectSplitWindowView: View {
                 }
             }
 
-            if ranges.isEmpty {
+            if state.ranges.isEmpty {
                 ContentUnavailableView("No Bookmarks", systemImage: "bookmark.slash", description: Text("No bookmark ranges were found in the current working PDF."))
                     .frame(maxWidth: .infinity, minHeight: 360)
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
@@ -10633,26 +10714,26 @@ struct DetectSplitWindowView: View {
             } else {
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(ranges) { range in
+                        ForEach(state.ranges) { range in
                             DetectSplitRangeRow(
                                 range: Binding(
-                                    get: { ranges.first(where: { $0.id == range.id }) ?? range },
+                                    get: { state.ranges.first(where: { $0.id == range.id }) ?? range },
                                     set: { updatedRange in
-                                        guard let index = ranges.firstIndex(where: { $0.id == range.id }) else { return }
-                                        ranges[index] = updatedRange
+                                        guard let index = state.ranges.firstIndex(where: { $0.id == range.id }) else { return }
+                                        state.ranges[index] = updatedRange
                                     }
                                 ),
                                 isSelected: Binding(
-                                    get: { selectedIDs.contains(range.id) },
+                                    get: { state.selectedIDs.contains(range.id) },
                                     set: { isSelected in
                                         if isSelected {
-                                            selectedIDs.insert(range.id)
+                                            state.selectedIDs.insert(range.id)
                                         } else {
-                                            selectedIDs.remove(range.id)
+                                            state.selectedIDs.remove(range.id)
                                         }
                                     }
                                 ),
-                                thumbnail: thumbnail(ranges.first(where: { $0.id == range.id }) ?? range)
+                                thumbnail: thumbnail(state.ranges.first(where: { $0.id == range.id }) ?? range)
                             )
                         }
                     }
@@ -10991,12 +11072,25 @@ struct NewOCRApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
+                .onAppear {
+                    appDelegate.appState = appState
+                }
         }
         .windowStyle(.titleBar)
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var appState: AppState?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        appState?.closeAllApplicationWindows()
+        for window in sender.windows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        return .terminateNow
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
