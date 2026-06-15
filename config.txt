@@ -24,9 +24,8 @@ CODEX_EXECUTABLE_PATH=/Applications/Codex.app/Contents/Resources/codex
 CODEX_FINALIZE_PROMPT_FILE=codex-finalize-prompt.txt
 # Maximum number of Markdown sections NewOCR can edit in one Codex run.
 CODEX_FINALIZE_MAX_SECTIONS=5
-# Model used by Finalize with Codex. Leave blank to use whatever model is set in
-# ~/.codex/config.toml. Set a value only if your account and provider support it,
-# e.g. CODEX_FINALIZE_MODEL=gpt-4o (API key accounts) or CODEX_FINALIZE_MODEL=o4-mini.
+# Model used by Finalize with Codex. If blank or missing, NewOCR uses gpt-5.4-mini.
+# Set a different value only if your account and provider support it.
 CODEX_FINALIZE_MODEL=gpt-5.4-mini
 
 # New projects made from the New button are created here.

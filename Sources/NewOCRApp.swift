@@ -544,7 +544,8 @@ final class AppState: ObservableObject {
     @Published var codexFinalizePromptFile: String = "codex-finalize-prompt.txt"
     @Published var codexFinalizeMaxSections: Int = 5
     @Published var codexExecutablePath: String = "/Applications/Codex.app/Contents/Resources/codex"
-    @Published var codexFinalizeModel: String = ""
+    private let defaultCodexFinalizeModel = "gpt-5.4-mini"
+    @Published var codexFinalizeModel: String = "gpt-5.4-mini"
     @Published var newProjectsFolderPath: String = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Downloads", isDirectory: true)
         .path
@@ -1584,8 +1585,7 @@ final class AppState: ObservableObject {
             state.isRunning = true
             state.savedLogURL = nil
             state.codexReport = ""
-            let modelLabel = model.isEmpty ? "(default from ~/.codex/config.toml)" : model
-            state.codexLog = "Starting Codex on \(state.selectedSectionCount) section(s)...\nExecutable: \(executable)\nModel: \(modelLabel)\nProject: \(selectedFolderPath)\n\n"
+            state.codexLog = "Starting Codex on \(state.selectedSectionCount) section(s)...\nExecutable: \(executable)\nModel: \(model)\nProject: \(selectedFolderPath)\n\n"
             state.status = "Running Codex on \(state.selectedSectionCount) section(s)..."
             openCodexFinalizeLogWindow(state: state)
             DispatchQueue.global(qos: .userInitiated).async {
@@ -6566,7 +6566,8 @@ final class AppState: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty ?? "/Applications/Codex.app/Contents/Resources/codex"
         codexFinalizeModel = values["CODEX_FINALIZE_MODEL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? defaultCodexFinalizeModel
     }
 
     private func readKeyValueConfig(from url: URL) -> [String: String] {

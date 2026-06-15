@@ -973,7 +973,7 @@ The log header shows:
 ```text
 Starting Codex on N section(s)...
 Executable: /Applications/Codex.app/Contents/Resources/codex
-Model: gpt-5.5  (or the value of CODEX_FINALIZE_MODEL)
+Model: gpt-5.4-mini  (or the value of CODEX_FINALIZE_MODEL)
 Project: /path/to/project
 ```
 
@@ -1016,7 +1016,7 @@ codex exec \
   --skip-git-repo-check \
   --sandbox workspace-write \
   -c shell_environment_policy.inherit=all \
-  [-m <CODEX_FINALIZE_MODEL>] \
+  -m <effective CODEX_FINALIZE_MODEL> \
   --cd <project-folder> \
   "<prompt>"
 ```
@@ -1026,8 +1026,8 @@ codex exec \
   within the project folder and `/tmp`; reads are unrestricted.
 - `-c shell_environment_policy.inherit=all` passes the full login-shell
   environment (Homebrew PATH, etc.) to every command Codex runs.
-- `-m <model>` is only added when `CODEX_FINALIZE_MODEL` is non-empty; when
-  blank Codex uses the model from `~/.codex/config.toml`.
+- `-m <model>` is always added. If `CODEX_FINALIZE_MODEL` is missing or blank,
+  NewOCR uses its built-in default `gpt-5.4-mini`.
 - `stdin` is set to `/dev/null` so Codex never blocks waiting for interactive
   input.
 
@@ -1040,12 +1040,11 @@ when the app is opened from Finder or the Dock.
 `CODEX_FINALIZE_MODEL` in `config.txt` controls which model Codex uses:
 
 ```text
-CODEX_FINALIZE_MODEL=
+CODEX_FINALIZE_MODEL=gpt-5.4-mini
 ```
 
-- **Leave blank** (default) — Codex uses whatever model is set in
-  `~/.codex/config.toml`. This is the safest option and works for all account
-  types including ChatGPT accounts.
+- **Leave blank or omit the key** — NewOCR uses its built-in default
+  `gpt-5.4-mini`.
 - **Set a model name** — only set a value if your account and provider support
   it. API-key accounts can use names like `gpt-4o` or `gpt-4o-mini`. ChatGPT
   accounts support names like `gpt-5.5` or `gpt-5.4-mini` but not API-specific
@@ -1209,7 +1208,7 @@ PREVIEW_TEXT_SCALE_PERCENT=170
 CODEX_EXECUTABLE_PATH=/Applications/Codex.app/Contents/Resources/codex
 CODEX_FINALIZE_PROMPT_FILE=codex-finalize-prompt.txt
 CODEX_FINALIZE_MAX_SECTIONS=5
-CODEX_FINALIZE_MODEL=
+CODEX_FINALIZE_MODEL=gpt-5.4-mini
 NEW_PROJECTS_FOLDER=~/Downloads
 ```
 
@@ -1217,11 +1216,12 @@ Width values may be numeric or `FULL` for full-screen opening.
 
 Key notes:
 
-- `CODEX_FINALIZE_MODEL` — leave blank to use the model from
-  `~/.codex/config.toml`. Set a model name only when your Codex account and
-  provider support it. ChatGPT accounts do not support API model names such as
-  `gpt-4o-mini`; use names available in ChatGPT (e.g. `gpt-5.5`,
-  `gpt-5.4-mini`). An unsupported name shows an error in the Codex Log.
+- `CODEX_FINALIZE_MODEL` — configurable model for Codex Review. If the key is
+  missing or blank, NewOCR uses `gpt-5.4-mini`. Set another model name only when
+  your Codex account and provider support it. ChatGPT accounts do not support
+  API model names such as `gpt-4o-mini`; use names available in ChatGPT (e.g.
+  `gpt-5.5`, `gpt-5.4-mini`). An unsupported name shows an error in the Codex
+  Log.
 - `CODEX_FINALIZE_PROMPT_FILE` — path to the editable instruction file used by
   Codex Review. Relative paths are resolved from the project folder.
   The file is created with default instructions if it does not exist.
