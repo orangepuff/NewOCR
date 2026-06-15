@@ -266,6 +266,27 @@ section-002.pdf
 ...
 ```
 
+Detect Split:
+
+- The Add Split header has an icon-only **Detect Split** button next to the file
+  name.
+- Detect Split reads bookmark-derived ranges from the current working PDF. If
+  the user already saved Crop PDF, this is the cropped working PDF, not
+  `_original.pdf`. It should reload bookmarks from that working PDF when the
+  Detect Split button is clicked so an already-open Split window does not use
+  stale cached PDF state. If the working PDF returns no bookmark outline,
+  Detect Split may fall back to `_bkp.pdf` or `_original.pdf` for bookmark page
+  metadata only; generated section PDFs must still be split from the cropped
+  working PDF.
+- The popup shows a vertically scrollable list with Checkbox, editable Title,
+  editable From, editable To, and a large thumbnail of each range's From page.
+  Editing From should immediately refresh that row's preview thumbnail. Editable
+  fields should use the same white, black-text, yellow-tint text-field style as
+  Add Split fields, with a narrower text column so the preview stays prominent.
+- **Split** creates checked ranges in batch as sequential `section-###.pdf`
+  files and closes the Add Split window.
+- **Close** only closes the Detect Split popup.
+
 ### Add Split Navigation Rules
 
 The preview arrow buttons update range fields:
@@ -307,9 +328,13 @@ Example:
 ## Crop Window
 
 Crop PDF lets the user select a crop rectangle visually and save a cropped
-working PDF. It should preserve `_original.pdf`.
+working PDF. It should preserve `_original.pdf` and copy the PDF bookmark
+outline into the cropped working PDF so Detect Split can still use bookmarks.
 
 The crop window may open full screen based on config.
+It should use the same dark NewOCR window style as Add Split and OCR windows:
+icon-only Save/Close buttons, larger readable labels, and a page slider instead
+of previous/next chevron buttons.
 
 When Crop PDF was opened from the **New** project route, saving the crop should
 close Crop PDF and then open Add Split. Opening Crop from the existing project
@@ -1106,6 +1131,9 @@ Maintenance rule:
   rounded 7-8pt controls, colorful icon-first buttons, floating `NSPopover`
   tooltips, and red rectangular close buttons with white X unless the user asks
   for a different style.
+- Every newly added feature, popup, button, control row, and visible state should
+  follow the existing NewOCR style system by default. If a feature intentionally
+  uses a different style, document why in the same README update.
 - Floating tooltip popovers should size to their full text instead of clipping
   or truncating longer labels.
 - If you make a feature configurable, keep the configurable value in

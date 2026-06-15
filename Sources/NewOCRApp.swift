@@ -7897,10 +7897,14 @@ private struct OCRIconButton: View {
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
 
+    private var iconSize: CGFloat {
+        min(max(size * 0.46, 16), 28)
+    }
+
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: size >= 38 ? 16 : 14, weight: .semibold))
+                .font(.system(size: iconSize, weight: .semibold))
                 .foregroundStyle(isEnabled ? foregroundColor : foregroundColor.opacity(0.34))
                 .frame(width: size, height: size)
                 .background(isEnabled ? (isHovered ? backgroundColor.opacity(0.86) : backgroundColor) : backgroundColor.opacity(0.32))
@@ -9299,6 +9303,13 @@ final class SplitPlannerState: ObservableObject {
         window.makeKeyAndOrderFront(nil)
     }
 
+    func closeAddSplitWindows() {
+        for window in addSplitWindows {
+            window.close()
+        }
+        addSplitWindows.removeAll()
+    }
+
     func nextAddSplitFromPage() -> Int {
         let sectionURLs = existingSectionPDFURLs()
         guard !sectionURLs.isEmpty else {
@@ -9394,6 +9405,110 @@ final class SplitPlannerState: ObservableObject {
         }
     }
 
+    func detectedBookmarkSplitRanges() -> [SplitPlanRange] {
+        let candidateURLs = [
+            pdfURL,
+            backupPDFURL(for: pdfURL),
+            originalPDFURL(for: pdfURL),
+        ]
+
+        for candidateURL in candidateURLs {
+            guard let document = PDFDocument(url: candidateURL) else { continue }
+            let ranges = splitRangesFromBookmarks(in: document)
+            if !ranges.isEmpty {
+                status = "Detected \(ranges.count) bookmark ranges from \(candidateURL.lastPathComponent)."
+                return ranges
+            }
+        }
+
+        if let pdfDocument {
+            let ranges = splitRangesFromBookmarks(in: pdfDocument)
+            status = ranges.isEmpty ? "No PDF bookmarks found." : "Detected \(ranges.count) bookmark ranges."
+            return ranges
+        }
+
+        status = "No PDF bookmarks found."
+        return []
+    }
+
+    func addDetectedSplits(_ detectedRanges: [SplitPlanRange], completion: @escaping (Bool) -> Void) {
+        let selectedRanges = detectedRanges.filter { range in
+            !range.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !selectedRanges.isEmpty else {
+            status = "No bookmark splits selected."
+            completion(false)
+            return
+        }
+        guard pdfDocument != nil, pageCount > 0 else {
+            status = "PDF is not loaded yet."
+            completion(false)
+            return
+        }
+
+        isLoadingPDF = true
+        status = "Creating \(selectedRanges.count) detected splits..."
+        let sourceURL = pdfURL
+        let projectFolderURL = projectFolderURL
+        let firstOutputIndex = nextSectionPDFIndex()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                guard let freshDocument = PDFDocument(url: sourceURL), freshDocument.pageCount > 0 else {
+                    throw NSError(domain: "NewOCR", code: 46, userInfo: [NSLocalizedDescriptionKey: "Could not reload source PDF."])
+                }
+
+                var createdRanges: [SplitPlanRange] = []
+                var savedTitles: [(URL, String)] = []
+
+                for (offset, detectedRange) in selectedRanges.enumerated() {
+                    let title = detectedRange.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard let from = Int(detectedRange.pageFrom),
+                          let to = Int(detectedRange.pageTo),
+                          from >= 1,
+                          to >= from,
+                          to <= freshDocument.pageCount else {
+                        throw NSError(domain: "NewOCR", code: 47, userInfo: [NSLocalizedDescriptionKey: "Invalid detected range \(detectedRange.pageFrom)-\(detectedRange.pageTo)."])
+                    }
+
+                    let outputFileName = String(format: "section-%03d.pdf", firstOutputIndex + offset)
+                    let outputURL = projectFolderURL.appendingPathComponent(outputFileName)
+                    let outputRange = SplitPlanRange(title: title, pageFrom: "\(from)", pageTo: "\(to)", file: outputFileName)
+                    let sectionDocument = try self.documentForRange(outputRange, from: freshDocument)
+                    if FileManager.default.fileExists(atPath: outputURL.path) {
+                        try FileManager.default.removeItem(at: outputURL)
+                    }
+                    guard sectionDocument.write(to: outputURL) else {
+                        throw NSError(domain: "NewOCR", code: 48, userInfo: [NSLocalizedDescriptionKey: "Could not write \(outputURL.lastPathComponent)."])
+                    }
+                    createdRanges.append(outputRange)
+                    savedTitles.append((outputURL, title))
+                }
+
+                DispatchQueue.main.async {
+                    if self.isUsingFallbackRange {
+                        self.ranges = []
+                        self.isUsingFallbackRange = false
+                    }
+                    self.ranges.append(contentsOf: createdRanges)
+                    try? self.saveCurrentSplitPlan()
+                    self.loadProjectPDFs()
+                    self.onSectionsSaved(savedTitles)
+                    self.status = "Created \(createdRanges.count) detected split files."
+                    self.isLoadingPDF = false
+                    self.closeAddSplitWindows()
+                    completion(true)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.status = "Could not detect split: \(error.localizedDescription)"
+                    self.isLoadingPDF = false
+                    completion(false)
+                }
+            }
+        }
+    }
+
     func cropPreviewImage(pageIndex: Int, size: CGSize = CGSize(width: 900, height: 1100)) -> NSImage? {
         guard let page = pdfDocument?.page(at: min(max(pageIndex, 0), max(pageCount - 1, 0))) else { return nil }
         return page.thumbnail(of: size, for: .cropBox)
@@ -9469,6 +9584,9 @@ final class SplitPlannerState: ObservableObject {
                         height: cropRect.height * bounds.height
                     )
                     page.setBounds(newBounds, for: .cropBox)
+                }
+                if let outlineRoot = self.clonedOutlineRoot(from: document) {
+                    document.outlineRoot = outlineRoot
                 }
 
                 let temporaryURL = FileManager.default.temporaryDirectory
@@ -9602,6 +9720,47 @@ final class SplitPlannerState: ObservableObject {
         var points: [PDFBookmarkSplitPoint] = []
         collectBookmarkSplitPoints(from: outlineRoot, document: document, points: &points)
         return points
+    }
+
+    private func clonedOutlineRoot(from document: PDFDocument) -> PDFOutline? {
+        guard let outlineRoot = document.outlineRoot, outlineRoot.numberOfChildren > 0 else {
+            return nil
+        }
+
+        let clonedRoot = PDFOutline()
+        for index in 0..<outlineRoot.numberOfChildren {
+            guard let child = outlineRoot.child(at: index),
+                  let clonedChild = clonedOutline(child, document: document) else {
+                continue
+            }
+            clonedRoot.insertChild(clonedChild, at: clonedRoot.numberOfChildren)
+        }
+        return clonedRoot.numberOfChildren > 0 ? clonedRoot : nil
+    }
+
+    private func clonedOutline(_ outline: PDFOutline, document: PDFDocument) -> PDFOutline? {
+        let cloned = PDFOutline()
+        cloned.label = outline.label
+        if let destination = outline.destination,
+           let page = destination.page {
+            let pageIndex = document.index(for: page)
+            if pageIndex != NSNotFound,
+               let destinationPage = document.page(at: pageIndex) {
+                cloned.destination = PDFDestination(page: destinationPage, at: destination.point)
+            }
+        } else if let action = outline.action {
+            cloned.action = action
+        }
+
+        for index in 0..<outline.numberOfChildren {
+            guard let child = outline.child(at: index),
+                  let clonedChild = clonedOutline(child, document: document) else {
+                continue
+            }
+            cloned.insertChild(clonedChild, at: cloned.numberOfChildren)
+        }
+
+        return cloned.label != nil || cloned.destination != nil || cloned.action != nil || cloned.numberOfChildren > 0 ? cloned : nil
     }
 
     private func collectBookmarkSplitPoints(from outline: PDFOutline, document: PDFDocument, points: inout [PDFBookmarkSplitPoint]) {
@@ -9839,21 +9998,47 @@ struct CropPDFWindowView: View {
     @State private var previewPageIndex = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Crop PDF")
-                        .font(.largeTitle.weight(.semibold))
-                    Text(planner.pdfName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "crop")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color.black)
                 }
+
+                HStack(spacing: 9) {
+                    Image(systemName: "doc.richtext")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Crop PDF")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                        Text(planner.pdfName)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .frame(maxWidth: 420, alignment: .leading)
 
                 Spacer()
 
-                Button("Save") {
+                OCRIconButton(title: "Save Crop", systemImage: "square.and.arrow.down", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255), size: 42) {
                     let window = NSApp.keyWindow
                     planner.saveCrop(normalizedRect: cropRect) { saved in
                         if saved {
@@ -9863,53 +10048,56 @@ struct CropPDFWindowView: View {
                 }
                 .disabled(planner.isLoadingPDF)
 
-                Button("Close") {
+                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white, size: 42) {
                     NSApp.keyWindow?.close()
                 }
             }
 
-            HStack(spacing: 10) {
-                Button {
-                    previewPageIndex = max(previewPageIndex - 1, 0)
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.title3.weight(.semibold))
-                        .frame(width: 52, height: 36)
-                }
-                .disabled(previewPageIndex <= 0 || planner.pageCount == 0)
-
+            HStack(spacing: 14) {
                 Text("Page \(min(previewPageIndex + 1, max(planner.pageCount, 1))) of \(max(planner.pageCount, 1))")
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 120)
+                    .font(.system(size: 16, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                    .frame(width: 120, alignment: .leading)
 
-                Button {
-                    previewPageIndex = min(previewPageIndex + 1, max(planner.pageCount - 1, 0))
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.title3.weight(.semibold))
-                        .frame(width: 52, height: 36)
-                }
-                .disabled(previewPageIndex >= planner.pageCount - 1 || planner.pageCount == 0)
+                Slider(
+                    value: Binding(
+                        get: { Double(min(previewPageIndex + 1, max(planner.pageCount, 1))) },
+                        set: { value in
+                            previewPageIndex = min(max(Int(value.rounded()) - 1, 0), max(planner.pageCount - 1, 0))
+                        }
+                    ),
+                    in: 1...Double(max(planner.pageCount, 1)),
+                    step: 1
+                )
+                .disabled(planner.pageCount <= 1)
 
-                Text("Drag the crop box or its corners. The same relative crop is applied to every page.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
 
-                Spacer()
             }
+            .padding(10)
+            .background(NewOCRMainPalette.panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
 
             if planner.isLoadingPDF {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
                     Text(planner.status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
                     Spacer()
                 }
                 .padding(10)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
             }
 
             if let image = planner.cropPreviewImage(pageIndex: previewPageIndex) {
@@ -9926,19 +10114,21 @@ struct CropPDFWindowView: View {
                     }
                 }
                 .frame(minWidth: 720, minHeight: 500)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .background(NewOCRMainPalette.fieldBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
                 )
             } else {
                 ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext", description: Text("Load the source PDF before cropping."))
                     .frame(minWidth: 720, minHeight: 500)
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
             }
         }
-        .padding(18)
+        .padding(22)
         .frame(minWidth: 820, minHeight: 620)
+        .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
         .onChange(of: planner.pageCount) { _, newValue in
             previewPageIndex = min(previewPageIndex, max(newValue - 1, 0))
@@ -10007,6 +10197,9 @@ struct AddSplitWindowView: View {
     @State private var titleText = ""
     @State private var pageFrom = "1"
     @State private var pageTo = ""
+    @State private var isDetectSplitPresented = false
+    @State private var detectedSplitRanges: [SplitPlanRange] = []
+    @State private var selectedDetectedSplitIDs: Set<UUID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -10046,6 +10239,11 @@ struct AddSplitWindowView: View {
                         .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
                 )
                 .frame(maxWidth: 300, alignment: .leading)
+
+                OCRIconButton(title: "Detect Split", systemImage: "list.bullet.rectangle", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white, size: 58) {
+                    showDetectSplit()
+                }
+                .disabled(planner.isLoadingPDF || planner.pageCount == 0)
 
                 Spacer(minLength: 12)
 
@@ -10220,6 +10418,35 @@ struct AddSplitWindowView: View {
             resetRange()
         }
         .onChange(of: planner.pageCount) { _, _ in resetRange() }
+        .sheet(isPresented: $isDetectSplitPresented) {
+            DetectSplitWindowView(
+                ranges: $detectedSplitRanges,
+                selectedIDs: $selectedDetectedSplitIDs,
+                thumbnail: { range in
+                    guard let from = Int(range.pageFrom) else { return nil }
+                    return planner.cropPreviewImage(pageIndex: from - 1, size: CGSize(width: 520, height: 680))
+                },
+                splitAction: {
+                    let ranges = detectedSplitRanges.filter { selectedDetectedSplitIDs.contains($0.id) }
+                    planner.addDetectedSplits(ranges) { saved in
+                        if saved {
+                            isDetectSplitPresented = false
+                        }
+                    }
+                },
+                closeAction: {
+                    isDetectSplitPresented = false
+                }
+            )
+            .environmentObject(planner)
+        }
+    }
+
+    private func showDetectSplit() {
+        let ranges = planner.detectedBookmarkSplitRanges()
+        detectedSplitRanges = ranges
+        selectedDetectedSplitIDs = Set(ranges.map(\.id))
+        isDetectSplitPresented = true
     }
 
     private func saveSplit() {
@@ -10273,6 +10500,214 @@ struct AddSplitWindowView: View {
                 titleText = title
             }
         }
+    }
+}
+
+struct DetectSplitWindowView: View {
+    @EnvironmentObject private var planner: SplitPlannerState
+    @Binding var ranges: [SplitPlanRange]
+    @Binding var selectedIDs: Set<UUID>
+    let thumbnail: (SplitPlanRange) -> NSImage?
+    let splitAction: () -> Void
+    let closeAction: () -> Void
+
+    private var selectedCount: Int {
+        ranges.filter { selectedIDs.contains($0.id) }.count
+    }
+
+    private var statusFont: Font {
+        .system(size: 15, weight: .semibold)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "list.bullet.rectangle")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Detect Split")
+                        .font(.largeTitle.weight(.semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Text(ranges.isEmpty ? "No PDF bookmarks found" : "\(ranges.count) bookmark ranges found")
+                        .font(statusFont)
+                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                }
+
+                Spacer()
+
+                OCRIconButton(title: "Split", systemImage: "scissors", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255), size: 38) {
+                    splitAction()
+                }
+                .disabled(planner.isLoadingPDF || selectedCount == 0)
+
+                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white, size: 38) {
+                    closeAction()
+                }
+            }
+
+            if ranges.isEmpty {
+                ContentUnavailableView("No Bookmarks", systemImage: "bookmark.slash", description: Text("No bookmark ranges were found in the current working PDF."))
+                    .frame(maxWidth: .infinity, minHeight: 360)
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    .background(NewOCRMainPalette.panelBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                    )
+            } else {
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(ranges) { range in
+                            DetectSplitRangeRow(
+                                range: Binding(
+                                    get: { ranges.first(where: { $0.id == range.id }) ?? range },
+                                    set: { updatedRange in
+                                        guard let index = ranges.firstIndex(where: { $0.id == range.id }) else { return }
+                                        ranges[index] = updatedRange
+                                    }
+                                ),
+                                isSelected: Binding(
+                                    get: { selectedIDs.contains(range.id) },
+                                    set: { isSelected in
+                                        if isSelected {
+                                            selectedIDs.insert(range.id)
+                                        } else {
+                                            selectedIDs.remove(range.id)
+                                        }
+                                    }
+                                ),
+                                thumbnail: thumbnail(ranges.first(where: { $0.id == range.id }) ?? range)
+                            )
+                        }
+                    }
+                    .padding(10)
+                }
+                .frame(minHeight: 360, maxHeight: 620)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+            }
+
+            HStack {
+                Text("\(selectedCount) selected")
+                    .font(statusFont)
+                    .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                Spacer()
+            }
+        }
+        .padding(22)
+        .frame(width: 1240)
+        .frame(minHeight: 680)
+        .background(NewOCRMainPalette.windowBackground)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct DetectSplitRangeRow: View {
+    @Binding var range: SplitPlanRange
+    @Binding var isSelected: Bool
+    let thumbnail: NSImage?
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Toggle("", isOn: $isSelected)
+                .labelsHidden()
+                .toggleStyle(.checkbox)
+
+            if let thumbnail {
+                Image(nsImage: thumbnail)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 300, height: 400)
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(NewOCRMainPalette.fieldBackground)
+                    .frame(width: 300, height: 400)
+                    .overlay(
+                        Image(systemName: "doc.richtext")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                    )
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                TextField("Title", text: $range.title)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.black)
+                    .tint(Color.yellow)
+                    .accentColor(Color.yellow)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 9)
+                    .background(Color.white.opacity(0.94))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                    )
+
+                HStack(spacing: 10) {
+                    DetectSplitField(label: "From", value: $range.pageFrom)
+                    DetectSplitField(label: "To", value: $range.pageTo)
+                }
+            }
+            .frame(width: 360, alignment: .leading)
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(NewOCRMainPalette.fieldBackground.opacity(isSelected ? 1 : 0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isSelected ? Color(red: 255/255, green: 182/255, blue: 216/255) : NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+}
+
+private struct DetectSplitField: View {
+    let label: String
+    @Binding var value: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(NewOCRMainPalette.tertiaryText)
+            TextField(label, text: $value)
+                .textFieldStyle(.plain)
+                .font(.system(size: 18, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Color.black)
+                .tint(Color.yellow)
+                .accentColor(Color.yellow)
+                .frame(width: 72)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.94))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Color.black.opacity(0.18), lineWidth: 1)
+        )
     }
 }
 
