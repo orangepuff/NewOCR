@@ -176,6 +176,9 @@ Important actions:
   **Ready for EPUB**.
 - **Scan Header All**: scan header/footer candidates for all existing section
   PDF files and open the shared Header/Footer Review.
+- **Clear All OCR**: remove all OCR Markdown files and resources for every
+  section and reset all Ready for EPUB flags. Shows a confirmation dialog before
+  proceeding. Disabled when no sections have OCR output.
 
 The project path display should stay compact and readable.
 
@@ -197,6 +200,8 @@ Each section row supports:
 - **Scan Header** for section PDFs
 - **+** to add a manual section after that item
 - **X** to remove a section/manual section after confirmation
+- **Clear OCR** to remove OCR Markdown files and reset the Ready for EPUB flag for that section
+- **Clear All OCR** (main window, next to Scan Header All) to remove OCR for all sections at once with confirmation
 
 The command column uses fixed button positions:
 
@@ -206,6 +211,8 @@ The command column uses fixed button positions:
 - **Preview** is enabled only when the section already has Markdown output
 - **Compare** appears as an icon next to **Preview** only for non-manual section
   PDFs that have already saved a pure OCR snapshot
+- **Clear OCR** appears as a red button when Markdown output exists, allowing the user to
+  remove all OCR Markdown files, images, and related resources, and reset the **Ready for EPUB** flag
 - row action buttons use compact icon+text styling with consistent height and
   accent-colored borders
 
@@ -232,6 +239,21 @@ the section row Title to the `.md` files.
 When an existing project opens with split PDF files, the section list should
 auto-scroll to the first row whose **Ready for EPUB** checkbox is not checked.
 This helps resume work at the next unfinished section.
+
+### Clear OCR
+
+The **Clear OCR** button appears in the section row for any section (PDF or manual) that
+has existing OCR Markdown output. Clicking **Clear OCR** shows a confirmation dialog. On
+confirmation, NewOCR:
+
+- Removes the section's `AppleVision/MD/<section>/` directory and all Markdown, images,
+  and metadata
+- Removes the pure OCR snapshot from `AppleVision/MD/<section>/OriginalOCR/`
+- Removes line-cache entries for that section PDF from `AppleVision/LineCache/header-footer-lines.json`
+- Resets the section's **Ready for EPUB** checkbox to unchecked
+- Preserves `AppleVision/LineCache/header-footer-review.txt` so approved header/footer filters remain active
+
+This allows reprocessing a section with new OCR settings or fixes without deleting the section PDF itself.
 
 ### Removing Section Files
 
@@ -520,9 +542,10 @@ with `>` or `![`, NewOCR keeps the paragraphs separate.
 ## OCR Layout Areas
 
 **Edit PDF > Define Layout** opens a project-wide visual editor. Choose a
-sample section/page, select **Header**, **Quote**, **Image**, **Footnote**, or
-**Ignore**, drag the rectangle over the page area, choose whether it applies to
-**All Sections** or only **This Section**, then click **Save Area**.
+sample section/page, select **Section Title**, **Quote**, **Image**,
+**Footnote**, or **Ignore**, drag the rectangle over the page area, choose
+whether it applies to **All Sections** or only **This Section**, then click
+**Save Area**.
 
 The editor writes the project layout rules automatically to:
 
@@ -530,17 +553,57 @@ The editor writes the project layout rules automatically to:
 AppleVision/layout-areas.json
 ```
 
-Define Layout is available only after at least one `section-###.pdf` split file
-exists in the project folder.
+### Layout Area Rules Report
 
-If the project already has OCR output or PDF sections marked **Ready for EPUB**,
-opening Define Layout first shows a dark NewOCR-styled confirmation popup with
-the standard white icon tile, bordered content panel, and icon-only **OK** and
-**Close** buttons. **Close** leaves the project unchanged. **OK** removes
-existing OCR Markdown, generated images, pure OCR snapshots, and section
-line-cache data for PDF sections, then resets those PDF sections' **Ready for
-EPUB** flags so the project can be OCR processed again with the new layout
-rules.
+The **View Rules** button in the Define Layout header opens a formatted report of all saved
+layout area rules. The report is styled as a beautiful dark panel, consistent with other
+NewOCR confirmations, and displays each rule with:
+
+- **Type icon and label** (Section Title, Quote, Image, Footnote, Ignore)
+- **Scope information** (All Sections, specific section, or page number)
+- **Load button** (blue pencil icon) to load the rule's settings for editing
+- **Delete button** (trash icon) to remove individual rules
+
+**Row Styling**: Each rule row features:
+- **Alternating dark/light backgrounds** for visual rhythm and scannability
+- **Colored borders** that swap between light and dark, matching the row background
+- **Rounded corners** for a refined appearance
+- Even rows use a darker background with lighter border; odd rows use lighter background with darker border
+
+**Loading Rules for Editing**: Clicking the blue pencil icon loads that rule's settings into the editor:
+- The rule type, scope, and rectangular selection are populated in the editor
+- The correct scope button (All/Selected/Section/Page) is highlighted based on the rule's scope
+- If the rule targets a specific section, that section is selected in the section list
+- The **View Rules** button becomes disabled (grayed out) to prevent opening another rule set while editing
+- The **Save Area** button changes to **Update Rule** with an orange pencil icon
+- After editing, click **Update Rule** to save changes or **Close** to discard
+- Once saved or discarded, the **View Rules** button becomes enabled again
+
+**Duplicate Rule Detection**: When clicking Save Area or Update Rule, NewOCR checks if a rule with the
+same type, scope, section, page, and rectangle position already exists. If a duplicate is found:
+- A beautiful warning dialog appears with the yellow warning icon
+- The dialog shows the existing duplicate rule's details (type, section, page)
+- User must click **Close** to dismiss the warning and return to editing
+- The rule is not saved, allowing the user to adjust the rectangle or change settings
+
+**Deleting Rules**: When clicking the delete button, a confirmation popup appears showing:
+- The rule type with icon
+- The rule scope (section and/or page)
+- A warning that the action cannot be undone
+- Cancel and Delete buttons
+
+The report uses consistent NewOCR dark styling with color-coded rule type icons for easy
+scanning. The close button is distinct from delete buttons, preventing accidental closure
+when attempting to delete a rule.
+
+Define Layout is available only after at least one `section-###.pdf` split file
+exists in the project folder. The **Define Layout** button in the main window is
+disabled until at least one section PDF is created.
+
+The Define Layout editor only works with real `section-###.pdf` files from the
+current project. Its preview is rendered from those section PDFs, which are
+created from the cropped working PDF. It must not preview, save coordinates
+from, or apply OCR layout rules against `_original.pdf`.
 
 This is a main-window action because the same rules can apply across all
 sections. The JSON file is still available from the editor's **Advanced** button
@@ -549,7 +612,17 @@ dark editor window and must not close or dismiss the Define Layout window.
 
 Supported rule types:
 
-- `header` — OCR lines in the rectangle are written as Markdown headings.
+- `header` — shown in the UI tooltip as **Section Title**. OCR lines in the
+  rectangle are written as Markdown level-2 headings, for example `## Title`.
+  **Important:** If a header rule rectangle contains multiple lines, each line becomes
+  its own heading with the same nesting level:
+  ```
+  ## Line 1
+  ## Line 2
+  ## Line 3
+  ```
+  Header rules only apply to the first page of each section, never to subsequent pages.
+  This prevents section titles from appearing on every page.
 - `blockquote` — OCR lines in the rectangle are written as Markdown
   blockquotes with `>`.
 - `image` — the rectangle is cropped from the rendered PDF page, saved to
@@ -604,6 +677,13 @@ Coordinates are normalized page coordinates from `0.0` to `1.0`, using the same
 coordinate style as OCR boxes: `left`/`right` are horizontal positions, `top` is
 near the top of the page, and `bottom` is below it. A rule matches a line when
 the line overlaps the rectangle enough or the line center falls inside it.
+These coordinates are relative to the rendered `.cropBox` of the selected
+section PDF page. Because section PDFs are generated from the cropped working
+PDF, layout-area coordinates are based on the cropped version of the page.
+During OCR, NewOCR renders the same section PDF page with `.cropBox` and applies
+the saved normalized coordinates to that render. `_original.pdf` may be used by
+Detect Split only for bookmark metadata fallback; it must not be used for OCR
+layout coordinate application or image crops.
 
 Rule scope:
 
@@ -611,21 +691,36 @@ Rule scope:
   every page in every section.
 - **Selected** opens a modal section picker with first-page previews, checkboxes
   unchecked by default, and Select All/Unselect All commands. Saving writes one
-  filename-specific rule per checked section.
+  filename-specific rule per checked section with no scope (section field only).
 - **Section** saves the current section filename with no `page`, so the rule
-  applies to every page in the current section.
+  applies to every page in the current section (section field only, no scope).
 - **Page** saves the current section filename plus the current `page`, so the
-  rule applies only to that page of the current section.
+  rule applies only to that page of the current section (both section and page fields).
 - `section: "section-003.pdf"` or `section: "section-003"` limits any saved
   rule to that section filename/stem.
 - `page` limits a saved rule to a page number inside each matching section.
+
+### Scope Usage During OCR
+
+When OCR processes a section PDF, NewOCR:
+
+1. Loads all layout area rules from `layout-areas.json`
+2. For each page, filters rules using `matchingLayoutAreaRules()` which checks:
+   - **Page number**: if the rule has a `page` field, it must match the current page
+   - **Section filename**: if the rule has a `section` field, it must match the current PDF
+   - **Scope**: if no section field exists, the rule applies to all sections only if `scope: "all_sections"`
+3. Applies the filtered rules to recognize images, headers, blockquotes, footnotes, and ignored areas
+4. Builds Markdown output with layout areas properly applied
+
+This ensures rules respect their defined scope even when reprocessing multiple sections.
 
 OCR priority:
 
 1. Apply normal header/footer and user text filters.
 2. Remove lines matched by `ignore` layout areas.
 3. Crop image layout areas and remove OCR text that overlaps those image areas.
-4. Force remaining lines matched by `header` areas to headings.
+4. Force remaining lines matched by `header` / **Section Title** areas to
+   Markdown `##` headings.
 5. Force remaining lines matched by `blockquote` areas to blockquotes.
 6. Force remaining lines matched by `footnote` areas to footnote definitions.
 7. Run normal paragraph and blank-line Markdown behavior for the rest.
@@ -665,15 +760,19 @@ UI notes:
   primary commands to a bottom footer where an expanding preview can push them
   off-screen. Put the saved-rule count in this top header immediately before
   the command buttons, using large readable header text.
-- The layout-type commands, Header, Quote, Image, Footnote, and Ignore, are
-  icon-only buttons. Show their text labels in floating `NSPopover` tooltips on
-  hover, matching the other NewOCR icon controls.
+- The layout-type commands, Section Title, Quote, Image, Footnote, and Ignore,
+  are icon-only buttons. Show their text labels in floating `NSPopover`
+  tooltips on hover, matching the other NewOCR icon controls. Section Title is
+  saved internally as rule type `header` for compatibility with existing
+  `layout-areas.json` files.
 - Page navigation in Define Layout uses a large custom slider with a
   thicker track and a `Page n / total` readout. Action status text appears in
   this page slider row when needed.
 - Define Layout scope options are **All**, **Selected**, **Section**, and
   **Page**. Selected opens a dark modal sheet listing section filenames with
-  preview thumbnails, checkboxes, Select All, Unselect All, and Close.
+  preview thumbnails, checkboxes, Select All, Unselect All, OK, and Close buttons.
+  The **OK** button confirms the selected sections and closes the modal; **Close**
+  also closes the modal. Users click **OK** to confirm their section selection.
 - The Define Layout PDF preview renders slightly zoomed in by default so the
   working page is easier to inspect while drawing layout areas.
 
@@ -1541,10 +1640,21 @@ These are intentional and should not be changed casually:
 - Saving Crop PDF removes existing `section-###.pdf` files after confirmation,
   because old splits may no longer match the cropped page layout.
 - Define Layout is enabled only when at least one real `section-###.pdf` file
-  exists.
+  exists. The button is disabled if no section PDFs are present.
+- Opening Define Layout does not show a confirmation popup, even if the project
+  has existing OCR output or sections marked **Ready for EPUB**. The layout editor
+  opens directly. Users can then modify layout rules without warning about clearing
+  existing OCR data.
+- When saving a layout rule, the system checks for duplicates by comparing type,
+  scope, section, page, and rectangle position (with 0.01 tolerance). If a duplicate
+  is found, a beautiful warning dialog appears with the yellow warning icon, showing
+  the existing rule's details. Users can cancel or save anyway despite the duplicate.
 - Opening Define Layout with existing OCR output or PDF sections marked
   **Ready for EPUB** asks for confirmation. OK clears PDF-section OCR resources
   and resets PDF-section Ready flags; Close does nothing.
+- Define Layout coordinates are saved and applied relative to cropped
+  `section-###.pdf` page `.cropBox` renders. OCR layout rules must not use
+  `_original.pdf` coordinates.
 - `split-plan.json` stores only created section files and includes `file`.
 - Detect Split saves the current edited Title fields for checked rows directly
   into `book-sections.json` when creating section PDFs; do not defer this to a
@@ -1555,11 +1665,43 @@ These are intentional and should not be changed casually:
 - Split button remains clickable and validates title on click.
 - Process OCR All deletes old Markdown/images/cache for each unchecked section
   before OCR. Sections checked **Ready for EPUB** are skipped.
+- **Clear OCR** removes all OCR Markdown files and resources for a section and resets
+  the **Ready for EPUB** flag. It preserves the header/footer review file so approved
+  filters remain active. The section PDF itself is never deleted.
 - Manual sections do not run OCR but can create/edit Markdown.
 - OCR must use section PDF paths, not the original PDF.
 - Section List Title is EPUB chapter/TOC metadata only. Run OCR, Process OCR
   All, and Save Markdown must not use it to remove OCR text or write headings
   into `.md` files.
+- Define Layout's **Section Title** tool is stored as layout rule type `header`
+  and writes matched OCR text as Markdown `##` headings. Header rules automatically
+  apply only to the first page of each section PDF file, regardless of scope or
+  explicit page settings. Other pages in the section ignore header rules to prevent
+  titles from repeating on every page. When a header rule rectangle detects multiple
+  lines, each line becomes its own heading with `##` prefix, allowing multi-line
+  section titles to render as consecutive headings.
+- Define Layout scope selection (All/Selected/Section/Page) is saved in
+  `layout-areas.json` and used to filter rules during OCR. Rules respect their
+  defined scope: All rules apply to all sections, Selected rules apply only to
+  their specified sections, Section rules apply only to that section on all pages,
+  and Page rules apply only to that specific page of that section.
+- The **View Rules** button in Define Layout displays all saved rules in a formatted
+  report styled as a dark panel. Each rule shows color-coded icon, type, and scope
+  information. The close button (X in top-right) is visually distinct from delete
+  buttons (trash icons on each rule). Deleting a rule shows a beautiful confirmation
+  popup with the full rule details and cannot-be-undone warning, using the same
+  popup style as crop and layout refresh confirmations. The report removes the need
+  to understand raw JSON structure. Each rule has a blue pencil icon to load it for
+  editing.
+- When a rule is loaded for editing, the **View Rules**, **Clear Rules**, and
+  **Advanced JSON** buttons become disabled (grayed out) to prevent conflicting actions
+  mid-edit. The user must save the current rule changes (**Update Rule**) or discard
+  them (**Close**) before viewing the rules report, clearing all rules, or editing raw
+  JSON. This prevents confusing state where multiple rules might be loaded
+  simultaneously or where a user might accidentally clear/modify all rules while
+  editing a specific one.
+- The Save Area button no longer has a keyboard shortcut (Enter key); it must be
+  clicked directly to avoid accidental saves while editing rule parameters.
 - Empty paragraph slots from the paragraph editor should survive Preview and
   EPUB build.
 - Header/footer removal requires `header-footer-review.txt` REMOVE entries.

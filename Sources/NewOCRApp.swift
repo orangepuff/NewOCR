@@ -197,7 +197,8 @@ struct OCRLayoutAreasFile: Codable {
     var rules: [OCRLayoutAreaRule]
 }
 
-struct OCRLayoutAreaRule: Codable {
+struct OCRLayoutAreaRule: Codable, Equatable, Identifiable {
+    var id: String { "\(type)-\(scope ?? "")-\(section ?? "")-\(page.map(String.init) ?? "")-\(rect.left)-\(rect.top)" }
     var type: String
     var scope: String?
     var section: String?
@@ -205,7 +206,7 @@ struct OCRLayoutAreaRule: Codable {
     var rect: OCRLayoutAreaRect
 }
 
-struct OCRLayoutAreaRect: Codable {
+struct OCRLayoutAreaRect: Codable, Equatable {
     var left: CGFloat
     var right: CGFloat
     var top: CGFloat
@@ -223,6 +224,7 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var selectionRect: CGRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
     @Published var status: String = ""
     @Published var savedRuleCount: Int = 0
+    @Published var loadedRule: OCRLayoutAreaRule?
     private var pdfPageCounts: [String: Int] = [:]
 
     init(pdfItems: [PDFFileItem], initialPDF: PDFFileItem, initialPage: Int = 1) {
@@ -308,6 +310,41 @@ final class LayoutAreaEditorState: ObservableObject {
         let x = min(max(rect.minX, 0), 1 - width)
         let y = min(max(rect.minY, 0), 1 - height)
         return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    func loadRule(_ rule: OCRLayoutAreaRule) {
+        self.loadedRule = rule
+        self.selectedType = rule.type
+
+        if let scope = rule.scope {
+            self.selectedScope = scope
+            self.selectedLayoutSectionPaths = []
+        } else if let section = rule.section {
+            self.selectedScope = "section"
+            self.selectedLayoutSectionPaths = []
+            if let pdfItem = pdfItems.first(where: { $0.url.lastPathComponent == section }) {
+                self.selectPDFPath(pdfItem.url.path)
+            }
+        }
+
+        if let page = rule.page {
+            self.selectedPage = page
+        } else {
+            self.selectedPage = 1
+        }
+
+        let ocrRect = rule.rect
+        let selRect = CGRect(
+            x: ocrRect.left,
+            y: 1 - ocrRect.top,
+            width: ocrRect.right - ocrRect.left,
+            height: ocrRect.top - ocrRect.bottom
+        )
+        self.selectionRect = selRect
+    }
+
+    func clearLoadedRule() {
+        self.loadedRule = nil
     }
 }
 
@@ -553,6 +590,9 @@ final class AppState: ObservableObject {
     @Published var cssApplyAlertMessage: String = ""
     @Published var isLayoutRefreshConfirmationPresented: Bool = false
     @Published var isCropResetConfirmationPresented: Bool = false
+    @Published var isClearOCRConfirmationPresented: Bool = false
+    @Published var pendingClearOCRItem: PDFFileItem?
+    @Published var isClearAllOCRConfirmationPresented: Bool = false
 
     @Published var pdfListMinHeight: CGFloat = 420
     @Published var mainWindowWidth: CGFloat = 780
@@ -2335,17 +2375,10 @@ final class AppState: ObservableObject {
         do {
             _ = try ensureLayoutAreasFile()
             let selectableItems = pdfFiles.filter { item in
-                !item.isManualSection && FileManager.default.fileExists(atPath: item.url.path)
+                isSectionPDFURL(item.url) && FileManager.default.fileExists(atPath: item.url.path)
             }
             guard let initialItem = selectableItems.first(where: { $0.url.path == selectedPDFPath }) ?? selectableItems.first else {
                 showAlert(title: "No PDF Sections", message: "Add or split a PDF before defining layout areas.")
-                return
-            }
-
-            if layoutDefinitionNeedsRefresh(sectionItems: selectableItems) {
-                pendingLayoutAreaSectionItems = selectableItems
-                pendingLayoutAreaInitialPDFPath = initialItem.url.path
-                isLayoutRefreshConfirmationPresented = true
                 return
             }
 
@@ -2378,7 +2411,7 @@ final class AppState: ObservableObject {
             saveBookSections()
             loadPDFFiles()
             let refreshedSectionItems = pdfFiles.filter { item in
-                !item.isManualSection && FileManager.default.fileExists(atPath: item.url.path)
+                isSectionPDFURL(item.url) && FileManager.default.fileExists(atPath: item.url.path)
             }
             let initialItem = refreshedSectionItems.first(where: { $0.url.path == initialPath }) ?? refreshedSectionItems.first
             pendingLayoutAreaSectionItems = []
@@ -2483,7 +2516,7 @@ final class AppState: ObservableObject {
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func layoutAreasFileURL() -> URL? {
+    func layoutAreasFileURL() -> URL? {
         guard !selectedFolderPath.isEmpty else { return nil }
         return URL(fileURLWithPath: selectedFolderPath)
             .appendingPathComponent("AppleVision", isDirectory: true)
@@ -2550,9 +2583,76 @@ final class AppState: ObservableObject {
         return areas.rules.count
     }
 
+    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect) throws -> Int {
+        let url = try ensureLayoutAreasFile()
+        var areas = try loadLayoutAreasFileForEditing(from: url)
+        if let index = areas.rules.firstIndex(of: oldRule) {
+            areas.rules.remove(at: index)
+        }
+        let cleanScope = newScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let rules: [OCRLayoutAreaRule]
+        switch cleanScope {
+        case "all_sections":
+            rules = [
+                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect)
+            ]
+        case "selected_sections":
+            rules = newSelectedSectionURLs.map { sectionURL in
+                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect)
+            }
+        case "page":
+            rules = [
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect)
+            ]
+        default:
+            rules = [
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect)
+            ]
+        }
+        areas.rules.append(contentsOf: rules)
+        try writeLayoutAreasFile(areas, to: url)
+        return areas.rules.count
+    }
+
     func clearLayoutAreaRules() throws {
         let url = try ensureLayoutAreasFile()
         try writeLayoutAreasFile(OCRLayoutAreasFile(rules: []), to: url)
+    }
+
+    func findDuplicateRule(type: String, scope: String?, section: String?, page: Int?, rect: OCRLayoutAreaRect, excludingRule: OCRLayoutAreaRule? = nil) -> OCRLayoutAreaRule? {
+        guard let url = layoutAreasFileURL(),
+              let areas = try? loadLayoutAreasFileForEditing(from: url) else {
+            return nil
+        }
+
+        print("[DupCheck] Looking for: type=\(type) scope=\(scope ?? "nil") section=\(section ?? "nil") page=\(page.map(String.init) ?? "nil") rect=(\(rect.left),\(rect.right),\(rect.top),\(rect.bottom))")
+        for rule in areas.rules {
+            print("[DupCheck] Existing: type=\(rule.type) scope=\(rule.scope ?? "nil") section=\(rule.section ?? "nil") page=\(rule.page.map(String.init) ?? "nil") rect=(\(rule.rect.left),\(rule.rect.right),\(rule.rect.top),\(rule.rect.bottom))")
+        }
+
+        return areas.rules.first { rule in
+            if let excludingRule = excludingRule, rule == excludingRule {
+                return false
+            }
+            if rule.type != type {
+                return false
+            }
+            if rule.scope != scope {
+                return false
+            }
+            if rule.section != section {
+                return false
+            }
+            if rule.page != page {
+                return false
+            }
+            let rectTolerance: CGFloat = 0.01
+            let isDuplicateRect = abs(rule.rect.left - rect.left) <= rectTolerance &&
+                                  abs(rule.rect.right - rect.right) <= rectTolerance &&
+                                  abs(rule.rect.top - rect.top) <= rectTolerance &&
+                                  abs(rule.rect.bottom - rect.bottom) <= rectTolerance
+            return isDuplicateRect
+        }
     }
 
     private func currentLayoutAreaRuleCount() -> Int {
@@ -2574,11 +2674,19 @@ final class AppState: ObservableObject {
         return try JSONDecoder().decode(OCRLayoutAreasFile.self, from: data)
     }
 
-    private func writeLayoutAreasFile(_ areas: OCRLayoutAreasFile, to url: URL) throws {
+    func writeLayoutAreasFile(_ areas: OCRLayoutAreasFile, to url: URL? = nil) throws {
+        let targetURL: URL
+        if let providedURL = url {
+            targetURL = providedURL
+        } else if let fileURL = layoutAreasFileURL() {
+            targetURL = fileURL
+        } else {
+            throw NSError(domain: "NewOCR", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not determine layout areas file URL"])
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(areas)
-        try data.write(to: url, options: .atomic)
+        try data.write(to: targetURL, options: .atomic)
     }
 
     func removeHeaderFooterReviewItem(_ item: String) {
@@ -4100,7 +4208,63 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func sectionRemovalTitle(for item: PDFFileItem) -> String {
+    func clearOCRForSection(_ item: PDFFileItem) {
+        pendingClearOCRItem = item
+        isClearOCRConfirmationPresented = true
+    }
+
+    func confirmClearOCRAndProceed() {
+        guard let item = pendingClearOCRItem else { return }
+        do {
+            try removeAppleVisionResources(for: item.url)
+            epubReadySectionIDs.remove(item.id)
+            saveBookSections()
+            save()
+            configStatus = "OCR cleared for \(sectionRemovalTitle(for: item))"
+        } catch {
+            configStatus = "Could not clear OCR: \(error.localizedDescription)"
+            showAlert(title: "Could Not Clear OCR", message: error.localizedDescription)
+        }
+        isClearOCRConfirmationPresented = false
+        pendingClearOCRItem = nil
+    }
+
+    func closeClearOCRConfirmation() {
+        isClearOCRConfirmationPresented = false
+        pendingClearOCRItem = nil
+    }
+
+    var canClearAllOCR: Bool {
+        pdfFiles.contains { hasAppleVisionResources(for: $0.url) || (!$0.isManualSection && epubReadySectionIDs.contains($0.id)) }
+    }
+
+    func clearAllOCR() {
+        isClearAllOCRConfirmationPresented = true
+    }
+
+    func confirmClearAllOCRAndProceed() {
+        let items = pdfFiles
+        var cleared = 0
+        for item in items {
+            do {
+                try removeAppleVisionResources(for: item.url)
+                epubReadySectionIDs.remove(item.id)
+                cleared += 1
+            } catch {
+                configStatus = "Could not clear OCR for \(item.url.lastPathComponent): \(error.localizedDescription)"
+            }
+        }
+        saveBookSections()
+        save()
+        isClearAllOCRConfirmationPresented = false
+        configStatus = "Cleared OCR for \(cleared) section(s)."
+    }
+
+    func closeClearAllOCRConfirmation() {
+        isClearAllOCRConfirmationPresented = false
+    }
+
+    func sectionRemovalTitle(for item: PDFFileItem) -> String {
         let title = pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !title.isEmpty {
             return title
@@ -5998,6 +6162,7 @@ final class AppState: ObservableObject {
 
         var rendered: [String] = []
         var pendingTextLines: [OCRLine] = []
+        var pendingHeaderLines: [OCRLine] = []
         var pendingQuoteLines: [OCRLine] = []
         var pendingFootnoteLines: [OCRLine] = []
 
@@ -6007,6 +6172,16 @@ final class AppState: ObservableObject {
                 rendered.append(text)
             }
             pendingTextLines.removeAll()
+        }
+
+        func flushHeader() {
+            if !pendingHeaderLines.isEmpty {
+                let headerLines = pendingHeaderLines
+                    .map { "## \($0.text.trimmingCharacters(in: .whitespacesAndNewlines))" }
+                    .joined(separator: "\n")
+                rendered.append(headerLines)
+                pendingHeaderLines.removeAll()
+            }
         }
 
         func flushQuote() {
@@ -6026,6 +6201,7 @@ final class AppState: ObservableObject {
         for block in blocks {
             switch block {
             case .text(let line):
+                flushHeader()
                 flushQuote()
                 flushFootnote()
                 pendingTextLines.append(line)
@@ -6033,22 +6209,26 @@ final class AppState: ObservableObject {
                 flushText()
                 flushQuote()
                 flushFootnote()
-                rendered.append("## \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+                pendingHeaderLines.append(line)
             case .blockquote(let line):
+                flushHeader()
                 flushText()
                 flushFootnote()
                 pendingQuoteLines.append(line)
             case .footnote(let line):
+                flushHeader()
                 flushText()
                 flushQuote()
                 pendingFootnoteLines.append(line)
             case .image(let imageRegion):
+                flushHeader()
                 flushText()
                 flushQuote()
                 flushFootnote()
                 rendered.append(imageRegion.markdown)
             }
         }
+        flushHeader()
         flushText()
         flushQuote()
         flushFootnote()
@@ -6084,6 +6264,10 @@ final class AppState: ObservableObject {
         let fileName = pdfURL.lastPathComponent
         let stem = pdfURL.deletingPathExtension().lastPathComponent
         return rules.filter { rule in
+            let ruleType = rule.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ruleType == "header" && pageNumber != 1 {
+                return false
+            }
             if let page = rule.page, page != pageNumber {
                 return false
             }
@@ -7772,6 +7956,15 @@ struct StepOneLoadPDFView: View {
                             ) {
                                 appState.scanHeaderFooterAllSections()
                             }
+                            SectionIconButton(
+                                title: "Clear All OCR",
+                                systemImage: "trash.fill",
+                                isDisabled: !appState.canClearAllOCR,
+                                backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                                foregroundColor: Color.white
+                            ) {
+                                appState.clearAllOCR()
+                            }
                             Spacer()
                         }
 
@@ -7813,7 +8006,7 @@ struct StepOneLoadPDFView: View {
                 .environmentObject(appState)
         }
         .overlay {
-            if appState.isEPUBBuiltAlertPresented || appState.isLayoutRefreshConfirmationPresented || appState.isCropResetConfirmationPresented {
+            if appState.isEPUBBuiltAlertPresented || appState.isLayoutRefreshConfirmationPresented || appState.isCropResetConfirmationPresented || appState.isClearOCRConfirmationPresented || appState.isClearAllOCRConfirmationPresented {
                 Color.black.opacity(0.34)
                     .ignoresSafeArea()
             }
@@ -7868,6 +8061,16 @@ struct StepOneLoadPDFView: View {
 
             if appState.isCropResetConfirmationPresented {
                 CropResetConfirmationView()
+                    .environmentObject(appState)
+            }
+
+            if appState.isClearOCRConfirmationPresented {
+                ClearOCRConfirmationView()
+                    .environmentObject(appState)
+            }
+
+            if appState.isClearAllOCRConfirmationPresented {
+                ClearAllOCRConfirmationView()
                     .environmentObject(appState)
             }
         }
@@ -8032,6 +8235,739 @@ private struct LayoutRefreshConfirmationView: View {
                     appState.closeLayoutRefreshConfirmation()
                 }
                 .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 560)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct ClearAllOCRConfirmationView: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "trash.fill")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Clear All OCR?")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text("OCR Markdown files and resources will be removed for all sections.")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Removes `AppleVision/MD/<section>/` for every section.", systemImage: "trash")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Removes all pure OCR snapshots from `OriginalOCR/` folders.", systemImage: "doc.text")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Removes all line-cache entries for all sections.", systemImage: "line.3.horizontal")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Resets the Ready for EPUB flag for all sections.", systemImage: "checkmark.square")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Preserves header/footer review file for future processing.", systemImage: "checkmark.circle")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .labelStyle(.titleAndIcon)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+
+            HStack(spacing: 12) {
+                Spacer()
+
+                OCRIconButton(
+                    title: "Clear All",
+                    systemImage: "checkmark",
+                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                    foregroundColor: .black,
+                    size: 42
+                ) {
+                    appState.confirmClearAllOCRAndProceed()
+                }
+                .keyboardShortcut(.defaultAction)
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white,
+                    size: 42
+                ) {
+                    appState.closeClearAllOCRConfirmation()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 560)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct ClearOCRConfirmationView: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Clear OCR for \(appState.pendingClearOCRItem.map { appState.sectionRemovalTitle(for: $0) } ?? "Section")?")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text("OCR Markdown files and resources will be removed.")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Removes `AppleVision/MD/<section>/` directory with all Markdown files and images.", systemImage: "trash")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Removes the pure OCR snapshot from `OriginalOCR/` folder.", systemImage: "doc.text")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Removes line-cache entries for this section.", systemImage: "line.3.horizontal")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Resets the Ready for EPUB flag to unchecked.", systemImage: "checkmark.square")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Preserves header/footer review file for future processing.", systemImage: "checkmark.circle")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .labelStyle(.titleAndIcon)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+
+            HStack(spacing: 12) {
+                Spacer()
+
+                OCRIconButton(
+                    title: "Clear",
+                    systemImage: "checkmark",
+                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                    foregroundColor: .black,
+                    size: 42
+                ) {
+                    appState.confirmClearOCRAndProceed()
+                }
+                .keyboardShortcut(.defaultAction)
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white,
+                    size: 42
+                ) {
+                    appState.closeClearOCRConfirmation()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 560)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct LayoutAreasReportView: View {
+    @EnvironmentObject private var appState: AppState
+    @Binding var isPresented: Bool
+    @ObservedObject var state: LayoutAreaEditorState
+    @State private var rules: [OCRLayoutAreaRule] = []
+    @State private var isLoading = true
+    @State private var pendingDeleteRule: OCRLayoutAreaRule?
+    @State private var isDeleteConfirmationPresented = false
+
+    private var typeColors: [String: Color] {
+        [
+            "header": Color(red: 30/255, green: 139/255, blue: 238/255),
+            "blockquote": Color(red: 255/255, green: 182/255, blue: 216/255),
+            "image": Color(red: 255/255, green: 152/255, blue: 0/255),
+            "footnote": Color(red: 120/255, green: 220/255, blue: 100/255),
+            "ignore": Color.red.opacity(0.8)
+        ]
+    }
+
+    private var typeIcons: [String: String] {
+        [
+            "header": "textformat.size",
+            "blockquote": "quote.bubble",
+            "image": "photo",
+            "footnote": "text.badge.plus",
+            "ignore": "eye.slash"
+        ]
+    }
+
+    private var typeLabels: [String: String] {
+        [
+            "header": "Section Title",
+            "blockquote": "Quote",
+            "image": "Image",
+            "footnote": "Footnote",
+            "ignore": "Ignore"
+        ]
+    }
+
+    var body: some View {
+        ZStack {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .center, spacing: 16) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.white.opacity(0.94))
+                            .frame(width: 58, height: 58)
+                            .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                        Image(systemName: "list.bullet.rectangle")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(Color.black)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Layout Area Rules")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.headingText)
+                        Text("\(rules.count) rule\(rules.count == 1 ? "" : "s") saved")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+
+                    Spacer()
+
+                    OCRIconButton(
+                        title: "Close",
+                        systemImage: "xmark",
+                        backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                        foregroundColor: .white,
+                        size: 42
+                    ) {
+                        isPresented = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                }
+                .padding(22)
+                .border(width: 1, edges: [.bottom], color: NewOCRMainPalette.stroke)
+
+                if isLoading {
+                    VStack {
+                        ProgressView()
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                        Text("Loading rules...")
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(22)
+                } else if rules.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "list.bullet.rectangle")
+                            .font(.system(size: 40))
+                            .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                        Text("No Layout Area Rules")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                        Text("Define and save layout areas to see them here")
+                            .font(.system(size: 13))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(22)
+                } else {
+                    ScrollView(.vertical, showsIndicators: true) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(sortedRules.enumerated()), id: \.offset) { index, rule in
+                                LayoutAreaRuleRow(
+                                    rule: rule,
+                                    typeColor: typeColors[rule.type] ?? .gray,
+                                    typeIcon: typeIcons[rule.type] ?? "rectangle.dashed",
+                                    typeLabel: typeLabels[rule.type] ?? rule.type,
+                                    onLoad: {
+                                        state.loadRule(rule)
+                                        isPresented = false
+                                    },
+                                    onDelete: {
+                                        pendingDeleteRule = rule
+                                        isDeleteConfirmationPresented = true
+                                    }
+                                )
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
+
+                                if index < sortedRules.count - 1 {
+                                    Divider()
+                                        .overlay(NewOCRMainPalette.stroke)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(NewOCRMainPalette.rowBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                        )
+                        .padding(8)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(NewOCRMainPalette.panelBackground)
+                }
+            }
+            .padding(22)
+            .frame(minWidth: 500, minHeight: 400)
+            .background(NewOCRMainPalette.panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+
+            if isDeleteConfirmationPresented {
+                Color.black.opacity(0.34)
+                    .ignoresSafeArea()
+
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color.white.opacity(0.94))
+                                .frame(width: 58, height: 58)
+                                .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                            Image(systemName: "trash.fill")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundStyle(Color.red)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Delete Layout Area Rule?")
+                                .font(.system(size: 24, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.headingText)
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Color(red: 255/255, green: 169/255, blue: 48/255))
+                                Text("This action cannot be undone.")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(Color(red: 255/255, green: 169/255, blue: 48/255))
+                            }
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+
+                    if let rule = pendingDeleteRule {
+                        DeleteRuleDetailView(rule: rule, typeIcon: typeIcons[rule.type] ?? "rectangle.dashed", typeLabel: typeLabels[rule.type] ?? rule.type)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(NewOCRMainPalette.fieldBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                        )
+                    }
+
+                    HStack(spacing: 12) {
+                        Spacer()
+
+                        OCRIconButton(
+                            title: "Cancel",
+                            systemImage: "xmark",
+                            backgroundColor: Color(red: 100/255, green: 100/255, blue: 105/255),
+                            foregroundColor: .white,
+                            size: 42
+                        ) {
+                            isDeleteConfirmationPresented = false
+                            pendingDeleteRule = nil
+                        }
+                        .keyboardShortcut(.cancelAction)
+
+                        OCRIconButton(
+                            title: "Delete",
+                            systemImage: "trash",
+                            backgroundColor: Color.red,
+                            foregroundColor: .white,
+                            size: 42
+                        ) {
+                            if let rule = pendingDeleteRule {
+                                deleteRule(for: rule)
+                                isDeleteConfirmationPresented = false
+                                pendingDeleteRule = nil
+                            }
+                        }
+                        .keyboardShortcut(.defaultAction)
+                    }
+                }
+                .padding(22)
+                .frame(width: 560)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+                .buttonStyle(NewOCRButtonStyle())
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(NewOCRMainPalette.windowBackground)
+        .onAppear {
+            loadRules()
+        }
+    }
+
+    private var sortedRules: [OCRLayoutAreaRule] {
+        rules.sorted { rule1, rule2 in
+            let section1 = rule1.section ?? ""
+            let section2 = rule2.section ?? ""
+
+            if section1 != section2 {
+                return section1.localizedStandardCompare(section2) == .orderedAscending
+            }
+
+            let page1 = rule1.page ?? 0
+            let page2 = rule2.page ?? 0
+            return page1 < page2
+        }
+    }
+
+    private func loadRules() {
+        isLoading = true
+        DispatchQueue.global().async {
+            if let url = appState.layoutAreasFileURL(),
+               let data = try? Data(contentsOf: url),
+               let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
+                DispatchQueue.main.async {
+                    rules = decoded.rules
+                    isLoading = false
+                }
+            } else {
+                DispatchQueue.main.async {
+                    rules = []
+                    isLoading = false
+                }
+            }
+        }
+    }
+
+    private func deleteRule(for rule: OCRLayoutAreaRule) {
+        rules.removeAll { $0 == rule }
+        saveRules()
+    }
+
+    private func saveRules() {
+        let file = OCRLayoutAreasFile(rules: rules)
+        try? appState.writeLayoutAreasFile(file)
+    }
+}
+
+private struct LayoutAreaRuleRow: View {
+    let rule: OCRLayoutAreaRule
+    let typeColor: Color
+    let typeIcon: String
+    let typeLabel: String
+    let onLoad: () -> Void
+    let onDelete: () -> Void
+    @State private var isDeleteHovered = false
+    @State private var isLoadHovered = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: typeIcon)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .background(typeColor)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(typeLabel)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+
+                HStack(spacing: 8) {
+                    if rule.scope != nil {
+                        Text("All Sections")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    } else if let section = rule.section {
+                        Text(section)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+
+                        if let page = rule.page {
+                            Text("Page \(page)")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        }
+                    }
+                }
+            }
+
+            Spacer()
+
+            Button(action: onLoad) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 44, height: 44)
+            .background(Color.blue.opacity(isLoadHovered ? 0.9 : 0.8))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .help("Load rule")
+            .onHover { hovering in
+                isLoadHovered = hovering
+            }
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 44, height: 44)
+            .background(Color.red.opacity(isDeleteHovered ? 0.9 : 0.8))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .help("Delete rule")
+            .onHover { hovering in
+                isDeleteHovered = hovering
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// Border extension for splitting header and content
+extension View {
+    func border(width: CGFloat, edges: [Edge], color: Color) -> some View {
+        overlay(alignment: .bottom) {
+            if edges.contains(.bottom) {
+                VStack {
+                    Spacer()
+                    color.frame(height: width)
+                }
+            }
+        }
+    }
+}
+
+private struct DeleteRuleDetailView: View {
+    let rule: OCRLayoutAreaRule
+    let typeIcon: String
+    let typeLabel: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: typeIcon)
+                Text(typeLabel)
+            }
+            .foregroundStyle(NewOCRMainPalette.primaryText)
+
+            if rule.scope != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "globe")
+                    Text("All Sections")
+                }
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+            if let section = rule.section {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.richtext")
+                    Text(section)
+                }
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+            if let pageNum = rule.page {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.text")
+                    Text("Page " + String(pageNum))
+                }
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+        }
+        .font(.system(size: 15, weight: .semibold))
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(NewOCRMainPalette.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+}
+
+private struct DuplicateRuleWarningView: View {
+    let duplicateRule: OCRLayoutAreaRule
+    let onCancel: () -> Void
+    let onContinue: () -> Void
+
+    private let typeLabels: [String: String] = [
+        "header": "Section Title",
+        "blockquote": "Quote",
+        "image": "Image",
+        "footnote": "Footnote",
+        "ignore": "Ignore"
+    ]
+
+    private let typeIcons: [String: String] = [
+        "header": "textformat.size",
+        "blockquote": "quote.bubble",
+        "image": "photo",
+        "footnote": "text.badge.plus",
+        "ignore": "eye.slash"
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color(red: 1.0, green: 0.84, blue: 0.0).opacity(0.92))
+                        .frame(width: 52, height: 52)
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 25, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Duplicate Rule Found")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Text("A similar rule with the same settings already exists")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Existing Rule:")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+
+                HStack(spacing: 12) {
+                    Image(systemName: typeIcons[duplicateRule.type] ?? "rectangle.dashed")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color(red: 30/255, green: 139/255, blue: 238/255))
+                        .frame(width: 40)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(typeLabels[duplicateRule.type] ?? duplicateRule.type)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+
+                        HStack(spacing: 6) {
+                            if duplicateRule.scope != nil {
+                                Text("All Sections")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            } else if let section = duplicateRule.section {
+                                Text(section)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+
+                                if let page = duplicateRule.page {
+                                    Text("Page \(page)")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer()
+                }
+                .padding(12)
+                .background(NewOCRMainPalette.fieldBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+            }
+            .padding(12)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+
+            HStack(spacing: 12) {
+                Spacer()
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white,
+                    size: 42
+                ) {
+                    onCancel()
+                }
             }
         }
         .padding(22)
@@ -8719,8 +9655,8 @@ struct PDFListView: View {
     @State private var autoScrolledTargetID: String?
     private let sectionActionColumnWidth: CGFloat = 156
     private let sectionNameColumnWidth: CGFloat = 365
-    private let sectionTitleColumnWidth: CGFloat = 295
-    private let sectionCommandColumnWidth: CGFloat = 228
+    private let sectionTitleColumnWidth: CGFloat = 200
+    private let sectionCommandColumnWidth: CGFloat = 310
     private let sectionTableWidth: CGFloat = 1118
 
     private var sectionIDsSignature: String {
@@ -8895,6 +9831,18 @@ struct PDFListView: View {
                                                 foregroundColor: Color.black
                                             ) {
                                                 appState.openOCRCompareReport(for: item)
+                                            }
+                                        }
+
+                                        if appState.appleVisionMarkdownExists(for: item) {
+                                            SectionIconButton(
+                                                title: "Clear OCR",
+                                                systemImage: "xmark.circle.fill",
+                                                isDisabled: appState.isScanningHeaderFooter(for: item),
+                                                backgroundColor: Color.red.opacity(0.80),
+                                                foregroundColor: Color.white
+                                            ) {
+                                                appState.clearOCRForSection(item)
                                             }
                                         }
                                     }
@@ -12057,9 +13005,11 @@ struct LayoutAreaEditorWindowView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var state: LayoutAreaEditorState
     @State private var isSelectedSectionsPopoverPresented = false
+    @State private var isLayoutAreasReportPresented = false
+    @State private var pendingDuplicateRule: OCRLayoutAreaRule?
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
-        ("header", "Header", "textformat.size"),
+        ("header", "Section Title", "textformat.size"),
         ("blockquote", "Quote", "quote.bubble"),
         ("image", "Image", "photo"),
         ("footnote", "Footnote", "text.badge.plus"),
@@ -12100,6 +13050,55 @@ struct LayoutAreaEditorWindowView: View {
             }
             .environmentObject(appState)
         }
+        .sheet(isPresented: $isLayoutAreasReportPresented) {
+            LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state)
+                .environmentObject(appState)
+        }
+        .sheet(item: $pendingDuplicateRule) { duplicate in
+            DuplicateRuleWarningView(
+                duplicateRule: duplicate,
+                onCancel: {
+                    pendingDuplicateRule = nil
+                },
+                onContinue: {
+                    pendingDuplicateRule = nil
+                    performSave()
+                }
+            )
+        }
+    }
+
+    private func performSave() {
+        guard let url = state.selectedPDFURL else { return }
+        do {
+            let count: Int
+            if let loadedRule = state.loadedRule {
+                count = try appState.updateLayoutAreaRule(
+                    loadedRule,
+                    with: state.selectedType,
+                    newScope: state.selectedScope,
+                    newCurrentSectionURL: url,
+                    newSelectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
+                    newPageNumber: state.selectedPage,
+                    newRect: state.normalizedOCRRect
+                )
+                state.loadedRule = nil
+                state.status = "Updated \(displayName(for: state.selectedType)) area."
+            } else {
+                count = try appState.saveLayoutAreaRules(
+                    type: state.selectedType,
+                    scope: state.selectedScope,
+                    currentSectionURL: url,
+                    selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
+                    pageNumber: state.selectedPage,
+                    rect: state.normalizedOCRRect
+                )
+                state.status = savedStatusMessage(for: state.selectedType)
+            }
+            state.savedRuleCount = count
+        } catch {
+            state.status = "Could not save: \(error.localizedDescription)"
+        }
     }
 
     private var header: some View {
@@ -12134,35 +13133,47 @@ struct LayoutAreaEditorWindowView: View {
                 .frame(minWidth: 96, alignment: .trailing)
 
             OCRIconButton(
+                title: "View Rules",
+                systemImage: "list.bullet.rectangle",
+                backgroundColor: state.loadedRule != nil ? Color(red: 30/255, green: 139/255, blue: 238/255).opacity(0.5) : Color(red: 30/255, green: 139/255, blue: 238/255),
+                foregroundColor: .white,
+                size: 44
+            ) {
+                isLayoutAreasReportPresented = true
+            }
+            .disabled(state.loadedRule != nil)
+
+            OCRIconButton(
                 title: "Advanced JSON",
                 systemImage: "curlybraces",
-                backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255),
+                backgroundColor: state.loadedRule != nil ? Color(red: 255/255, green: 182/255, blue: 216/255).opacity(0.5) : Color(red: 255/255, green: 182/255, blue: 216/255),
                 foregroundColor: .black,
                 size: 44
             ) {
                 appState.openLayoutAreasJSONEditor()
             }
+            .disabled(state.loadedRule != nil)
 
             OCRIconButton(
                 title: "Clear Rules",
                 systemImage: "trash",
-                backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                backgroundColor: state.loadedRule != nil ? Color(red: 255/255, green: 71/255, blue: 71/255).opacity(0.5) : Color(red: 255/255, green: 71/255, blue: 71/255),
                 foregroundColor: .white,
                 size: 44
             ) {
                 clearRules()
             }
+            .disabled(state.loadedRule != nil)
 
             OCRIconButton(
-                title: "Save Area",
-                systemImage: "square.and.arrow.down",
-                backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                title: state.loadedRule != nil ? "Update Rule" : "Save Area",
+                systemImage: state.loadedRule != nil ? "pencil.and.list.clipboard" : "square.and.arrow.down",
+                backgroundColor: state.loadedRule != nil ? Color(red: 255/255, green: 159/255, blue: 64/255) : Color(red: 53/255, green: 200/255, blue: 90/255),
                 foregroundColor: .black,
                 size: 44
             ) {
                 saveCurrentArea()
             }
-            .keyboardShortcut(.defaultAction)
 
             OCRIconButton(
                 title: "Close",
@@ -12349,17 +13360,87 @@ struct LayoutAreaEditorWindowView: View {
             isSelectedSectionsPopoverPresented = true
             return
         }
-        do {
-            let count = try appState.saveLayoutAreaRules(
+
+        let normalizedRect = state.normalizedOCRRect
+        let cleanScope = state.selectedScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        var duplicateFound: OCRLayoutAreaRule? = nil
+
+        switch cleanScope {
+        case "all_sections":
+            duplicateFound = appState.findDuplicateRule(
                 type: state.selectedType,
-                scope: state.selectedScope,
-                currentSectionURL: url,
-                selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
-                pageNumber: state.selectedPage,
-                rect: state.normalizedOCRRect
+                scope: "all_sections",
+                section: nil,
+                page: nil,
+                rect: normalizedRect,
+                excludingRule: state.loadedRule
             )
+        case "selected_sections":
+            for item in state.selectedLayoutSectionItems {
+                if let duplicate = appState.findDuplicateRule(
+                    type: state.selectedType,
+                    scope: nil,
+                    section: item.url.lastPathComponent,
+                    page: nil,
+                    rect: normalizedRect,
+                    excludingRule: state.loadedRule
+                ) {
+                    duplicateFound = duplicate
+                    break
+                }
+            }
+        case "page":
+            duplicateFound = appState.findDuplicateRule(
+                type: state.selectedType,
+                scope: nil,
+                section: url.lastPathComponent,
+                page: state.selectedPage,
+                rect: normalizedRect,
+                excludingRule: state.loadedRule
+            )
+        default:
+            duplicateFound = appState.findDuplicateRule(
+                type: state.selectedType,
+                scope: nil,
+                section: url.lastPathComponent,
+                page: nil,
+                rect: normalizedRect,
+                excludingRule: state.loadedRule
+            )
+        }
+
+        if let duplicate = duplicateFound {
+            pendingDuplicateRule = duplicate
+            return
+        }
+
+        do {
+            let count: Int
+            if let loadedRule = state.loadedRule {
+                count = try appState.updateLayoutAreaRule(
+                    loadedRule,
+                    with: state.selectedType,
+                    newScope: state.selectedScope,
+                    newCurrentSectionURL: url,
+                    newSelectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
+                    newPageNumber: state.selectedPage,
+                    newRect: state.normalizedOCRRect
+                )
+                state.loadedRule = nil
+                state.status = "Updated \(displayName(for: state.selectedType)) area."
+            } else {
+                count = try appState.saveLayoutAreaRules(
+                    type: state.selectedType,
+                    scope: state.selectedScope,
+                    currentSectionURL: url,
+                    selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
+                    pageNumber: state.selectedPage,
+                    rect: state.normalizedOCRRect
+                )
+                state.status = savedStatusMessage(for: state.selectedType)
+            }
             state.savedRuleCount = count
-            state.status = savedStatusMessage(for: state.selectedType)
         } catch {
             state.status = "Could not save: \(error.localizedDescription)"
         }
@@ -12621,6 +13702,16 @@ private struct LayoutAreaSelectedSectionsModal: View {
                     size: 34
                 ) {
                     state.setAllLayoutSectionsSelected(false)
+                }
+
+                OCRIconButton(
+                    title: "OK",
+                    systemImage: "checkmark",
+                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                    foregroundColor: .black,
+                    size: 34
+                ) {
+                    close()
                 }
 
                 OCRIconButton(
