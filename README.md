@@ -902,8 +902,13 @@ The window is a split editor:
 
 Features:
 
-- Preview Markdown, Compare, Save Markdown, Close, Run OCR, Files, Log,
+- Preview Markdown, Compare, Save Markdown, Close, View Rules, Run OCR, Files, Log,
   Information, Replace, and Remove Search use icon-first buttons with hover help
+- **View Rules** button (blue, next to Run OCR) opens a read-only popup showing all
+  layout area rules that apply to the current section — includes rules scoped to
+  all sections and rules targeting this specific section file. The load (pencil)
+  button is hidden in this view since it is read-only; the delete button remains
+  available. The popup title shows the section filename and how many rules apply.
 - Search Text
 - Replace All
 - icon-only status/focus shortcuts for Image, Footnote, and Blockquote

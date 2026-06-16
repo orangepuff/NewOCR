@@ -8433,7 +8433,8 @@ private struct ClearOCRConfirmationView: View {
 private struct LayoutAreasReportView: View {
     @EnvironmentObject private var appState: AppState
     @Binding var isPresented: Bool
-    @ObservedObject var state: LayoutAreaEditorState
+    var state: LayoutAreaEditorState? = nil
+    var sectionFileName: String? = nil
     @State private var rules: [OCRLayoutAreaRule] = []
     @State private var isLoading = true
     @State private var pendingDeleteRule: OCRLayoutAreaRule?
@@ -8487,9 +8488,20 @@ private struct LayoutAreasReportView: View {
                         Text("Layout Area Rules")
                             .font(.system(size: 24, weight: .semibold))
                             .foregroundStyle(NewOCRMainPalette.headingText)
-                        Text("\(rules.count) rule\(rules.count == 1 ? "" : "s") saved")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        if let sectionFileName {
+                            Text(sectionFileName)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text("\(sortedRules.count) rule\(sortedRules.count == 1 ? "" : "s") for this section")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        } else {
+                            Text("\(sortedRules.count) rule\(sortedRules.count == 1 ? "" : "s") saved")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        }
                     }
 
                     Spacer()
@@ -8525,7 +8537,8 @@ private struct LayoutAreasReportView: View {
                         Text("No Layout Area Rules")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(NewOCRMainPalette.primaryText)
-                        Text("Define and save layout areas to see them here")
+                        Text(sectionFileName != nil ? "No rules apply to this section" : "Define and save layout areas to see them here")
+
                             .font(.system(size: 13))
                             .foregroundStyle(NewOCRMainPalette.secondaryText)
                     }
@@ -8540,8 +8553,9 @@ private struct LayoutAreasReportView: View {
                                     typeColor: typeColors[rule.type] ?? .gray,
                                     typeIcon: typeIcons[rule.type] ?? "rectangle.dashed",
                                     typeLabel: typeLabels[rule.type] ?? rule.type,
+                                    showLoadButton: sectionFileName == nil,
                                     onLoad: {
-                                        state.loadRule(rule)
+                                        state?.loadRule(rule)
                                         isPresented = false
                                     },
                                     onDelete: {
@@ -8677,8 +8691,15 @@ private struct LayoutAreasReportView: View {
         }
     }
 
+    private var filteredRules: [OCRLayoutAreaRule] {
+        guard let sectionFileName else { return rules }
+        return rules.filter { rule in
+            rule.scope == "all_sections" || rule.section == sectionFileName
+        }
+    }
+
     private var sortedRules: [OCRLayoutAreaRule] {
-        rules.sorted { rule1, rule2 in
+        filteredRules.sorted { rule1, rule2 in
             let section1 = rule1.section ?? ""
             let section2 = rule2.section ?? ""
 
@@ -8727,6 +8748,7 @@ private struct LayoutAreaRuleRow: View {
     let typeColor: Color
     let typeIcon: String
     let typeLabel: String
+    var showLoadButton: Bool = true
     let onLoad: () -> Void
     let onDelete: () -> Void
     @State private var isDeleteHovered = false
@@ -8767,17 +8789,19 @@ private struct LayoutAreaRuleRow: View {
 
             Spacer()
 
-            Button(action: onLoad) {
-                Image(systemName: "pencil")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 44, height: 44)
-            .background(Color.blue.opacity(isLoadHovered ? 0.9 : 0.8))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .help("Load rule")
-            .onHover { hovering in
-                isLoadHovered = hovering
+            if showLoadButton {
+                Button(action: onLoad) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 44, height: 44)
+                .background(Color.blue.opacity(isLoadHovered ? 0.9 : 0.8))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .help("Load rule")
+                .onHover { hovering in
+                    isLoadHovered = hovering
+                }
             }
 
             Button(action: onDelete) {
@@ -10032,6 +10056,7 @@ struct StepTwoOCRView: View {
     @State private var isSaveAlertPresented = false
     @State private var windowToCloseAfterSave: NSWindow?
     @State private var replacementText = ""
+    @State private var isViewRulesPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -10291,6 +10316,18 @@ struct StepTwoOCRView: View {
                     .popover(isPresented: $isFilesPopoverPresented) {
                         FilesPopoverView()
                             .environmentObject(appState)
+                    }
+
+                    OCRIconButton(title: "View Rules", systemImage: "list.bullet.rectangle", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
+                        isViewRulesPresented = true
+                    }
+                    .disabled(appState.selectedPDFPath.isEmpty)
+                    .sheet(isPresented: $isViewRulesPresented) {
+                        LayoutAreasReportView(
+                            isPresented: $isViewRulesPresented,
+                            sectionFileName: appState.selectedPDFFileItem?.url.lastPathComponent
+                        )
+                        .environmentObject(appState)
                     }
 
                     OCRIconButton(title: "Run OCR", systemImage: appState.isOCRRunning ? "hourglass" : "text.viewfinder", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
