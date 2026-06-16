@@ -302,7 +302,17 @@ Detect Split:
   when the Detect Split window opens; clear the initial first responder after
   layout when this issue appears in new editable popup/list surfaces.
 - **Split** creates checked ranges in batch as sequential `section-###.pdf`
-  files and closes the Add Split window.
+  files. The editable **Title** value currently shown in each checked Detect
+  Split row is the value that must be saved for the matching new section.
+  NewOCR writes those edited titles directly to `book-sections.json` at split
+  save time, then reloads the main section list from `book-sections.json` so the
+  section row Title text fields show the saved values immediately. This must
+  work both when Add Split is opened directly and when Add Split opens
+  automatically after saving Crop PDF.
+- `split-plan.json` also stores the created ranges and their titles for split
+  history/debugging, but the main Section List title text fields should not rely
+  on a later fallback from `split-plan.json`. Detect Split must persist the
+  edited row titles into `book-sections.json` when the user clicks **Split**.
 - **Close** only closes the Detect Split window.
 
 ### Add Split Navigation Rules
@@ -349,15 +359,21 @@ Crop PDF lets the user select a crop rectangle visually and save a cropped
 working PDF. It should preserve `_original.pdf` and copy the PDF bookmark
 outline into the cropped working PDF so Detect Split can still use bookmarks.
 
+When the user clicks **Crop** and the project already has one or more
+`section-###.pdf` files, NewOCR first shows a dark NewOCR-styled confirmation
+popup. **Close** leaves the project unchanged and does not open Crop. **OK**
+removes all section PDF files, clears saved split ranges, removes generated OCR
+resources for those sections, resets their titles/Ready flags, and then opens
+Crop for the working PDF.
+
 The crop window may open full screen based on config.
 It should use the same dark NewOCR window style as Add Split and OCR windows:
 icon-only Save/Close buttons, larger readable labels, and the shared thick
 NewOCR page slider instead of previous/next chevron buttons. The Crop page
 slider uses slightly faster drag sensitivity so page changes feel responsive.
 
-When Crop PDF was opened from the **New** project route, saving the crop should
-close Crop PDF and then open Add Split. Opening Crop from the existing project
-menu should only save/close Crop and must not automatically open Add Split.
+When Crop PDF is saved successfully, the Crop PDF window closes and Add Split
+opens for the freshly cropped working PDF.
 
 If Crop PDF was opened from the **New** project route and the user closes it
 before saving a crop, warn that the crop is required before continuing to Add
@@ -506,9 +522,19 @@ AppleVision/layout-areas.json
 Define Layout is available only after at least one `section-###.pdf` split file
 exists in the project folder.
 
+If the project already has OCR output or PDF sections marked **Ready for EPUB**,
+opening Define Layout first shows a dark NewOCR-styled confirmation popup with
+the standard white icon tile, bordered content panel, and icon-only **OK** and
+**Close** buttons. **Close** leaves the project unchanged. **OK** removes
+existing OCR Markdown, generated images, pure OCR snapshots, and section
+line-cache data for PDF sections, then resets those PDF sections' **Ready for
+EPUB** flags so the project can be OCR processed again with the new layout
+rules.
+
 This is a main-window action because the same rules can apply across all
 sections. The JSON file is still available from the editor's **Advanced** button
-for debugging or manual adjustment.
+for debugging or manual adjustment. Advanced JSON opens in a separate retained
+dark editor window and must not close or dismiss the Define Layout window.
 
 Supported rule types:
 
@@ -611,13 +637,14 @@ UI notes:
 - Use a split working layout. The left panel is the section file list, about
   `300` points wide, with large clickable rows (`minHeight: 68`) for selecting
   the active section PDF. Do not use a compact Section dropdown for this window.
-  The right side gets the remaining width and contains the instruction/status
-  text, Scope controls, icon-only layout-type buttons, a large Page slider, and
-  the expanding PDF preview.
-- Keep the controls from being cut off: the instruction/status text,
-  layout-type icon buttons, and wider Scope segmented control share one compact
-  control row when space allows; the row may wrap before it overflows. Page
-  navigation lives in its own slider row below.
+  The right side gets the remaining width and contains Scope controls,
+  icon-only layout-type buttons, a large Page slider, and the expanding PDF
+  preview.
+- Keep the controls from being cut off: the layout-type icon buttons and wider
+  Scope segmented control share one compact control row when space allows; the
+  row may wrap before it overflows. Page navigation lives in its own slider row
+  below. Define Layout does not show default instruction text in this control
+  row; save/error status appears in the page slider row only after an action.
 - Do not use the native AppKit segmented picker for Scope on this dark surface;
   its text can inherit dark colors and become unreadable. Use the custom
   SwiftUI segmented control style with explicit light text and a clear selected
@@ -631,11 +658,13 @@ UI notes:
   icon-only buttons. Show their text labels in floating `NSPopover` tooltips on
   hover, matching the other NewOCR icon controls.
 - Page navigation in Define Layout uses a large custom slider with a
-  thicker track and a `Page n / total` readout. The instruction/status text
-  lives in the control row above it, next to Scope.
+  thicker track and a `Page n / total` readout. Action status text appears in
+  this page slider row when needed.
 - Define Layout scope options are **All**, **Selected**, **Section**, and
   **Page**. Selected opens a dark modal sheet listing section filenames with
   preview thumbnails, checkboxes, Select All, Unselect All, and Close.
+- The Define Layout PDF preview renders slightly zoomed in by default so the
+  working page is easier to inspect while drawing layout areas.
 
 ### User-Added Images
 
@@ -1392,7 +1421,7 @@ Key notes:
   `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)`,
   then explicit padding, then a minimum frame. For manually-created full-size
   windows whose content can sit under the macOS title bar, use an explicit top
-  clearance. Define Layout uses `.padding(.top, 44)`,
+  clearance. Define Layout uses `.padding(.top, 22)`,
   `.padding(.horizontal, 36)`, `.padding(.bottom, 22)`, and
   `.frame(minWidth: 0, minHeight: 720)`. This value was screenshot-tested; use
   it as the starting point for similar full-window tools.
@@ -1504,11 +1533,22 @@ These are intentional and should not be changed casually:
 - Add Split is enabled only after Crop PDF has been saved for the working PDF.
   Existing split files do not satisfy the crop-completed condition by
   themselves.
+- Clicking Crop when section PDF files already exist asks for confirmation.
+  OK removes those section files, clears split ranges, removes their generated
+  OCR resources, resets their titles/Ready flags, and opens Crop; Close does
+  nothing.
 - Saving Crop PDF removes existing `section-###.pdf` files after confirmation,
   because old splits may no longer match the cropped page layout.
 - Define Layout is enabled only when at least one real `section-###.pdf` file
   exists.
+- Opening Define Layout with existing OCR output or PDF sections marked
+  **Ready for EPUB** asks for confirmation. OK clears PDF-section OCR resources
+  and resets PDF-section Ready flags; Close does nothing.
 - `split-plan.json` stores only created section files and includes `file`.
+- Detect Split saves the current edited Title fields for checked rows directly
+  into `book-sections.json` when creating section PDFs; do not defer this to a
+  split-plan fallback during section-list loading. Preserve this behavior for
+  both direct Add Split and Crop PDF -> Add Split flows.
 - Add Split preview navigation updates From until Title is non-empty, then To.
 - Set From updates only From. Set To updates only To.
 - Split button remains clickable and validates title on click.

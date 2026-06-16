@@ -551,6 +551,8 @@ final class AppState: ObservableObject {
     @Published var isCSSAppliedAlertPresented: Bool = false
     @Published var cssApplyAlertTitle: String = "CSS"
     @Published var cssApplyAlertMessage: String = ""
+    @Published var isLayoutRefreshConfirmationPresented: Bool = false
+    @Published var isCropResetConfirmationPresented: Bool = false
 
     @Published var pdfListMinHeight: CGFloat = 420
     @Published var mainWindowWidth: CGFloat = 780
@@ -586,12 +588,18 @@ final class AppState: ObservableObject {
     private var finalizeAIWindows: [NSWindow] = []
     private var finalizeAIInstructionWindows: [NSWindow] = []
     private var layoutAreaWindows: [NSWindow] = []
+    private var configEditorWindows: [NSWindow] = []
     private weak var codexFinalizeLogWindow: NSWindow?
     private var retainedWindowDelegates: [ObjectIdentifier: WindowCleanupDelegate] = [:]
     private weak var ocrPreviewWindow: NSWindow?
     private weak var ocrLogWindow: NSWindow?
     private var detachedSplitPlannerStates: [SplitPlannerState] = []
     private var activeConfigFileURL: URL?
+    private var pendingLayoutAreaSectionItems: [PDFFileItem] = []
+    private var pendingLayoutAreaInitialPDFPath: String?
+    private var pendingCropBookmarkData: Data?
+    private var pendingCropSourcePDFURL: URL?
+    private var pendingCropProjectFolderURL: URL?
 
     init() {
         restore()
@@ -817,11 +825,81 @@ final class AppState: ObservableObject {
         let projectFolderURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
         do {
             let plan = try loadOrCreateSplitPlan(from: projectFolderURL)
+            if hasSectionPDFs(in: projectFolderURL) {
+                pendingCropBookmarkData = plan.bookmarkData
+                pendingCropSourcePDFURL = plan.sourcePDFURL
+                pendingCropProjectFolderURL = projectFolderURL
+                isCropResetConfirmationPresented = true
+                return
+            }
             openCropPDFWindow(bookmarkData: plan.bookmarkData, fallbackURL: plan.sourcePDFURL, projectFolderURL: projectFolderURL)
         } catch {
             configStatus = "Could not open crop PDF: \(error.localizedDescription)"
             showAlert(title: "Could Not Open Crop", message: error.localizedDescription)
         }
+    }
+
+    func confirmCropResetAndOpenCrop() {
+        guard let bookmarkData = pendingCropBookmarkData,
+              let sourcePDFURL = pendingCropSourcePDFURL,
+              let projectFolderURL = pendingCropProjectFolderURL else {
+            closeCropResetConfirmation()
+            return
+        }
+
+        isCropResetConfirmationPresented = false
+        do {
+            try removeSectionFilesAndResourcesBeforeCrop(projectFolderURL: projectFolderURL, bookmarkData: bookmarkData, sourcePDFURL: sourcePDFURL)
+            pendingCropBookmarkData = nil
+            pendingCropSourcePDFURL = nil
+            pendingCropProjectFolderURL = nil
+            openCropPDFWindow(bookmarkData: bookmarkData, fallbackURL: sourcePDFURL, projectFolderURL: projectFolderURL)
+        } catch {
+            showAlert(title: "Could Not Prepare Crop", message: error.localizedDescription)
+        }
+    }
+
+    func closeCropResetConfirmation() {
+        isCropResetConfirmationPresented = false
+        pendingCropBookmarkData = nil
+        pendingCropSourcePDFURL = nil
+        pendingCropProjectFolderURL = nil
+    }
+
+    private func removeSectionFilesAndResourcesBeforeCrop(projectFolderURL: URL, bookmarkData: Data, sourcePDFURL: URL) throws {
+        let sectionURLs = sectionPDFURLs(in: projectFolderURL)
+        for url in sectionURLs {
+            try removeAppleVisionResources(for: url)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+            pdfTitles.removeValue(forKey: url.path)
+            epubReadySectionIDs.remove(url.path)
+        }
+
+        try saveSplitPlan(bookmarkData: bookmarkData, sourcePDFURL: sourcePDFURL, projectFolderURL: projectFolderURL, splitRanges: [])
+        if selectedFolderPath == projectFolderURL.path {
+            loadPDFFiles()
+            saveBookSections()
+        }
+    }
+
+    private func sectionPDFURLs(in projectFolderURL: URL) -> [URL] {
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: projectFolderURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .nameKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return urls
+            .filter(isSectionPDFURL)
+            .sorted { left, right in
+                let leftIndex = sectionPDFIndex(left) ?? 0
+                let rightIndex = sectionPDFIndex(right) ?? 0
+                if leftIndex != rightIndex {
+                    return leftIndex < rightIndex
+                }
+                return left.lastPathComponent.localizedStandardCompare(right.lastPathComponent) == .orderedAscending
+            }
     }
 
     func confirmAndRevertSelectedFolderToOriginalPDF() {
@@ -1187,10 +1265,10 @@ final class AppState: ObservableObject {
             addSplitWindowHeight: addSplitWindowHeight,
             shouldOpenAddSplitWindowFullScreen: shouldOpenAddSplitWindowFullScreen,
             shouldOpenCropWindowAfterLoad: true
-        ) { _ in
-            if self.selectedFolderPath == projectFolderURL.path {
+        ) { savedTitles in
+            self.saveDetectedSplitTitles(savedTitles, projectFolderURL: projectFolderURL)
+            if self.projectFolderMatchesSelected(projectFolderURL) {
                 self.loadPDFFiles()
-                self.saveBookSections()
             }
         }
         detachedSplitPlannerStates.append(plannerState)
@@ -1215,12 +1293,9 @@ final class AppState: ObservableObject {
             shouldOpenCropWindowAfterLoad: shouldOpenCropWindowBeforeAddSplit,
             shouldOpenAddSplitWindowAfterLoad: true
         ) { savedTitles in
-            for (url, title) in savedTitles {
-                self.pdfTitles[url.path] = title
-            }
-            if self.selectedFolderPath == projectFolderURL.path {
+            self.saveDetectedSplitTitles(savedTitles, projectFolderURL: projectFolderURL)
+            if self.projectFolderMatchesSelected(projectFolderURL) {
                 self.loadPDFFiles()
-                self.saveBookSections()
             }
         }
         detachedSplitPlannerStates.append(plannerState)
@@ -1365,6 +1440,11 @@ final class AppState: ObservableObject {
             forceCloseWindowAndAttachedSheets(window)
         }
         layoutAreaWindows.removeAll()
+
+        for window in configEditorWindows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        configEditorWindows.removeAll()
 
         if let logWin = codexFinalizeLogWindow {
             forceCloseWindowAndAttachedSheets(logWin)
@@ -2262,45 +2342,145 @@ final class AppState: ObservableObject {
                 return
             }
 
-            let state = LayoutAreaEditorState(pdfItems: selectableItems, initialPDF: initialItem)
-            state.savedRuleCount = currentLayoutAreaRuleCount()
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = "Define Layout"
-            window.contentMinSize = NSSize(width: 900, height: 720)
-            window.isReleasedWhenClosed = false
-
-            let hostingView = NSHostingView(
-                rootView: LayoutAreaEditorWindowView(state: state)
-                    .environmentObject(self)
-            )
-            hostingView.sizingOptions = []
-            window.contentView = hostingView
-
-            if let visibleFrame = NSScreen.main?.visibleFrame {
-                window.setFrame(visibleFrame, display: true)
-            } else {
-                window.center()
+            if layoutDefinitionNeedsRefresh(sectionItems: selectableItems) {
+                pendingLayoutAreaSectionItems = selectableItems
+                pendingLayoutAreaInitialPDFPath = initialItem.url.path
+                isLayoutRefreshConfirmationPresented = true
+                return
             }
-            layoutAreaWindows.append(window)
-            trackRetainedWindow(window)
-            window.makeKeyAndOrderFront(nil)
+
+            openLayoutAreasEditorWindow(sectionItems: selectableItems, initialItem: initialItem)
         } catch {
             showAlert(title: "Could Not Open Layout Areas", message: error.localizedDescription)
         }
     }
 
+    private func layoutDefinitionNeedsRefresh(sectionItems: [PDFFileItem]) -> Bool {
+        let hasExistingOCRResources = sectionItems.contains { hasAppleVisionResources(for: $0.url) }
+        let hasReadySections = sectionItems.contains { epubReadySectionIDs.contains($0.id) }
+        return hasExistingOCRResources || hasReadySections
+    }
+
+    func confirmLayoutRefreshAndOpenEditor() {
+        let sectionItems = pendingLayoutAreaSectionItems
+        let initialPath = pendingLayoutAreaInitialPDFPath
+        guard !sectionItems.isEmpty else {
+            closeLayoutRefreshConfirmation()
+            return
+        }
+
+        isLayoutRefreshConfirmationPresented = false
+        do {
+            for item in sectionItems {
+                try removeAppleVisionResources(for: item.url)
+                epubReadySectionIDs.remove(item.id)
+            }
+            saveBookSections()
+            loadPDFFiles()
+            let refreshedSectionItems = pdfFiles.filter { item in
+                !item.isManualSection && FileManager.default.fileExists(atPath: item.url.path)
+            }
+            let initialItem = refreshedSectionItems.first(where: { $0.url.path == initialPath }) ?? refreshedSectionItems.first
+            pendingLayoutAreaSectionItems = []
+            pendingLayoutAreaInitialPDFPath = nil
+            guard let initialItem else {
+                showAlert(title: "No PDF Sections", message: "Add or split a PDF before defining layout areas.")
+                return
+            }
+            openLayoutAreasEditorWindow(sectionItems: refreshedSectionItems, initialItem: initialItem)
+        } catch {
+            showAlert(title: "Could Not Refresh OCR Data", message: error.localizedDescription)
+        }
+    }
+
+    func closeLayoutRefreshConfirmation() {
+        isLayoutRefreshConfirmationPresented = false
+        pendingLayoutAreaSectionItems = []
+        pendingLayoutAreaInitialPDFPath = nil
+    }
+
+    private func openLayoutAreasEditorWindow(sectionItems: [PDFFileItem], initialItem: PDFFileItem) {
+        let state = LayoutAreaEditorState(pdfItems: sectionItems, initialPDF: initialItem)
+        state.savedRuleCount = currentLayoutAreaRuleCount()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Define Layout"
+        window.contentMinSize = NSSize(width: 900, height: 720)
+        window.isReleasedWhenClosed = false
+
+        let hostingView = NSHostingView(
+            rootView: LayoutAreaEditorWindowView(state: state)
+                .environmentObject(self)
+        )
+        hostingView.sizingOptions = []
+        window.contentView = hostingView
+
+        if let visibleFrame = NSScreen.main?.visibleFrame {
+            window.setFrame(visibleFrame, display: true)
+        } else {
+            window.center()
+        }
+        layoutAreaWindows.append(window)
+        trackRetainedWindow(window)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func hasAppleVisionResources(for pdfURL: URL) -> Bool {
+        let mdFolder = appleVisionOutputFolderURL(for: pdfURL)
+            .appendingPathComponent(pdfURL.deletingPathExtension().lastPathComponent, isDirectory: true)
+        if FileManager.default.fileExists(atPath: mdFolder.path) {
+            return true
+        }
+
+        let cacheURL = appleVisionLineCacheURL(for: pdfURL)
+        if FileManager.default.fileExists(atPath: cacheURL.path),
+           let data = try? Data(contentsOf: cacheURL),
+           let pages = try? JSONDecoder().decode([OCRLineCachePage].self, from: data) {
+            return pages.contains { $0.pdfName == pdfURL.lastPathComponent }
+        }
+
+        return false
+    }
+
     func openLayoutAreasJSONEditor() {
         do {
             let url = try ensureLayoutAreasFile()
-            openTextConfig(title: "Layout Areas", url: url)
+            openStandaloneTextConfig(title: "Layout Areas", url: url)
         } catch {
             showAlert(title: "Could Not Open Layout Areas", message: error.localizedDescription)
         }
+    }
+
+    private func openStandaloneTextConfig(title: String, url: URL) {
+        activeConfigFileURL = url
+        configEditorTitle = title
+        configText = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        configStatus = "Editing \(url.path)"
+
+        var window: NSWindow!
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = title
+        window.contentMinSize = NSSize(width: 720, height: 520)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: ConfigEditorView {
+                window.close()
+            }
+            .environmentObject(self)
+        )
+        window.center()
+        configEditorWindows.append(window)
+        trackRetainedWindow(window)
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func layoutAreasFileURL() -> URL? {
@@ -3120,6 +3300,7 @@ final class AppState: ObservableObject {
             self.finalizeAIWindows.removeAll { $0 === closedWindow }
             self.finalizeAIInstructionWindows.removeAll { $0 === closedWindow }
             self.layoutAreaWindows.removeAll { $0 === closedWindow }
+            self.configEditorWindows.removeAll { $0 === closedWindow }
             self.retainedWindowDelegates.removeValue(forKey: ObjectIdentifier(closedWindow))
         }
         retainedWindowDelegates[key] = delegate
@@ -6494,7 +6675,7 @@ final class AppState: ObservableObject {
                       let item = physicalByPath[path] {
                 orderedItems.append(item)
                 usedPaths.insert(path)
-                if let title = entry.title, !title.isEmpty {
+                if let title = entry.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
                     pdfTitles[item.id] = title
                 }
                 if entry.readyForEPUB == true {
@@ -6523,6 +6704,10 @@ final class AppState: ObservableObject {
         return URL(fileURLWithPath: selectedFolderPath).appendingPathComponent("book-sections.json")
     }
 
+    private func bookSectionsURL(for projectFolderURL: URL) -> URL {
+        projectFolderURL.appendingPathComponent("book-sections.json")
+    }
+
     private func manualSectionURL(id: String) -> URL {
         URL(fileURLWithPath: selectedFolderPath)
             .appendingPathComponent("ManualSections", isDirectory: true)
@@ -6533,6 +6718,15 @@ final class AppState: ObservableObject {
     private func loadBookSections() -> [BookSectionEntry] {
         guard let url = bookSectionsURL(),
               let data = try? Data(contentsOf: url),
+              let entries = try? JSONDecoder().decode([BookSectionEntry].self, from: data) else {
+            return []
+        }
+        return entries
+    }
+
+    private func loadBookSections(from projectFolderURL: URL) -> [BookSectionEntry] {
+        let url = bookSectionsURL(for: projectFolderURL)
+        guard let data = try? Data(contentsOf: url),
               let entries = try? JSONDecoder().decode([BookSectionEntry].self, from: data) else {
             return []
         }
@@ -6567,6 +6761,55 @@ final class AppState: ObservableObject {
         } catch {
             logOutput = "Could not save book sections: \(error.localizedDescription)"
         }
+    }
+
+    private func saveDetectedSplitTitles(_ savedTitles: [(URL, String)], projectFolderURL: URL) {
+        let titleByFile = savedTitles.reduce(into: [String: String]()) { result, item in
+            let title = item.1.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else { return }
+            result[item.0.lastPathComponent] = title
+        }
+        guard !titleByFile.isEmpty else { return }
+
+        let existingEntries = loadBookSections(from: projectFolderURL)
+        let existingByPath = Dictionary(uniqueKeysWithValues: existingEntries.compactMap { entry -> (String, BookSectionEntry)? in
+            guard let path = entry.path else { return nil }
+            return (path, entry)
+        })
+        let existingByID = Dictionary(uniqueKeysWithValues: existingEntries.map { ($0.id, $0) })
+
+        let sectionEntries = sectionPDFURLs(in: projectFolderURL).map { url -> BookSectionEntry in
+            let id = url.deletingPathExtension().lastPathComponent
+            let existing = existingByPath[url.path] ?? existingByID[id]
+            let title = titleByFile[url.lastPathComponent] ?? existing?.title
+            return BookSectionEntry(
+                id: id,
+                type: "pdf",
+                path: url.path,
+                title: title,
+                readyForEPUB: existing?.readyForEPUB ?? false
+            )
+        }
+
+        let existingPDFIDs = Set(sectionEntries.map(\.id))
+        let manualEntries = existingEntries.filter { entry in
+            entry.type == "manual" || (entry.type == "pdf" && !existingPDFIDs.contains(entry.id) && entry.path == nil)
+        }
+        let entries = sectionEntries + manualEntries
+
+        do {
+            let data = try JSONEncoder().encode(entries)
+            try data.write(to: bookSectionsURL(for: projectFolderURL), options: .atomic)
+        } catch {
+            logOutput = "Could not save detected split titles: \(error.localizedDescription)"
+        }
+    }
+
+    private func projectFolderMatchesSelected(_ projectFolderURL: URL) -> Bool {
+        guard !selectedFolderPath.isEmpty else { return false }
+        let selectedURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
+        return selectedURL.standardizedFileURL.path == projectFolderURL.standardizedFileURL.path
+            || selectedURL.resolvingSymlinksInPath().path == projectFolderURL.resolvingSymlinksInPath().path
     }
 
     private func removeSplitPlanEntry(forFile fileName: String) {
@@ -7575,10 +7818,12 @@ struct StepOneLoadPDFView: View {
                 .environmentObject(appState)
         }
         .overlay {
-            if appState.isEPUBBuiltAlertPresented {
+            if appState.isEPUBBuiltAlertPresented || appState.isLayoutRefreshConfirmationPresented || appState.isCropResetConfirmationPresented {
                 Color.black.opacity(0.34)
                     .ignoresSafeArea()
+            }
 
+            if appState.isEPUBBuiltAlertPresented {
                 VStack(spacing: 18) {
                     HStack(spacing: 12) {
                         ZStack {
@@ -7620,8 +7865,190 @@ struct StepOneLoadPDFView: View {
                 )
                 .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
             }
+
+            if appState.isLayoutRefreshConfirmationPresented {
+                LayoutRefreshConfirmationView()
+                    .environmentObject(appState)
+            }
+
+            if appState.isCropResetConfirmationPresented {
+                CropResetConfirmationView()
+                    .environmentObject(appState)
+            }
         }
         .background(NewOCRMainPalette.windowBackground)
+    }
+}
+
+private struct CropResetConfirmationView: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "crop")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Prepare PDF for Cropping?")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text("Cropping changes the page layout used by existing split sections.")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("This project already contains section PDF files.", systemImage: "doc.richtext")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("OK removes all section files and generated OCR resources so the project can be cropped cleanly.", systemImage: "trash")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Close leaves the project unchanged.", systemImage: "xmark.circle")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .labelStyle(.titleAndIcon)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+
+            HStack(spacing: 12) {
+                Spacer()
+
+                OCRIconButton(
+                    title: "OK",
+                    systemImage: "checkmark",
+                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                    foregroundColor: .black,
+                    size: 42
+                ) {
+                    appState.confirmCropResetAndOpenCrop()
+                }
+                .keyboardShortcut(.defaultAction)
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white,
+                    size: 42
+                ) {
+                    appState.closeCropResetConfirmation()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 560)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct LayoutRefreshConfirmationView: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Color(red: 255/255, green: 169/255, blue: 48/255))
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Refresh Existing OCR Data?")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text("Defining layout areas changes how OCR output is generated.")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Label("This project already contains OCR output or PDF sections marked Ready for EPUB.", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("OK removes existing PDF-section OCR Markdown, images, OCR snapshots, and line-cache data.", systemImage: "arrow.clockwise")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Label("Ready for EPUB flags are reset so the sections can be processed again.", systemImage: "checkmark.square")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .labelStyle(.titleAndIcon)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+
+            HStack(spacing: 12) {
+                Spacer()
+
+                OCRIconButton(
+                    title: "OK",
+                    systemImage: "checkmark",
+                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                    foregroundColor: .black,
+                    size: 42
+                ) {
+                    appState.confirmLayoutRefreshAndOpenEditor()
+                }
+                .keyboardShortcut(.defaultAction)
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white,
+                    size: 42
+                ) {
+                    appState.closeLayoutRefreshConfirmation()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 560)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
+        .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -7683,6 +8110,7 @@ struct BulkOCRProgressView: View {
 struct ConfigEditorView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
+    var closeAction: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -7720,7 +8148,11 @@ struct ConfigEditorView: View {
                 }
 
                 OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
-                    dismiss()
+                    if let closeAction {
+                        closeAction()
+                    } else {
+                        dismiss()
+                    }
                 }
             }
 
@@ -11175,7 +11607,7 @@ final class SplitPlannerState: ObservableObject {
         }
     }
 
-    func saveCrop(normalizedRect: CGRect, completion: @escaping (Bool) -> Void) {
+    func saveCrop(normalizedRect: CGRect, openAddSplitAfterSave: Bool = false, completion: @escaping (Bool) -> Void) {
         let cropRect = normalizedRect.standardized
         guard cropRect.width >= 0.03, cropRect.height >= 0.03 else {
             status = "Crop area is too small."
@@ -11231,6 +11663,7 @@ final class SplitPlannerState: ObservableObject {
                     self.loadProjectPDFs()
                     self.hasSavedCropInCurrentCropWindow = true
                     self.status = "Saved cropped PDF. Backup: \(backupURL.lastPathComponent)"
+                    self.shouldOpenAddSplitWindowAfterLoad = openAddSplitAfterSave || self.shouldOpenAddSplitWindowAfterLoad
                     completion(true)
                     self.onSectionsSaved([])
                     self.loadPDF()
@@ -11654,7 +12087,7 @@ struct LayoutAreaEditorWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .padding(.top, 44)
+        .padding(.top, 22)
         .padding(.horizontal, 36)
         .padding(.bottom, 22)
         .frame(minWidth: 0, minHeight: 720)
@@ -11812,6 +12245,15 @@ struct LayoutAreaEditorWindowView: View {
 
             NewOCRPageSlider(page: $state.selectedPage, pageCount: totalPages)
                 .frame(minWidth: 380, maxWidth: .infinity)
+
+            if !state.status.isEmpty {
+                Text(state.status)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 360, alignment: .trailing)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 12)
@@ -11826,37 +12268,24 @@ struct LayoutAreaEditorWindowView: View {
     private var controls: some View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .center, spacing: 16) {
-                instructionText
+                scopePicker
                 typeButtons
                 Spacer(minLength: 12)
-                scopePicker
             }
 
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 16) {
-                    instructionText
-                    Spacer(minLength: 12)
-                    scopePicker
-                }
+                scopePicker
                 typeButtons
             }
         }
-        .padding(14)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
         )
-    }
-
-    private var instructionText: some View {
-        Text(state.status.isEmpty ? "Draw an area, choose the type, then save it." : state.status)
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(NewOCRMainPalette.primaryText)
-            .lineLimit(1)
-            .truncationMode(.middle)
-            .layoutPriority(1)
     }
 
     private var typeButtons: some View {
@@ -11880,7 +12309,7 @@ struct LayoutAreaEditorWindowView: View {
         ) {
             isSelectedSectionsPopoverPresented = true
         }
-        .frame(minWidth: 460, idealWidth: 520, maxWidth: 560)
+        .frame(minWidth: 390, idealWidth: 430, maxWidth: 460)
     }
 
     private var preview: some View {
@@ -11888,16 +12317,18 @@ struct LayoutAreaEditorWindowView: View {
             if let url = state.selectedPDFURL,
                let image = appState.layoutAreaPreviewImage(pdfURL: url, pageNumber: state.selectedPage) {
                 GeometryReader { proxy in
-                    let imageFrame = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size)
+                    let imageFrame = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size, zoomScale: 1.12)
 
                     ZStack(alignment: .topLeading) {
                         Image(nsImage: image)
                             .resizable()
-                            .scaledToFit()
-                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .frame(width: imageFrame.width, height: imageFrame.height)
+                            .position(x: imageFrame.midX, y: imageFrame.midY)
 
                         LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
                     }
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                    .clipped()
                 }
                 .frame(minWidth: 0, minHeight: 460)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -12547,12 +12978,12 @@ private struct LayoutAreaOverlayView: View {
     }
 }
 
-private func layoutAreaAspectFitRect(imageSize: NSSize, containerSize: CGSize) -> CGRect {
+private func layoutAreaAspectFitRect(imageSize: NSSize, containerSize: CGSize, zoomScale: CGFloat = 1.0) -> CGRect {
     guard imageSize.width > 0, imageSize.height > 0, containerSize.width > 0, containerSize.height > 0 else {
         return CGRect(origin: .zero, size: containerSize)
     }
 
-    let scale = min(containerSize.width / imageSize.width, containerSize.height / imageSize.height)
+    let scale = min(containerSize.width / imageSize.width, containerSize.height / imageSize.height) * max(zoomScale, 0.1)
     let width = imageSize.width * scale
     let height = imageSize.height * scale
     return CGRect(
@@ -12612,7 +13043,7 @@ struct CropPDFWindowView: View {
                 OCRIconButton(title: "Save Crop", systemImage: "square.and.arrow.down", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255), size: 42) {
                     guard planner.confirmCropSaveIfNeeded() else { return }
                     let window = NSApp.keyWindow
-                    planner.saveCrop(normalizedRect: cropRect) { saved in
+                    planner.saveCrop(normalizedRect: cropRect, openAddSplitAfterSave: true) { saved in
                         if saved {
                             window?.close()
                         }
