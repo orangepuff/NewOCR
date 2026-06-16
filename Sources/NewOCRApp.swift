@@ -75,6 +75,32 @@ final class FinalizeAISelectionState: ObservableObject {
     }
 }
 
+struct ImageDescOCRCandidate: Identifiable {
+    let id = UUID()
+    let sectionFileName: String     // e.g. "section-004.pdf"
+    let pageNumber: Int
+    let imageLabel: String          // matches markers field, e.g. "2"
+    let pdfURL: URL
+    let mdFileURL: URL
+    let rect: OCRLayoutAreaRect
+    var originalText: String        // current *...* text from .md
+    var codexText: String = ""
+    var isSelected: Bool = true
+    var errorMessage: String = ""
+}
+
+final class ImageDescOCRState: ObservableObject {
+    @Published var candidates: [ImageDescOCRCandidate]
+    @Published var isRunning: Bool = false
+    @Published var runLog: String = ""
+    @Published var status: String = ""
+    @Published var isDone: Bool = false
+
+    init(candidates: [ImageDescOCRCandidate]) {
+        self.candidates = candidates
+    }
+}
+
 private let defaultCodexFinalizePrompt = """
 You are correcting existing OCR Markdown files for a scanned book EPUB workflow.
 This is a correction task, not a new OCR task.
@@ -246,7 +272,7 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var selectedPage: Int
     @Published var pageCount: Int
     @Published var selectedType: String = "blockquote"
-    @Published var selectedScope: String = "all_sections"
+    @Published var selectedScope: String = "page"
     @Published var selectedLayoutSectionPaths: Set<String> = []
     @Published var selectionRect: CGRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
     @Published var status: String = ""
@@ -660,6 +686,7 @@ final class AppState: ObservableObject {
     private var ocrReviewWindows: [NSWindow] = []
     private var finalizeAIWindows: [NSWindow] = []
     private var finalizeAIInstructionWindows: [NSWindow] = []
+    private var imageDescOCRWindows: [NSWindow] = []
     private var layoutAreaWindows: [NSWindow] = []
     private var configEditorWindows: [NSWindow] = []
     private weak var codexFinalizeLogWindow: NSWindow?
@@ -1820,6 +1847,239 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Codex OCR (Image Description)
+
+    func openImageDescOCRWindow() {
+        guard !selectedFolderPath.isEmpty else {
+            showAlert(title: "No Project Selected", message: "Open a project folder first.")
+            return
+        }
+        let candidates = buildImageDescOCRCandidates()
+        let state = ImageDescOCRState(candidates: candidates)
+        if candidates.isEmpty {
+            state.status = "No image description areas with existing Markdown found."
+        } else {
+            state.status = "\(candidates.count) image description(s) ready. Press Run OCR."
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 920, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Codex OCR (Image Description)"
+        window.contentMinSize = NSSize(width: 720, height: 460)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: ImageDescOCRWindowView(state: state).environmentObject(self)
+        )
+        window.center()
+        imageDescOCRWindows.append(window)
+        trackRetainedWindow(window)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func buildImageDescOCRCandidates() -> [ImageDescOCRCandidate] {
+        guard let layoutURL = layoutAreasFileURL(),
+              let data = try? Data(contentsOf: layoutURL),
+              let areas = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) else { return [] }
+        let projectURL = URL(fileURLWithPath: selectedFolderPath)
+        var candidates: [ImageDescOCRCandidate] = []
+        for rule in areas.rules where rule.type == "image_desc" {
+            guard let sectionFileName = rule.section,
+                  let pageNumber = rule.page,
+                  let imageLabel = rule.markers?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !imageLabel.isEmpty else { continue }
+            let pdfURL = projectURL.appendingPathComponent(sectionFileName)
+            guard FileManager.default.fileExists(atPath: pdfURL.path) else { continue }
+            guard !epubReadySectionIDs.contains(pdfURL.path) else { continue }
+            let sectionName = URL(fileURLWithPath: sectionFileName).deletingPathExtension().lastPathComponent
+            let mdFolderURL = projectURL
+                .appendingPathComponent("AppleVision", isDirectory: true)
+                .appendingPathComponent("MD", isDirectory: true)
+                .appendingPathComponent(sectionName, isDirectory: true)
+            let mdFileURL = mdFolderURL.appendingPathComponent("page\(pageNumber).md")
+            guard FileManager.default.fileExists(atPath: mdFileURL.path) else { continue }
+            let originalText = extractImageDescText(from: mdFileURL, imageLabel: imageLabel)
+            candidates.append(ImageDescOCRCandidate(
+                sectionFileName: sectionFileName,
+                pageNumber: pageNumber,
+                imageLabel: imageLabel,
+                pdfURL: pdfURL,
+                mdFileURL: mdFileURL,
+                rect: rule.rect,
+                originalText: originalText
+            ))
+        }
+        return candidates
+    }
+
+    private func extractImageDescText(from mdURL: URL, imageLabel: String) -> String {
+        guard let content = try? String(contentsOf: mdURL, encoding: .utf8) else { return "" }
+        let escapedLabel = NSRegularExpression.escapedPattern(for: imageLabel)
+        let pattern = #"!\[\#(escapedLabel)\]\([^)]*\)\n\n\*([^*]+)\*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else { return "" }
+        let ns = content as NSString
+        guard let match = regex.firstMatch(in: content, options: [], range: NSRange(location: 0, length: ns.length)),
+              match.range(at: 1).location != NSNotFound else { return "" }
+        return ns.substring(with: match.range(at: 1))
+    }
+
+    func runImageDescOCR(state: ImageDescOCRState) {
+        guard !state.isRunning else { return }
+        let candidates = state.candidates
+        guard !candidates.isEmpty else { return }
+        let projectPath = selectedFolderPath
+        let executable = codexExecutablePath
+        let model = codexFinalizeModel
+        let tempDirURL = URL(fileURLWithPath: projectPath)
+            .appendingPathComponent("AppleVision", isDirectory: true)
+            .appendingPathComponent("codex-ocr-temp", isDirectory: true)
+
+        state.isRunning = true
+        state.runLog = "Preparing \(candidates.count) image(s)...\n"
+        state.status = "Preparing images..."
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try FileManager.default.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+
+                var imageFilenames: [String] = []
+                var filenameToIndex: [String: Int] = [:]
+
+                for (i, candidate) in candidates.enumerated() {
+                    let sectionName = URL(fileURLWithPath: candidate.sectionFileName).deletingPathExtension().lastPathComponent
+                    let filename = "\(sectionName)-page\(candidate.pageNumber)-img\(candidate.imageLabel).png"
+                    DispatchQueue.main.async {
+                        state.runLog += "[\(i + 1)/\(candidates.count)] \(filename)...\n"
+                    }
+                    guard let doc = PDFDocument(url: candidate.pdfURL),
+                          let page = doc.page(at: max(candidate.pageNumber - 1, 0)),
+                          let fullImage = try? self.renderPDFPageToCGImage(page, scale: 4.0) else {
+                        DispatchQueue.main.async { state.runLog += "  ⚠ Could not render PDF page\n" }
+                        continue
+                    }
+                    let cropRect = self.pixelCropRect(for: candidate.rect, imageWidth: fullImage.width, imageHeight: fullImage.height)
+                    guard let cropped = fullImage.cropping(to: cropRect) else {
+                        DispatchQueue.main.async { state.runLog += "  ⚠ Could not crop image\n" }
+                        continue
+                    }
+                    try self.writePNG(cropped, to: tempDirURL.appendingPathComponent(filename))
+                    imageFilenames.append(filename)
+                    filenameToIndex[filename] = i
+                }
+
+                guard !imageFilenames.isEmpty else {
+                    DispatchQueue.main.async {
+                        state.isRunning = false
+                        state.status = "No images could be prepared."
+                    }
+                    return
+                }
+
+                let imageList = imageFilenames.map { "- \($0)" }.joined(separator: "\n")
+                let jsonTemplate = imageFilenames.map { "  \"\($0)\": \"...\"" }.joined(separator: ",\n")
+                let prompt = """
+                You are an OCR assistant. The folder 'AppleVision/codex-ocr-temp/' contains PNG images of scanned book captions.
+
+                For each image file listed below, look at the image carefully and transcribe all text exactly as it appears in the scan. Preserve the original language — do not translate. Include every character you can see.
+
+                Images to process:
+                \(imageList)
+
+                Write your results to 'AppleVision/codex-ocr-temp/ocr-results.json' using this exact JSON format:
+                {
+                \(jsonTemplate)
+                }
+
+                Rules:
+                - Transcribe all text exactly as printed
+                - Do not add explanations, comments, or extra keys
+                - Do not modify or delete any PNG files
+                - Write only the JSON file
+                """
+
+                DispatchQueue.main.async {
+                    state.runLog += "\nSending \(imageFilenames.count) image(s) to Codex...\nExecutable: \(executable)\nModel: \(model)\n\n"
+                    state.status = "Running Codex OCR on \(imageFilenames.count) image(s)..."
+                }
+
+                let result = self.runCodexExec(prompt: prompt, projectPath: projectPath, executablePath: executable, model: model) { text in
+                    DispatchQueue.main.async { state.runLog += text }
+                }
+
+                let resultsURL = tempDirURL.appendingPathComponent("ocr-results.json")
+
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success:
+                        guard let data = try? Data(contentsOf: resultsURL),
+                              let json = try? JSONDecoder().decode([String: String].self, from: data) else {
+                            state.isRunning = false
+                            state.status = "Codex finished but could not read results JSON."
+                            state.runLog += "\n\n⚠ Could not read AppleVision/codex-ocr-temp/ocr-results.json"
+                            return
+                        }
+                        var updated = state.candidates
+                        for filename in imageFilenames {
+                            guard let idx = filenameToIndex[filename] else { continue }
+                            if let text = json[filename] {
+                                updated[idx].codexText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            } else {
+                                updated[idx].errorMessage = "No result returned by Codex"
+                            }
+                        }
+                        state.candidates = updated
+                        state.isDone = true
+                        state.isRunning = false
+                        state.status = "OCR complete — review results and save selected."
+                        state.runLog += "\n\n--- Done ---"
+                        for filename in imageFilenames {
+                            try? FileManager.default.removeItem(at: tempDirURL.appendingPathComponent(filename))
+                        }
+                    case .failure(let error):
+                        state.isRunning = false
+                        state.status = "Codex failed: \(error.localizedDescription)"
+                        state.runLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    state.isRunning = false
+                    state.status = "Error: \(error.localizedDescription)"
+                    state.runLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func saveImageDescOCRResults(_ candidates: [ImageDescOCRCandidate]) -> (saved: Int, errors: [String]) {
+        var savedCount = 0
+        var errors: [String] = []
+        for candidate in candidates {
+            let newText = candidate.codexText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !newText.isEmpty else { continue }
+            do {
+                var content = try String(contentsOf: candidate.mdFileURL, encoding: .utf8)
+                let escapedLabel = NSRegularExpression.escapedPattern(for: candidate.imageLabel)
+                let pattern = #"(!\[\#(escapedLabel)\]\([^)]*\)\n\n)\*([^*]*)\*"#
+                let regex = try NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators])
+                let ns = content as NSString
+                guard let match = regex.firstMatch(in: content, options: [], range: NSRange(location: 0, length: ns.length)) else {
+                    errors.append("\(candidate.sectionFileName) page \(candidate.pageNumber) image \(candidate.imageLabel): description not found in .md")
+                    continue
+                }
+                let replacement = ns.substring(with: match.range(at: 1)) + "*\(newText)*"
+                content = ns.replacingCharacters(in: match.range, with: replacement)
+                try content.write(to: candidate.mdFileURL, atomically: true, encoding: .utf8)
+                savedCount += 1
+            } catch {
+                errors.append("\(candidate.sectionFileName) page \(candidate.pageNumber): \(error.localizedDescription)")
+            }
+        }
+        return (savedCount, errors)
+    }
+
     private func codexFinalizeReport(from output: String) -> String {
         let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedOutput.isEmpty else {
@@ -2413,10 +2673,12 @@ final class AppState: ObservableObject {
         do {
             _ = try ensureLayoutAreasFile()
             let selectableItems = pdfFiles.filter { item in
-                isSectionPDFURL(item.url) && FileManager.default.fileExists(atPath: item.url.path)
+                isSectionPDFURL(item.url)
+                    && FileManager.default.fileExists(atPath: item.url.path)
+                    && !epubReadySectionIDs.contains(item.id)
             }
             guard let initialItem = selectableItems.first(where: { $0.url.path == selectedPDFPath }) ?? selectableItems.first else {
-                showAlert(title: "No PDF Sections", message: "Add or split a PDF before defining layout areas.")
+                showAlert(title: "No PDF Sections", message: "All sections are marked as completed, or no PDF sections found.")
                 return
             }
 
@@ -2449,7 +2711,9 @@ final class AppState: ObservableObject {
             saveBookSections()
             loadPDFFiles()
             let refreshedSectionItems = pdfFiles.filter { item in
-                isSectionPDFURL(item.url) && FileManager.default.fileExists(atPath: item.url.path)
+                isSectionPDFURL(item.url)
+                    && FileManager.default.fileExists(atPath: item.url.path)
+                    && !epubReadySectionIDs.contains(item.id)
             }
             let initialItem = refreshedSectionItems.first(where: { $0.url.path == initialPath }) ?? refreshedSectionItems.first
             pendingLayoutAreaSectionItems = []
@@ -8537,12 +8801,12 @@ struct StepOneLoadPDFView: View {
                             }
 
                             TopBarDropdownRow(
-                                title: "Codex Review",
-                                systemImage: "sparkles",
-                                isDisabled: appState.selectedFolderPath.isEmpty || appState.markdownChapterCount == 0,
+                                title: "Codex OCR (Image Description)",
+                                systemImage: "eye.trianglebadge.exclamationmark",
+                                isDisabled: appState.selectedFolderPath.isEmpty,
                                 close: close
                             ) {
-                                appState.openFinalizeAIWindow()
+                                appState.openImageDescOCRWindow()
                             }
 
                             TopBarDropdownDivider()
@@ -9361,10 +9625,20 @@ private struct LayoutAreasReportView: View {
     }
 
     private var filteredRules: [OCRLayoutAreaRule] {
-        guard let sectionFileName else { return rules }
-        return rules.filter { rule in
-            rule.scope == "all_sections" || rule.section == sectionFileName
+        if let sectionFileName {
+            return rules.filter { rule in
+                rule.scope == "all_sections" || rule.section == sectionFileName
+            }
         }
+        // When opened from Define Layout, state.pdfItems contains only non-completed
+        // sections, so mirror that filter here.
+        if let state {
+            let visibleFiles = Set(state.pdfItems.map { $0.url.lastPathComponent })
+            return rules.filter { rule in
+                rule.section == nil || visibleFiles.contains(rule.section ?? "")
+            }
+        }
+        return rules
     }
 
     private var sortedRules: [OCRLayoutAreaRule] {
@@ -10115,6 +10389,233 @@ struct CodexFinalizeLogWindowView: View {
         .frame(minWidth: 620, minHeight: 420)
         .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+// MARK: - Codex OCR (Image Description) window
+
+struct ImageDescOCRWindowView: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject var state: ImageDescOCRState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Header
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "eye.trianglebadge.exclamationmark")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Codex OCR (Image Description)")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(state.status.isEmpty ? "\(state.candidates.count) image description(s)" : state.status)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer()
+
+                if state.isRunning {
+                    ProgressView().controlSize(.regular)
+                }
+
+                if state.isDone {
+                    OCRIconButton(
+                        title: "Select All",
+                        systemImage: "checkmark.square",
+                        backgroundColor: Color(red: 60/255, green: 60/255, blue: 72/255),
+                        foregroundColor: .white,
+                        size: 44
+                    ) {
+                        for i in state.candidates.indices {
+                            state.candidates[i].isSelected = true
+                        }
+                    }
+
+                    let saveReady = state.candidates.filter { $0.isSelected && !$0.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                    OCRIconButton(
+                        title: "Save Selected (\(saveReady.count))",
+                        systemImage: "square.and.arrow.down",
+                        backgroundColor: saveReady.isEmpty
+                            ? Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.4)
+                            : Color(red: 53/255, green: 200/255, blue: 90/255),
+                        foregroundColor: .black,
+                        size: 44
+                    ) {
+                        let result = appState.saveImageDescOCRResults(saveReady)
+                        if result.errors.isEmpty {
+                            state.status = "Saved \(result.saved) image description(s)."
+                        } else {
+                            state.status = "Saved \(result.saved). Errors: \(result.errors.joined(separator: "; "))"
+                        }
+                    }
+                    .disabled(saveReady.isEmpty)
+                }
+
+                OCRIconButton(
+                    title: "Run OCR",
+                    systemImage: "paperplane.fill",
+                    backgroundColor: (state.isRunning || state.isDone || state.candidates.isEmpty)
+                        ? Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.4)
+                        : Color(red: 53/255, green: 200/255, blue: 90/255),
+                    foregroundColor: .black,
+                    size: 44
+                ) {
+                    appState.runImageDescOCR(state: state)
+                }
+                .disabled(state.isRunning || state.isDone || state.candidates.isEmpty)
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white,
+                    size: 44
+                ) {
+                    NSApp.keyWindow?.close()
+                }
+            }
+
+            // Run log (visible while running or after)
+            if state.isRunning || !state.runLog.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(state.runLog.isEmpty ? " " : state.runLog)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .id("logEnd")
+                    }
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                    .frame(maxHeight: 150)
+                    .onChange(of: state.runLog) {
+                        withAnimation { proxy.scrollTo("logEnd", anchor: .bottom) }
+                    }
+                }
+            }
+
+            // Candidates list
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if state.candidates.isEmpty {
+                        Text("No image description layout areas found for sections with existing Markdown. Define image description areas in Define Layout first, then run OCR.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            .padding(20)
+                    } else {
+                        ForEach($state.candidates) { $candidate in
+                            ImageDescOCRCandidateRow(candidate: $candidate, isDone: state.isDone)
+                        }
+                    }
+                }
+                .padding(10)
+            }
+            .background(NewOCRMainPalette.panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+        }
+        .padding(22)
+        .frame(minWidth: 720, minHeight: 460)
+        .background(NewOCRMainPalette.windowBackground)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct ImageDescOCRCandidateRow: View {
+    @Binding var candidate: ImageDescOCRCandidate
+    let isDone: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if isDone {
+                Toggle("", isOn: $candidate.isSelected)
+                    .labelsHidden()
+                    .toggleStyle(.checkbox)
+                    .padding(.top, 3)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(candidate.sectionFileName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Text("Page \(candidate.pageNumber)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    Text("Image \(candidate.imageLabel)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Color(red: 30/255, green: 139/255, blue: 238/255))
+                        .clipShape(Capsule())
+                }
+
+                if !candidate.originalText.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Text("Current:")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                            .frame(width: 50, alignment: .leading)
+                        Text(candidate.originalText)
+                            .font(.system(size: 12))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                    }
+                }
+
+                if !candidate.codexText.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Text("Codex:")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
+                            .frame(width: 50, alignment: .leading)
+                        Text(candidate.codexText)
+                            .font(.system(size: 12))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .lineLimit(3)
+                            .truncationMode(.tail)
+                    }
+                } else if isDone && !candidate.errorMessage.isEmpty {
+                    Text("⚠ \(candidate.errorMessage)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                } else if !isDone {
+                    Text("Waiting for OCR…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                        .italic()
+                }
+            }
+
+            Spacer()
+        }
+        .padding(12)
+        .background(NewOCRMainPalette.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(
+                    candidate.isSelected && isDone && !candidate.codexText.isEmpty
+                        ? Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.6)
+                        : NewOCRMainPalette.stroke,
+                    lineWidth: candidate.isSelected && isDone && !candidate.codexText.isEmpty ? 2 : 1
+                )
+        )
     }
 }
 

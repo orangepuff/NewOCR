@@ -169,8 +169,8 @@ Important actions:
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
 - **Define Layout**: draw project-wide OCR layout-area rules for forcing
   header, blockquote, image, footnote, or ignore behavior across sections.
-- **Codex Review**: run local Codex on selected sections to edit their
-  existing page Markdown files in place.
+- **Codex OCR (Image Description)**: use Codex vision to re-OCR image caption
+  areas from PDF crops and selectively replace them in existing Markdown files.
 - **Build EPUB**: create EPUB from available section/manual Markdown.
 - **Process OCR All**: OCR existing section PDF files that are not checked
   **Ready for EPUB**.
@@ -647,6 +647,12 @@ Define Layout is available only after at least one `section-###.pdf` split file
 exists in the project folder. The **Define Layout** button in the main window is
 disabled until at least one section PDF is created.
 
+The Define Layout section list shows only sections that are **not** marked as
+completed (ready for EPUB). Sections toggled as completed in the main window are
+excluded from the list, from the "All" and "Selected" scopes, and from the View
+Rules report opened within Define Layout. If all sections are completed the
+editor shows an alert instead of opening.
+
 The Define Layout editor only works with real `section-###.pdf` files from the
 current project. Its preview is rendered from those section PDFs, which are
 created from the cropped working PDF. It must not preview, save coordinates
@@ -878,6 +884,10 @@ UI notes:
   preview thumbnails, checkboxes, Select All, Unselect All, OK, and Close buttons.
   The **OK** button confirms the selected sections and closes the modal; **Close**
   also closes the modal. Users click **OK** to confirm their section selection.
+- When Define Layout opens fresh (no rule loaded), the default type is **Quote**
+  and the default scope is **Page** (since Quote is a page-only type). Page-only
+  types (Quote, Image, Image Description, Footnote, Ref Mark) always start with
+  scope set to Page.
 - The Define Layout PDF preview renders slightly zoomed in by default so the
   working page is easier to inspect while drawing layout areas.
 
@@ -1211,168 +1221,95 @@ scale is applied to a preview-only content wrapper inside `preview.html`, on top
 of the project stylesheet; EPUB output must not inherit this preview-only font
 size.
 
-## Codex Review
+## Codex OCR (Image Description)
 
-**Edit PDF > Codex Review** opens a dark NewOCR-styled auxiliary window
-for local Codex Markdown correction. This workflow does not use Safari or manual
-file uploads. It runs `codex exec` against the current project folder and edits
-the selected section's existing `page*.md` files in place. It is a correction
-workflow, not a second OCR pass: Codex should use the existing Markdown as the
-source text and inspect the PDF only to verify text corrections, blank paragraph
-gaps, blockquotes, and footnotes. Image detection belongs to the OCR process,
-not Codex Review.
+**Edit PDF > Codex OCR (Image Description)** sends cropped PDF image caption
+areas to Codex for vision-based OCR, then lets the user review and selectively
+save the results back into the existing page Markdown files.
 
-### Window Controls
+This feature does **not** send existing Markdown to Codex. It sends only the
+cropped image from the PDF for each `image_desc` layout area. The current
+Markdown text is shown alongside for comparison only.
 
-- show each section/manual section with all existing Markdown page files from
-  its Markdown folder, usually `AppleVision/MD/<section>/page*.md`
-- show a large checkbox for each section; selecting a section includes all of
-  that section's page Markdown files
-- allow selecting more than one section, capped by `CODEX_FINALIZE_MAX_SECTIONS`
-  from `config.txt` (default `5`)
-- provide an **Open PDF** icon button for each section
-- provide a **Preview** icon button for each Markdown file
-- provide a **Show Files** icon button that reveals the Markdown file and
-  matching section PDF in Finder
-- provide a **Codex Instruction** icon button that opens the configured prompt
-  file from `CODEX_FINALIZE_PROMPT_FILE`; this editor hides the prompt file
-  path in the header, uses an icon-only Save button, opens as a separate
-  retained auxiliary window, and must not close the Codex Review window
-- provide an **Info (i)** icon button that opens the Codex Log window at any
-  time, including after a run has finished
-- provide a **Run Codex** icon button that runs local Codex on the selected
-  sections; clicking Run also opens the Codex Log window automatically
+### Workflow
 
-### Codex Log Window
+1. Open a project that has `image_desc` rules in `layout-areas.json` and
+   existing `page*.md` files for those sections (i.e., OCR has already run).
+2. Open **Edit PDF > Codex OCR (Image Description)**.
+3. The window lists all matching image description areas found across all
+   sections that have Markdown **and are not marked as completed**. Sections
+   already marked complete (epub-ready) are skipped entirely. Each row shows:
+   section name, page number, image label, and the current OCR text from the
+   `.md` file.
+4. Press **Run OCR**. NewOCR crops each `image_desc` rectangle from the PDF
+   page (at scale 4.0), saves the crops as PNG files to
+   `AppleVision/codex-ocr-temp/`, and runs a single `codex exec` call asking
+   Codex to OCR every image and write results to
+   `AppleVision/codex-ocr-temp/ocr-results.json`.
+5. After Codex finishes, each row shows the Codex OCR result alongside the
+   original text. Selected rows have a green border.
+6. Check or uncheck rows (all start selected). Press **Save Selected (N)** to
+   replace the `*...*` description text in each corresponding `page*.md` file
+   with Codex's result.
 
-The Codex Log window shows real-time output streamed from the `codex exec`
-process. It opens automatically when Run Codex is clicked and can also be
-opened at any time with the Info button in the Codex Review header.
+The PNG crops are deleted after a successful run. The `ocr-results.json` is
+kept for debugging.
 
-The log header shows:
+### Candidate Matching
 
-```text
-Starting Codex on N section(s)...
-Executable: /Applications/Codex.app/Contents/Resources/codex
-Model: gpt-5.4-mini  (or the value of CODEX_FINALIZE_MODEL)
-Project: /path/to/project
-```
+Only `image_desc` rules with:
+- a `section` field matching an existing PDF in the project folder
+- a `page` field matching an existing `page{N}.md` in
+  `AppleVision/MD/<section>/`
+- a non-empty `markers` label (e.g. `"2"`)
 
-The log scrolls automatically as output arrives. A spinner appears while Codex
-is running. A `--- Done ---` or `--- Error ---` footer is appended when the
-process exits, then the log is saved automatically. The log is the verbose
-debug/investigation artifact, not the normal user-facing result.
+…are shown as candidates. Rules without an existing `.md` file are silently
+skipped.
 
-On a successful run, Codex returns a concise `NEWOCR_REPORT_BEGIN` /
-`NEWOCR_REPORT_END` report block. NewOCR extracts only that report text and
-shows it to the user in a **Codex Review Finished** dialog. The report should
-summarize edited files, text corrections, blank paragraphs, blockquotes,
-footnotes, and uncertain/skipped items without including debug logs or command
-output.
+### How Save Replaces Text
 
-When the run finishes, NewOCR automatically writes the current log text to:
-
-```text
-AppleVision/codex-review-log.txt
-```
-
-inside the active project folder.
-
-**Download Log** (blue download button) — reveals the automatically saved log
-file in Finder. Enabled only after the current run has finished and the log has
-been saved.
-
-Each time Run Codex starts, any existing `codex-review-log.txt` is deleted and
-`savedLogURL` is cleared so the Download Log button resets. This keeps the
-project folder from accumulating old log files. Only one Codex Review log is
-kept for the current process. To keep a particular log, copy or rename the file
-before running Codex again.
+The save step looks for the pattern `![label](Images/...)\n\n*old text*` in
+the `.md` file and replaces only the `*old text*` part with `*new text*`.
+If the pattern is not found (e.g. the `.md` was regenerated since the window
+opened), a per-item error is reported without touching the file.
 
 ### Codex Exec Command
 
-NewOCR launches Codex as:
+The same `runCodexExec` path used elsewhere:
 
 ```sh
 codex exec \
   --skip-git-repo-check \
   --sandbox workspace-write \
   -c shell_environment_policy.inherit=all \
-  -m <effective CODEX_FINALIZE_MODEL> \
+  -m <CODEX_FINALIZE_MODEL> \
   --cd <project-folder> \
   "<prompt>"
 ```
 
-- `--skip-git-repo-check` allows running outside a Git repository.
-- `--sandbox workspace-write` restricts Codex's shell commands to write only
-  within the project folder and `/tmp`; reads are unrestricted.
-- `-c shell_environment_policy.inherit=all` passes the full login-shell
-  environment (Homebrew PATH, etc.) to every command Codex runs.
-- `-m <model>` is always added. If `CODEX_FINALIZE_MODEL` is missing or blank,
-  NewOCR uses its built-in default `gpt-5.4-mini`.
-- `stdin` is set to `/dev/null` so Codex never blocks waiting for interactive
-  input.
-
-The process environment is enriched before launch so that `HOME`, `TMPDIR`,
-`CODEX_HOME`, and `PATH` (including `/opt/homebrew/bin`) are always set even
-when the app is opened from Finder or the Dock.
+The prompt lists the PNG filenames and asks Codex to write
+`AppleVision/codex-ocr-temp/ocr-results.json` with a `{filename: text}` map.
 
 ### Model Selection
 
-`CODEX_FINALIZE_MODEL` in `config.txt` controls which model Codex uses:
+Uses `CODEX_FINALIZE_MODEL` from `config.txt` (same key as before):
 
 ```text
 CODEX_FINALIZE_MODEL=gpt-5.4-mini
 ```
 
-- **Leave blank or omit the key** — NewOCR uses its built-in default
-  `gpt-5.4-mini`.
-- **Set a model name** — only set a value if your account and provider support
-  it. API-key accounts can use names like `gpt-4o` or `gpt-4o-mini`. ChatGPT
-  accounts support names like `gpt-5.5` or `gpt-5.4-mini` but not API-specific
-  names; an unsupported name produces an error visible in the Codex Log.
+### Known Behavioral Decisions — Codex OCR (Image Description)
 
-### Prompt File
-
-The prompt file (`CODEX_FINALIZE_PROMPT_FILE`, default `codex-finalize-prompt.txt`
-in the project folder) is created with NewOCR's default instructions on first
-use. The user can edit and save it from the **Codex Instruction** window. The
-Codex Review window reloads it fresh before every run.
-
-NewOCR always appends a system task block to the prompt at runtime. This block
-includes:
-
-- The exact path of each section PDF.
-- The list of Markdown page files to edit.
-
-The user-editable prompt file controls correction rules: text cleanup, blank
-paragraph gaps, blockquote formatting, and footnote formatting. It also tells
-Codex to return a concise marked completion report instead of a verbose
-transcript. The system task block controls file paths and is not editable from
-the Codex Instruction window. Codex Review must not detect, extract, crop, add,
-remove, or rename images; image areas are controlled by NewOCR layout areas or
-manual OCR editor actions.
-
-### Known Behavioral Decisions — Codex Review
-
-- Finalize edits Markdown files directly; there is no proposed-copy/apply step.
-  If the result is bad, re-run OCR for that section to regenerate clean files.
-- The system task block (file paths and Markdown file list) is always appended
-  at runtime and cannot be disabled from the Codex Instruction window.
-- Codex Review does not perform image detection or extraction. Use Define
-  Layout Areas for OCR-time image crops, or use the OCR editor's manual image
-  tools for corrections.
-- `stdin` is `/dev/null` so Codex always runs non-interactively.
-- The Codex Log window stays open after a run finishes so the user can review
-  output. It is closed when the main Codex Review window closes or when the app
-  quits.
-- Each new run deletes the previous `AppleVision/codex-review-log.txt`,
-  clears `savedLogURL`, and creates a fresh log automatically when the run
-  finishes. Only one log file is kept at a time.
-- The log window has no manual Save Log button. The Download Log button is
-  disabled until the current run's log has been saved automatically.
-- Successful runs show a concise completion report extracted from Codex's
-  `NEWOCR_REPORT_BEGIN` / `NEWOCR_REPORT_END` output. The raw Codex log remains
-  available only through Download Log for debugging.
+- The feature is read-only until the user presses **Save Selected**. Nothing
+  in the `.md` files is changed by opening the window or pressing Run OCR.
+- All candidates start pre-selected (checkbox on). Deselect rows before saving
+  to skip them.
+- If Codex returns no result for a candidate, that row shows a warning and is
+  excluded from Save even if checked.
+- Pressing Run OCR a second time is blocked after the first run completes
+  (`isDone = true`). Close and reopen the window to run again.
+- PNG crops are saved at scale 4.0 (≈ 288 DPI) regardless of
+  `OCR_RENDER_SCALE`; this balances image quality vs. file size for vision OCR.
 
 ## Apply CSS
 
@@ -1505,15 +1442,14 @@ Key notes:
   (≈ 432 DPI) for better recognition accuracy. Range: 1.0–8.0. Higher values
   increase memory use and OCR time proportionally. The Define Layout preview
   thumbnails always render at 2.0 regardless of this setting.
-- `CODEX_FINALIZE_MODEL` — configurable model for Codex Review. If the key is
-  missing or blank, NewOCR uses `gpt-5.4-mini`. Set another model name only when
-  your Codex account and provider support it. ChatGPT accounts do not support
-  API model names such as `gpt-4o-mini`; use names available in ChatGPT (e.g.
-  `gpt-5.5`, `gpt-5.4-mini`). An unsupported name shows an error in the Codex
-  Log.
-- `CODEX_FINALIZE_PROMPT_FILE` — path to the editable instruction file used by
-  Codex Review. Relative paths are resolved from the project folder.
-  The file is created with default instructions if it does not exist.
+- `CODEX_FINALIZE_MODEL` — model used by Codex OCR (Image Description). If the
+  key is missing or blank, NewOCR uses `gpt-5.4-mini`. Set another model name
+  only when your Codex account and provider support it. ChatGPT accounts do not
+  support API model names such as `gpt-4o-mini`; use names available in ChatGPT
+  (e.g. `gpt-5.5`, `gpt-5.4-mini`). An unsupported name shows an error in the
+  run log.
+- `CODEX_FINALIZE_PROMPT_FILE` — legacy key, no longer used by the current
+  Codex OCR feature. Kept for compatibility; may be removed in a future version.
 
 ## Current UI Principles
 
