@@ -628,7 +628,29 @@ Supported rule types:
 - `image` — the rectangle is cropped from the rendered PDF page, saved to
   `Images/`, and inserted as Markdown image syntax.
 - `footnote` — OCR lines in the rectangle are written as Markdown footnote
-  definitions.
+  definitions. When saving a Footnote area in Define Layout, enter a
+  comma-separated list of labels in the **Labels** field (e.g. `1,2,3` or
+  `*,†,‡`). During OCR, each captured line is paired with the corresponding
+  label in order:
+  ```
+  line 0 + label "1"  →  [^1]: Archie's Pals 'n' Gals ...
+  line 1 + label "2"  →  [^2]: Êmile Zola ...
+  line 2 + label "3"  →  [^3]: Thérèse Raquin
+  ```
+  If no labels are entered, the system falls back to auto-detecting a leading
+  superscript digit (¹ ² ³ …) or ASCII digit/symbol prefix (`1.`, `1)`, `*`,
+  `†`) on each line.
+- `refmark` — shown in the UI tooltip as **Ref Mark**. Draw this rectangle over
+  the body-text paragraph that contains the inline reference for a specific
+  footnote. Enter a single label in the **Ref label** field (e.g. `1` or `*`).
+  During OCR the captured text has `[^label]` appended at the end:
+  ```
+  "อาร์ชี แต่เขากลับนึกถึงเอมีล" + label "1"  →  "อาร์ชี แต่เขากลับนึกถึงเอมีล[^1]"
+  ```
+  Draw one Ref Mark rectangle per footnote reference location, each with its
+  own label, so multiple references on the same page each produce the correct
+  `[^N]` marker.
+  If no label is entered, the text is kept unchanged.
 - `ignore` — OCR lines in the rectangle are removed from Markdown.
 
 Advanced JSON example:
@@ -1660,6 +1682,42 @@ These are intentional and should not be changed casually:
 - Define Layout coordinates are saved and applied relative to cropped
   `section-###.pdf` page `.cropBox` renders. OCR layout rules must not use
   `_original.pdf` coordinates.
+- The **Ref Mark** layout area (`refmark` type) uses a low overlap threshold
+  (10% of OCR line area) so that small, word-sized rectangles reliably match the
+  full-width OCR line they sit on. For each matched rectangle, the OCR pipeline:
+  1. Maps the rectangle's left/right edges to a character range within the text.
+  2. Scans that range (plus a small buffer) for a known OCR superscript artefact
+     character (`'` `'` `′` `` ` `` `ʹ` `´`).
+  3. If an artefact is found: removes it and inserts `[^label]` at that exact
+     position — the marker replaces the artefact inline.
+  4. If no artefact is found: inserts `[^label]` at the right-edge estimate.
+  Multiple Ref Mark rectangles on the same OCR line are all collected,
+  sorted left-to-right, and applied right-to-left so earlier insertions do not
+  shift later indices. Draw one Ref Mark rectangle per footnote reference
+  location; each gets its own label. If no label is entered, the text is
+  kept unchanged.
+- The **Footnote** layout area supports two drawing styles:
+  - **One rectangle per footnote line** (recommended): each rectangle has a
+    single label (e.g. `1`, `2`, `3`). OCR uses that label directly regardless
+    of position in the accumulated list.
+  - **One rectangle for all footnote lines**: enter comma-separated labels (e.g.
+    `1,2,3`). OCR assigns labels to captured lines in top-to-bottom order.
+  Both styles strip any leading digit/superscript prefix that OCR may capture
+  from the original text so it is not duplicated in the definition body.
+  The `markers` field is saved in `layout-areas.json`.
+- When a page's forced-layout OCR produces footnote definitions (from any
+  `footnote` layout area rule), a `<!-- page-break-after -->` comment is
+  automatically appended after the definitions. This keeps each PDF page's
+  footnotes together with the body text that references them, instead of
+  floating all definitions to the end of the chapter.
+- Both the Preview renderer (Swift) and the EPUB builder (Python) render
+  `[^N]:` definition lines at their literal position in the Markdown rather
+  than collecting them at the end of the document. When a footnote definition
+  paragraph appears before a `<!-- page-break-after -->` marker, the
+  definitions are rendered inline immediately above the page break, and only
+  footnotes not already rendered inline fall back to the end-of-document
+  `<section class="footnotes">` block. This allows the EPUB to reflect the
+  original book's per-page footnote layout.
 - `split-plan.json` stores only created section files and includes `file`.
 - Detect Split saves the current edited Title fields for checked rows directly
   into `book-sections.json` when creating section PDFs; do not defer this to a

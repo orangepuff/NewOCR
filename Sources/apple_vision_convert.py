@@ -308,13 +308,16 @@ def markdown_aligned_paragraph_parts(stripped):
 
 
 def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=None, image_prefix=""):
-    text, footnote_definitions = extract_markdown_footnotes(text)
+    # Extract the definitions dict but keep original text so definition lines remain
+    # in their position and can be rendered inline before any page-break-after marker.
+    _, footnote_definitions = extract_markdown_footnotes(text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     body_parts = []
     toc = []
     paragraph_lines = []
     heading_count = 0
     footnote_state = {"definitions": footnote_definitions, "used": []}
+    inline_rendered: set = set()
     blank_line_count = 0
 
     def flush_paragraph():
@@ -406,15 +409,49 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
             body_parts.append(f'<h{level} id="{anchor}">{title}</h{level}>')
             index = next_index
             continue
-        else:
-            paragraph_lines.append(stripped)
+
+        # Render [^N]: definition lines inline at their position in the text rather
+        # than collecting them for the end of the document.
+        def_match = FOOTNOTE_DEF_RE.match(stripped)
+        if def_match:
+            flush_paragraph()
+            flush_empty_paragraphs()
+            items = []
+            while index < len(lines):
+                s = lines[index].strip()
+                m = FOOTNOTE_DEF_RE.match(s)
+                if m:
+                    label = m.group(1)
+                    note_text = footnote_definitions.get(label) or m.group(2).strip()
+                    fragment = footnote_fragment_id(label, f"fn-{label}")
+                    items.append(
+                        f'<li id="fn-{html.escape(fragment)}">'
+                        f'{markdown_inline_to_html(note_text, footnote_state)} '
+                        f'<a href="#fnref-{html.escape(fragment)}" class="footnote-back">&#8617;</a>'
+                        f'</li>'
+                    )
+                    inline_rendered.add(label)
+                    index += 1
+                elif s.startswith("    ") or s.startswith("\t"):
+                    index += 1  # continuation indent line — skip
+                else:
+                    break
+            if items:
+                body_parts.append('<section class="footnotes">\n<ol>\n' + "\n".join(items) + "\n</ol>\n</section>")
+            continue
+
+        paragraph_lines.append(stripped)
         index += 1
 
     flush_paragraph()
     flush_empty_paragraphs()
-    footnotes_html = footnotes_to_html(footnote_state)
-    if footnotes_html:
-        body_parts.append(footnotes_html)
+    # Only append end-of-document footnotes for labels not already rendered inline.
+    remaining_used = [l for l in footnote_state["used"] if l not in inline_rendered]
+    if remaining_used:
+        remaining_state = {"definitions": footnote_definitions, "used": remaining_used}
+        footnotes_html = footnotes_to_html(remaining_state)
+        if footnotes_html:
+            body_parts.append(footnotes_html)
 
     if not body_parts:
         body_parts.append(f"<p>{html.escape(fallback_title)}</p>")

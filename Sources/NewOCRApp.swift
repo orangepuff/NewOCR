@@ -204,6 +204,9 @@ struct OCRLayoutAreaRule: Codable, Equatable, Identifiable {
     var section: String?
     var page: Int?
     var rect: OCRLayoutAreaRect
+    // Comma-separated marker labels for footnote areas (e.g. "1,2,3" or "*,†").
+    // Single marker label for refmark areas (e.g. "1" or "*").
+    var markers: String?
 }
 
 struct OCRLayoutAreaRect: Codable, Equatable {
@@ -225,6 +228,7 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var status: String = ""
     @Published var savedRuleCount: Int = 0
     @Published var loadedRule: OCRLayoutAreaRule?
+    @Published var markers: String = ""
     private var pdfPageCounts: [String: Int] = [:]
 
     init(pdfItems: [PDFFileItem], initialPDF: PDFFileItem, initialPage: Int = 1) {
@@ -341,6 +345,7 @@ final class LayoutAreaEditorState: ObservableObject {
             height: ocrRect.top - ocrRect.bottom
         )
         self.selectionRect = selRect
+        self.markers = rule.markers ?? ""
     }
 
     func clearLoadedRule() {
@@ -2555,27 +2560,28 @@ final class AppState: ObservableObject {
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
-    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect) throws -> Int {
+    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
         let cleanScope = scope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanMarkers = markers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
             rules = [
-                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect)
+                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers)
             ]
         case "selected_sections":
             rules = selectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect)
+                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers)
             }
         case "page":
             rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect)
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers)
             ]
         default:
             rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect)
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers)
             ]
         }
         areas.rules.append(contentsOf: rules)
@@ -2583,30 +2589,31 @@ final class AppState: ObservableObject {
         return areas.rules.count
     }
 
-    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect) throws -> Int {
+    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect, newMarkers: String? = nil) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
         if let index = areas.rules.firstIndex(of: oldRule) {
             areas.rules.remove(at: index)
         }
         let cleanScope = newScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanMarkers = newMarkers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect)
+                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect, markers: cleanMarkers)
             ]
         case "selected_sections":
             rules = newSelectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers)
             }
         case "page":
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect, markers: cleanMarkers)
             ]
         default:
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers)
             ]
         }
         areas.rules.append(contentsOf: rules)
@@ -3504,11 +3511,26 @@ final class AppState: ObservableObject {
         var parts: [String] = []
         let extracted = extractMarkdownFootnotes(from: markdown)
         var usedFootnotes: [String] = []
-        let paragraphs = splitParagraphs(extracted.markdown)
+        var inlineRenderedLabels: Set<String> = []
+        // Use original markdown (not stripped) so footnote definitions stay at their
+        // position in the paragraph flow instead of all floating to the end.
+        let paragraphs = splitParagraphs(markdown)
         for paragraph in paragraphs {
             let trimmed = paragraph.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
                 parts.append("<p class=\"empty-paragraph\"><br/></p>")
+                continue
+            }
+
+            // Render a paragraph that consists entirely of [^N]: definition lines
+            // inline at this position rather than collecting them for the end.
+            if let inlineHTML = markdownInlineFootnoteDefinitionsHTML(
+                from: trimmed,
+                definitions: extracted.footnotes,
+                renderedLabels: &inlineRenderedLabels,
+                usedFootnotes: &usedFootnotes
+            ) {
+                parts.append(inlineHTML)
                 continue
             }
 
@@ -3539,10 +3561,48 @@ final class AppState: ObservableObject {
 
             parts.append("<p>\(markdownInlinePreviewHTML(trimmed.replacingOccurrences(of: "\n", with: " "), usedFootnotes: &usedFootnotes))</p>")
         }
-        if let footnotesHTML = footnotesPreviewHTML(definitions: extracted.footnotes, usedLabels: usedFootnotes) {
+        // Any footnotes not rendered inline (traditional end-of-document placement).
+        let remainingUsed = usedFootnotes.filter { !inlineRenderedLabels.contains($0) }
+        if let footnotesHTML = footnotesPreviewHTML(definitions: extracted.footnotes, usedLabels: remainingUsed) {
             parts.append(footnotesHTML)
         }
         return parts.joined(separator: "\n")
+    }
+
+    // Returns an inline footnotes section HTML if every line in the paragraph is a
+    // [^label]: definition. Returns nil if ANY line is not a definition (so the
+    // paragraph falls through to normal rendering).
+    private func markdownInlineFootnoteDefinitionsHTML(
+        from paragraph: String,
+        definitions: [String: String],
+        renderedLabels: inout Set<String>,
+        usedFootnotes: inout [String]
+    ) -> String? {
+        let lines = paragraph.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return nil }
+
+        let defRegex = try? NSRegularExpression(pattern: #"^\[\^([^\]]+)\]:\s*(.*)"#)
+        var items: [String] = []
+        for line in lines {
+            let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
+            guard let match = defRegex?.firstMatch(in: line, range: nsRange),
+                  match.numberOfRanges > 2,
+                  let labelRange = Range(match.range(at: 1), in: line) else {
+                return nil  // non-definition line in this paragraph — don't handle it here
+            }
+            let label = String(line[labelRange])
+            let noteText = definitions[label] ?? {
+                if let bodyRange = Range(match.range(at: 2), in: line) { return String(line[bodyRange]) }
+                return ""
+            }()
+            let fragment = footnoteFragmentID(label, fallback: "fn-\(label)")
+            items.append("<li id=\"fn-\(htmlEscaped(fragment))\">\(markdownInlinePreviewHTML(noteText, usedFootnotes: &usedFootnotes)) <a href=\"#fnref-\(htmlEscaped(fragment))\" class=\"footnote-back\">&#8617;</a></li>")
+            renderedLabels.insert(label)
+        }
+        guard !items.isEmpty else { return nil }
+        return "<section class=\"footnotes\">\n<ol>\n\(items.joined(separator: "\n"))\n</ol>\n</section>"
     }
 
     private func markdownHeadingHTML(from text: String, usedFootnotes: inout [String]) -> String? {
@@ -6043,36 +6103,29 @@ final class AppState: ObservableObject {
         case text(OCRLine)
         case header(OCRLine)
         case blockquote(OCRLine)
-        case footnote(OCRLine)
+        case footnote(OCRLine, [String])  // ordered marker labels from rule (e.g. ["1","2","3"])
+        case refmark(OCRLine, [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)])  // insertion data: marker + left/right fractions within line text
         case image(OCRImageRegion)
 
         var top: CGFloat {
             switch self {
-            case .text(let line):
-                return line.top
-            case .header(let line):
-                return line.top
-            case .blockquote(let line):
-                return line.top
-            case .footnote(let line):
-                return line.top
-            case .image(let imageRegion):
-                return imageRegion.top
+            case .text(let line): return line.top
+            case .header(let line): return line.top
+            case .blockquote(let line): return line.top
+            case .footnote(let line, _): return line.top
+            case .refmark(let line, _): return line.top
+            case .image(let r): return r.top
             }
         }
 
         var left: CGFloat {
             switch self {
-            case .text(let line):
-                return line.left
-            case .header(let line):
-                return line.left
-            case .blockquote(let line):
-                return line.left
-            case .footnote(let line):
-                return line.left
-            case .image(let imageRegion):
-                return imageRegion.left
+            case .text(let line): return line.left
+            case .header(let line): return line.left
+            case .blockquote(let line): return line.left
+            case .footnote(let line, _): return line.left
+            case .refmark(let line, _): return line.left
+            case .image(let r): return r.left
             }
         }
     }
@@ -6081,10 +6134,11 @@ final class AppState: ObservableObject {
         let headerRules = layoutAreaRules(layoutRules, type: "header")
         let blockquoteRules = layoutAreaRules(layoutRules, type: "blockquote")
         let footnoteRules = layoutAreaRules(layoutRules, type: "footnote")
-        let hasForcedLayout = !headerRules.isEmpty || !blockquoteRules.isEmpty || !footnoteRules.isEmpty
+        let refmarkRules = layoutAreaRules(layoutRules, type: "refmark")
+        let hasForcedLayout = !headerRules.isEmpty || !blockquoteRules.isEmpty || !footnoteRules.isEmpty || !refmarkRules.isEmpty
 
         if hasForcedLayout {
-            return buildMarkdownPageWithForcedLayout(from: lines, imageRegions: imageRegions, headerRules: headerRules, blockquoteRules: blockquoteRules, footnoteRules: footnoteRules)
+            return buildMarkdownPageWithForcedLayout(from: lines, imageRegions: imageRegions, headerRules: headerRules, blockquoteRules: blockquoteRules, footnoteRules: footnoteRules, refmarkRules: refmarkRules)
         }
 
         if imageRegions.isEmpty {
@@ -6120,9 +6174,12 @@ final class AppState: ObservableObject {
             case .blockquote(let line):
                 flushText()
                 rendered.append("> \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
-            case .footnote(let line):
+            case .footnote(let line, _):
                 flushText()
-                rendered.append(footnoteMarkdownLine(from: line.text, fallbackLabel: "note1"))
+                rendered.append(footnoteMarkdownLine(from: line.text, fallbackLabel: "note1", forcedLabel: nil))
+            case .refmark(let line, let refData):
+                flushText()
+                rendered.append(applyRefmarkInsertions(line.text.trimmingCharacters(in: .whitespacesAndNewlines), refmarks: refData))
             case .image(let imageRegion):
                 flushText()
                 rendered.append(imageRegion.markdown)
@@ -6138,7 +6195,8 @@ final class AppState: ObservableObject {
         imageRegions: [OCRImageRegion],
         headerRules: [OCRLayoutAreaRule],
         blockquoteRules: [OCRLayoutAreaRule],
-        footnoteRules: [OCRLayoutAreaRule]
+        footnoteRules: [OCRLayoutAreaRule],
+        refmarkRules: [OCRLayoutAreaRule] = []
     ) -> String {
         var blocks: [OCRMarkdownBlock] = lines.map { line in
             if headerRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
@@ -6147,8 +6205,26 @@ final class AppState: ObservableObject {
             if blockquoteRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
                 return .blockquote(line)
             }
-            if footnoteRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
-                return .footnote(line)
+            if let rule = footnoteRules.first(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
+                return .footnote(line, ruleMarkersToList(rule.markers))
+            }
+            // RefMark uses a low threshold (0.10) because the drawn rectangle is intentionally
+            // small — covering just one word/superscript in an otherwise full-width OCR line.
+            // Collect ALL matching refmark rules for this line, sorted left-to-right.
+            // Store the insertion fraction so the marker is spliced into the text at the
+            // horizontal position of the refmark rectangle's right edge, not appended at the end.
+            let lineWidth = max(0.0001, line.right - line.left)
+            let matchingRefmarks = refmarkRules
+                .filter { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.10) }
+                .sorted { $0.rect.left < $1.rect.left }
+            let refData: [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)] = matchingRefmarks.compactMap { rule in
+                guard let m = rule.markers?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty else { return nil }
+                let fl = min(max((rule.rect.left  - line.left) / lineWidth, 0), 1)
+                let fr = min(max((rule.rect.right - line.left) / lineWidth, 0), 1)
+                return (marker: m, fractionLeft: fl, fractionRight: fr)
+            }
+            if !refData.isEmpty {
+                return .refmark(line, refData)
             }
             return .text(line)
         } + imageRegions.map { .image($0) }
@@ -6164,13 +6240,15 @@ final class AppState: ObservableObject {
         var pendingTextLines: [OCRLine] = []
         var pendingHeaderLines: [OCRLine] = []
         var pendingQuoteLines: [OCRLine] = []
-        var pendingFootnoteLines: [OCRLine] = []
+        // footnote: (line, markers list from the matching rule)
+        var pendingFootnoteLines: [(OCRLine, [String])] = []
+        // refmark: (line, insertion entries sorted left-to-right)
+        var pendingRefmarkLines: [(OCRLine, [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)])] = []
+        var hadFootnotes = false
 
         func flushText() {
             let text = buildContinuousParagraphs(from: pendingTextLines)
-            if !text.isEmpty {
-                rendered.append(text)
-            }
+            if !text.isEmpty { rendered.append(text) }
             pendingTextLines.removeAll()
         }
 
@@ -6193,38 +6271,56 @@ final class AppState: ObservableObject {
 
         func flushFootnote() {
             if !pendingFootnoteLines.isEmpty {
-                rendered.append(buildFootnoteMarkdown(from: pendingFootnoteLines))
+                hadFootnotes = true
+                let lines = pendingFootnoteLines.enumerated().map { index, entry in
+                    let (line, markers) = entry
+                    // Single-marker rule (one rectangle per footnote line): use it directly.
+                    // Multi-marker rule (one rectangle for all footnote lines): use by index.
+                    let forcedLabel: String?
+                    if markers.count == 1 {
+                        forcedLabel = markers[0]
+                    } else if markers.count > 1 {
+                        forcedLabel = index < markers.count ? markers[index] : nil
+                    } else {
+                        forcedLabel = nil
+                    }
+                    return footnoteMarkdownLine(from: line.text, fallbackLabel: "note\(index + 1)", forcedLabel: forcedLabel)
+                }.joined(separator: "\n")
+                rendered.append(lines)
                 pendingFootnoteLines.removeAll()
+            }
+        }
+
+        func flushRefmark() {
+            if !pendingRefmarkLines.isEmpty {
+                let parts = pendingRefmarkLines.map { line, refData -> String in
+                    let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return applyRefmarkInsertions(text, refmarks: refData)
+                }.filter { !$0.isEmpty }
+                if !parts.isEmpty { rendered.append(parts.joined(separator: "\n\n")) }
+                pendingRefmarkLines.removeAll()
             }
         }
 
         for block in blocks {
             switch block {
             case .text(let line):
-                flushHeader()
-                flushQuote()
-                flushFootnote()
+                flushHeader(); flushQuote(); flushFootnote(); flushRefmark()
                 pendingTextLines.append(line)
             case .header(let line):
-                flushText()
-                flushQuote()
-                flushFootnote()
+                flushText(); flushQuote(); flushFootnote(); flushRefmark()
                 pendingHeaderLines.append(line)
             case .blockquote(let line):
-                flushHeader()
-                flushText()
-                flushFootnote()
+                flushHeader(); flushText(); flushFootnote(); flushRefmark()
                 pendingQuoteLines.append(line)
-            case .footnote(let line):
-                flushHeader()
-                flushText()
-                flushQuote()
-                pendingFootnoteLines.append(line)
+            case .footnote(let line, let markers):
+                flushHeader(); flushText(); flushQuote(); flushRefmark()
+                pendingFootnoteLines.append((line, markers))
+            case .refmark(let line, let refData):
+                flushHeader(); flushText(); flushQuote(); flushFootnote()
+                pendingRefmarkLines.append((line, refData))
             case .image(let imageRegion):
-                flushHeader()
-                flushText()
-                flushQuote()
-                flushFootnote()
+                flushHeader(); flushText(); flushQuote(); flushFootnote(); flushRefmark()
                 rendered.append(imageRegion.markdown)
             }
         }
@@ -6232,8 +6328,83 @@ final class AppState: ObservableObject {
         flushText()
         flushQuote()
         flushFootnote()
+        flushRefmark()
 
-        return rendered.joined(separator: "\n\n")
+        var result = rendered.joined(separator: "\n\n")
+        if hadFootnotes {
+            result += "\n\n<!-- page-break-after -->"
+        }
+        return result
+    }
+
+    // Splits a rule's markers string ("1,2,3" or "*, †") into an ordered list.
+    private func ruleMarkersToList(_ markers: String?) -> [String] {
+        guard let m = markers, !m.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        return m.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    // OCR characters that represent superscript numbers the recogniser couldn't classify.
+    private static let superscriptArtefacts: Set<Unicode.Scalar> = ["'", "\u{2019}", "`", "′", "ʹ", "´", "ʼ", "\u{02BC}"]
+
+    // Replaces OCR superscript artefact characters with [^marker] tags inline.
+    //
+    // Strategy per refmark:
+    //   1. Map the rectangle's left/right fractions to a character range in the string.
+    //   2. Scan that range (with a small buffer) for a known artefact character.
+    //   3. If found → remove it and insert [^marker] at the same position.
+    //   4. If not found → insert [^marker] at the estimated right-edge position.
+    //
+    // All operations are applied right-to-left so earlier indices stay valid.
+    private func applyRefmarkInsertions(_ text: String, refmarks: [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)]) -> String {
+        guard !refmarks.isEmpty, !text.isEmpty else { return text }
+        var scalars = Array(text.unicodeScalars)
+        let total = scalars.count
+
+        struct Op {
+            let removeIndex: Int?   // nil = no removal
+            let insertIndex: Int    // where to insert [^marker]
+            let marker: String
+        }
+
+        var ops: [Op] = []
+
+        for refmark in refmarks {
+            // Map fractions to scalar indices, with a small buffer around the range.
+            let buffer = max(Int((CGFloat(total) * 0.03).rounded()), 2)
+            let lo = max(0, Int((CGFloat(total) * refmark.fractionLeft ).rounded()) - buffer)
+            let hi = min(total, Int((CGFloat(total) * refmark.fractionRight).rounded()) + buffer)
+
+            // Find the first artefact scalar in [lo, hi).
+            var artefactIdx: Int? = nil
+            for i in lo..<hi where i < scalars.count {
+                if Self.superscriptArtefacts.contains(scalars[i]) {
+                    artefactIdx = i
+                    break
+                }
+            }
+
+            if let ai = artefactIdx {
+                // Replace artefact with the marker tag.
+                ops.append(Op(removeIndex: ai, insertIndex: ai, marker: refmark.marker))
+            } else {
+                // No artefact found — insert at the right-edge estimate.
+                let insertAt = min(hi, total)
+                ops.append(Op(removeIndex: nil, insertIndex: insertAt, marker: refmark.marker))
+            }
+        }
+
+        // Apply right-to-left so earlier indices stay valid.
+        ops.sort { $0.insertIndex > $1.insertIndex }
+        for op in ops {
+            let tag = Array("[^\(op.marker)]".unicodeScalars)
+            if let ri = op.removeIndex {
+                scalars.remove(at: ri)
+                scalars.insert(contentsOf: tag, at: ri)
+            } else {
+                scalars.insert(contentsOf: tag, at: op.insertIndex)
+            }
+        }
+        return String(String.UnicodeScalarView(scalars))
     }
 
     private func normalizedOverlapArea(_ line: OCRLine, _ imageRegion: OCRImageRegion) -> CGFloat {
@@ -6255,7 +6426,7 @@ final class AppState: ObservableObject {
         }
         return decoded.rules.filter { rule in
             let type = rule.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard ["header", "blockquote", "image", "footnote", "ignore"].contains(type) else { return false }
+            guard ["header", "blockquote", "image", "footnote", "ignore", "refmark"].contains(type) else { return false }
             return rule.rect.left < rule.rect.right && rule.rect.bottom < rule.rect.top
         }
     }
@@ -6521,17 +6692,55 @@ final class AppState: ObservableObject {
 
     private func buildFootnoteMarkdown(from lines: [OCRLine]) -> String {
         lines.enumerated().map { index, line in
-            footnoteMarkdownLine(from: line.text, fallbackLabel: "note\(index + 1)")
+            footnoteMarkdownLine(from: line.text, fallbackLabel: "note\(index + 1)", forcedLabel: nil)
         }
         .joined(separator: "\n")
     }
 
-    private func footnoteMarkdownLine(from text: String, fallbackLabel: String) -> String {
+    // Maps Unicode superscript digits/letters to their ASCII equivalent for footnote labels.
+    private static let superscriptLabelMap: [Character: String] = [
+        "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5",
+        "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁰": "0",
+        "ⁱ": "i", "ⁿ": "n",
+        "ᵃ": "a", "ᵇ": "b", "ᶜ": "c", "ᵈ": "d", "ᵉ": "e",
+        "ᶠ": "f", "ᵍ": "g", "ʰ": "h", "ʲ": "j", "ᵏ": "k",
+        "ˡ": "l", "ᵐ": "m", "ᵒ": "o", "ᵖ": "p", "ʳ": "r",
+        "ˢ": "s", "ᵗ": "t", "ᵘ": "u", "ᵛ": "v", "ʷ": "w",
+        "ˣ": "x", "ʸ": "y", "ᶻ": "z"
+    ]
+
+    private func footnoteMarkdownLine(from text: String, fallbackLabel: String, forcedLabel: String?) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return "[^\(fallbackLabel)]:"
+            return "[^\(forcedLabel ?? fallbackLabel)]:"
         }
 
+        // When the user specified a marker via the layout rule, use it as the label and
+        // treat the full OCR text as the definition body (stripping any leading marker chars).
+        if let label = forcedLabel, !label.isEmpty {
+            // Strip a leading superscript or ASCII-digit prefix that OCR may have captured.
+            let body = strippingLeadingMarker(from: trimmed)
+            return "[^\(label)]: \(body.isEmpty ? trimmed : body)"
+        }
+
+        // Auto-detect: match superscript prefix characters (¹²³…) at the start of the line.
+        var superLabel = ""
+        var bodyStart = trimmed.startIndex
+        for idx in trimmed.indices {
+            let ch = trimmed[idx]
+            if let mapped = Self.superscriptLabelMap[ch] {
+                superLabel += mapped
+                bodyStart = trimmed.index(after: idx)
+            } else {
+                break
+            }
+        }
+        if !superLabel.isEmpty {
+            let body = String(trimmed[bodyStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return "[^\(superLabel)]: \(body.isEmpty ? trimmed : body)"
+        }
+
+        // Fallback: match ASCII digit/symbol prefix (e.g. "1.", "1)", "*", "†").
         let pattern = #"^([0-9๐-๙]+|[*†‡])[\.)\]\s]*(.*)$"#
         if let regex = try? NSRegularExpression(pattern: pattern),
            let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)),
@@ -6544,6 +6753,27 @@ final class AppState: ObservableObject {
         }
 
         return "[^\(fallbackLabel)]: \(trimmed)"
+    }
+
+    // Strips a leading superscript-digit or ASCII-digit prefix from text so it is not
+    // duplicated in the footnote body when a forcedLabel is already provided.
+    private func strippingLeadingMarker(from text: String) -> String {
+        var idx = text.startIndex
+        // Skip superscript chars
+        while idx < text.endIndex, Self.superscriptLabelMap[text[idx]] != nil {
+            idx = text.index(after: idx)
+        }
+        if idx > text.startIndex {
+            return String(text[idx...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // Skip ASCII digit + optional separator
+        let pattern = #"^[0-9๐-๙]+[\.)\]\s]*"#
+        if let regex = try? NSRegularExpression(pattern: pattern),
+           let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)),
+           let range = Range(match.range, in: text) {
+            return String(text[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
     }
 
     private func hasDetectedBlankLineGap(between previousLine: OCRLine, and currentLine: OCRLine, averageHeight: CGFloat) -> Bool {
@@ -8446,6 +8676,7 @@ private struct LayoutAreasReportView: View {
             "blockquote": Color(red: 255/255, green: 182/255, blue: 216/255),
             "image": Color(red: 255/255, green: 152/255, blue: 0/255),
             "footnote": Color(red: 120/255, green: 220/255, blue: 100/255),
+            "refmark": Color(red: 160/255, green: 100/255, blue: 240/255),
             "ignore": Color.red.opacity(0.8)
         ]
     }
@@ -8456,6 +8687,7 @@ private struct LayoutAreasReportView: View {
             "blockquote": "quote.bubble",
             "image": "photo",
             "footnote": "text.badge.plus",
+            "refmark": "textformat.superscript",
             "ignore": "eye.slash"
         ]
     }
@@ -8466,6 +8698,7 @@ private struct LayoutAreasReportView: View {
             "blockquote": "Quote",
             "image": "Image",
             "footnote": "Footnote",
+            "refmark": "Ref Mark",
             "ignore": "Ignore"
         ]
     }
@@ -8892,6 +9125,7 @@ private struct DuplicateRuleWarningView: View {
         "blockquote": "Quote",
         "image": "Image",
         "footnote": "Footnote",
+        "refmark": "Ref Mark",
         "ignore": "Ignore"
     ]
 
@@ -8900,6 +9134,7 @@ private struct DuplicateRuleWarningView: View {
         "blockquote": "quote.bubble",
         "image": "photo",
         "footnote": "text.badge.plus",
+        "refmark": "textformat.superscript",
         "ignore": "eye.slash"
     ]
 
@@ -13050,6 +13285,7 @@ struct LayoutAreaEditorWindowView: View {
         ("blockquote", "Quote", "quote.bubble"),
         ("image", "Image", "photo"),
         ("footnote", "Footnote", "text.badge.plus"),
+        ("refmark", "Ref Mark", "textformat.superscript"),
         ("ignore", "Ignore", "eye.slash")
     ]
 
@@ -13107,6 +13343,7 @@ struct LayoutAreaEditorWindowView: View {
 
     private func performSave() {
         guard let url = state.selectedPDFURL else { return }
+        let markersValue = markersApply(to: state.selectedType) ? state.markers : nil
         do {
             let count: Int
             if let loadedRule = state.loadedRule {
@@ -13117,7 +13354,8 @@ struct LayoutAreaEditorWindowView: View {
                     newCurrentSectionURL: url,
                     newSelectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                     newPageNumber: state.selectedPage,
-                    newRect: state.normalizedOCRRect
+                    newRect: state.normalizedOCRRect,
+                    newMarkers: markersValue
                 )
                 state.loadedRule = nil
                 state.status = "Updated \(displayName(for: state.selectedType)) area."
@@ -13128,7 +13366,8 @@ struct LayoutAreaEditorWindowView: View {
                     currentSectionURL: url,
                     selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                     pageNumber: state.selectedPage,
-                    rect: state.normalizedOCRRect
+                    rect: state.normalizedOCRRect,
+                    markers: markersValue
                 )
                 state.status = savedStatusMessage(for: state.selectedType)
             }
@@ -13136,6 +13375,10 @@ struct LayoutAreaEditorWindowView: View {
         } catch {
             state.status = "Could not save: \(error.localizedDescription)"
         }
+    }
+
+    private func markersApply(to type: String) -> Bool {
+        type == "footnote" || type == "refmark"
     }
 
     private var header: some View {
@@ -13340,9 +13583,46 @@ struct LayoutAreaEditorWindowView: View {
                     isSelected: state.selectedType == type.id
                 ) {
                     state.selectedType = type.id
+                    if !markersApply(to: type.id) {
+                        state.markers = ""
+                    }
                 }
             }
+
+            if markersApply(to: state.selectedType) {
+                markersField
+            }
         }
+    }
+
+    private var markersField: some View {
+        let isRefmark = state.selectedType == "refmark"
+        let placeholder = isRefmark ? "Ref label (e.g. 1)" : "Labels (e.g. 1,2,3)"
+        let helpText = isRefmark
+            ? "Single marker appended after body text in this area as [^label]"
+            : "Comma-separated labels assigned to footnote lines in order"
+
+        return HStack(spacing: 6) {
+            Image(systemName: isRefmark ? "textformat.superscript" : "list.number")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(NewOCRMainPalette.secondaryText)
+
+            TextField(placeholder, text: $state.markers)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(Color.black)
+                .frame(width: isRefmark ? 110 : 160)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color.black.opacity(0.22), lineWidth: 1)
+                )
+                .help(helpText)
+        }
+        .padding(.leading, 8)
     }
 
     private var scopePicker: some View {
@@ -13452,6 +13732,7 @@ struct LayoutAreaEditorWindowView: View {
             return
         }
 
+        let markersValue = markersApply(to: state.selectedType) ? state.markers : nil
         do {
             let count: Int
             if let loadedRule = state.loadedRule {
@@ -13462,7 +13743,8 @@ struct LayoutAreaEditorWindowView: View {
                     newCurrentSectionURL: url,
                     newSelectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                     newPageNumber: state.selectedPage,
-                    newRect: state.normalizedOCRRect
+                    newRect: state.normalizedOCRRect,
+                    newMarkers: markersValue
                 )
                 state.loadedRule = nil
                 state.status = "Updated \(displayName(for: state.selectedType)) area."
@@ -13473,7 +13755,8 @@ struct LayoutAreaEditorWindowView: View {
                     currentSectionURL: url,
                     selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                     pageNumber: state.selectedPage,
-                    rect: state.normalizedOCRRect
+                    rect: state.normalizedOCRRect,
+                    markers: markersValue
                 )
                 state.status = savedStatusMessage(for: state.selectedType)
             }
@@ -13500,7 +13783,7 @@ struct LayoutAreaEditorWindowView: View {
     private func clearRules() {
         let alert = NSAlert()
         alert.messageText = "Clear Layout Rules?"
-        alert.informativeText = "This removes all saved header, quote, image, footnote, and ignore layout areas for the current project."
+        alert.informativeText = "This removes all saved header, quote, image, footnote, ref mark, and ignore layout areas for the current project."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Clear")
         alert.addButton(withTitle: "Cancel")
@@ -13525,6 +13808,8 @@ struct LayoutAreaEditorWindowView: View {
             return "image"
         case "footnote":
             return "footnote"
+        case "refmark":
+            return "ref mark"
         case "ignore":
             return "ignore"
         default:
