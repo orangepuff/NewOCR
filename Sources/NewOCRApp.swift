@@ -346,7 +346,7 @@ final class LayoutAreaEditorState: ObservableObject {
             self.selectedScope = scope
             self.selectedLayoutSectionPaths = []
         } else if let section = rule.section {
-            self.selectedScope = "section"
+            self.selectedScope = rule.page != nil ? "page" : "section"
             self.selectedLayoutSectionPaths = []
             if let pdfItem = pdfItems.first(where: { $0.url.lastPathComponent == section }) {
                 self.selectPDFPath(pdfItem.url.path)
@@ -6547,25 +6547,47 @@ final class AppState: ObservableObject {
         }
 
         func flushFootnote() {
-            if !pendingFootnoteLines.isEmpty {
-                hadFootnotes = true
-                let lines = pendingFootnoteLines.enumerated().map { index, entry in
-                    let (line, markers) = entry
-                    // Single-marker rule (one rectangle per footnote line): use it directly.
-                    // Multi-marker rule (one rectangle for all footnote lines): use by index.
-                    let forcedLabel: String?
-                    if markers.count == 1 {
-                        forcedLabel = markers[0]
-                    } else if markers.count > 1 {
-                        forcedLabel = index < markers.count ? markers[index] : nil
-                    } else {
-                        forcedLabel = nil
-                    }
-                    return footnoteMarkdownLine(from: line.text, fallbackLabel: "note\(index + 1)", forcedLabel: forcedLabel)
-                }.joined(separator: "\n")
-                rendered.append(lines)
-                pendingFootnoteLines.removeAll()
+            guard !pendingFootnoteLines.isEmpty else { return }
+            hadFootnotes = true
+
+            // Group consecutive lines that share the same markers into one footnote entry.
+            // A single-marker rule covering multiple OCR lines means the footnote text wraps —
+            // join those lines rather than emitting one [^label]: per line.
+            var groups: [(markers: [String], lines: [OCRLine])] = []
+            for (line, markers) in pendingFootnoteLines {
+                if let last = groups.indices.last, groups[last].markers == markers {
+                    groups[groups.count - 1].lines.append(line)
+                } else {
+                    groups.append((markers, [line]))
+                }
             }
+
+            var outputLines: [String] = []
+            for (groupIndex, group) in groups.enumerated() {
+                if group.markers.count == 1 {
+                    // Single marker: join all wrapped lines into one footnote.
+                    let label = group.markers[0]
+                    let joinedText = group.lines
+                        .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: " ")
+                    outputLines.append(footnoteMarkdownLine(from: joinedText, fallbackLabel: "note\(groupIndex + 1)", forcedLabel: label))
+                } else if group.markers.count > 1 {
+                    // Multi-marker: one marker per line within the group.
+                    for (lineIndex, line) in group.lines.enumerated() {
+                        let forcedLabel = lineIndex < group.markers.count ? group.markers[lineIndex] : nil
+                        outputLines.append(footnoteMarkdownLine(from: line.text, fallbackLabel: "note\(groupIndex + 1)", forcedLabel: forcedLabel))
+                    }
+                } else {
+                    // No markers: auto-detect from each line.
+                    for line in group.lines {
+                        outputLines.append(footnoteMarkdownLine(from: line.text, fallbackLabel: "note\(groupIndex + 1)", forcedLabel: nil))
+                    }
+                }
+            }
+
+            rendered.append(outputLines.joined(separator: "\n"))
+            pendingFootnoteLines.removeAll()
         }
 
         func flushRefmark() {
@@ -6638,52 +6660,69 @@ final class AppState: ObservableObject {
 
     // Replaces OCR superscript artefact characters with [^marker] tags inline.
     //
-    // Strategy per refmark:
-    //   1. Map the rectangle's left/right fractions to a character range in the string.
-    //   2. Scan that range (with a small buffer) for a known artefact character.
-    //   3. If found → remove it and insert [^marker] at the same position.
-    //   4. If not found → insert [^marker] at the estimated right-edge position.
+    // Strategy per refmark (sorted left-to-right):
+    //   1. Estimate the character-index centre from the rectangle's horizontal fraction.
+    //      Thai text is non-linear (variable-width glyphs, stacked diacritics), so a
+    //      15 % buffer is used instead of 3 % to tolerate the mapping error.
+    //   2. Search that widened window for an artefact; pick the one nearest the centre.
+    //   3. If none found in the window, scan the whole line for the nearest unused artefact.
+    //   4. If still none, insert [^marker] at the estimated right-edge position.
+    //   Each matched artefact index is reserved so two refmarks never share one.
     //
-    // All operations are applied right-to-left so earlier indices stay valid.
+    // All mutations are applied right-to-left so earlier indices stay valid.
     private func applyRefmarkInsertions(_ text: String, refmarks: [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)]) -> String {
         guard !refmarks.isEmpty, !text.isEmpty else { return text }
         var scalars = Array(text.unicodeScalars)
         let total = scalars.count
 
         struct Op {
-            let removeIndex: Int?   // nil = no removal
-            let insertIndex: Int    // where to insert [^marker]
+            let removeIndex: Int?
+            let insertIndex: Int
             let marker: String
+        }
+
+        // Pre-collect all artefact positions so we can do nearest-match globally.
+        var availableArtefacts: Set<Int> = []
+        for i in scalars.indices where Self.superscriptArtefacts.contains(scalars[i]) {
+            availableArtefacts.insert(i)
         }
 
         var ops: [Op] = []
 
         for refmark in refmarks {
-            // Map fractions to scalar indices, with a small buffer around the range.
-            let buffer = max(Int((CGFloat(total) * 0.03).rounded()), 2)
-            let lo = max(0, Int((CGFloat(total) * refmark.fractionLeft ).rounded()) - buffer)
-            let hi = min(total, Int((CGFloat(total) * refmark.fractionRight).rounded()) + buffer)
+            let centre = Int((CGFloat(total) * (refmark.fractionLeft + refmark.fractionRight) / 2).rounded())
+            let buffer = max(Int((CGFloat(total) * 0.15).rounded()), 4)
+            let lo = max(0, centre - buffer)
+            let hi = min(total, centre + buffer)
 
-            // Find the first artefact scalar in [lo, hi).
-            var artefactIdx: Int? = nil
-            for i in lo..<hi where i < scalars.count {
-                if Self.superscriptArtefacts.contains(scalars[i]) {
-                    artefactIdx = i
-                    break
+            // Step 1: search the widened window, pick artefact nearest centre.
+            var bestIdx: Int? = nil
+            var bestDist = Int.max
+            for i in lo..<hi {
+                guard availableArtefacts.contains(i) else { continue }
+                let d = abs(i - centre)
+                if d < bestDist { bestDist = d; bestIdx = i }
+            }
+
+            // Step 2: if still none, search full line for nearest unused artefact.
+            if bestIdx == nil {
+                for i in availableArtefacts {
+                    let d = abs(i - centre)
+                    if d < bestDist { bestDist = d; bestIdx = i }
                 }
             }
 
-            if let ai = artefactIdx {
-                // Replace artefact with the marker tag.
+            if let ai = bestIdx {
+                availableArtefacts.remove(ai)
                 ops.append(Op(removeIndex: ai, insertIndex: ai, marker: refmark.marker))
             } else {
-                // No artefact found — insert at the right-edge estimate.
+                // No artefact anywhere — insert at right-edge estimate.
                 let insertAt = min(hi, total)
                 ops.append(Op(removeIndex: nil, insertIndex: insertAt, marker: refmark.marker))
             }
         }
 
-        // Apply right-to-left so earlier indices stay valid.
+        // Apply right-to-left so earlier indices remain valid.
         ops.sort { $0.insertIndex > $1.insertIndex }
         for op in ops {
             let tag = Array("[^\(op.marker)]".unicodeScalars)

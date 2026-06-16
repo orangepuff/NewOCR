@@ -1760,12 +1760,19 @@ These are intentional and should not be changed casually:
 - The **Ref Mark** layout area (`refmark` type) uses a low overlap threshold
   (10% of OCR line area) so that small, word-sized rectangles reliably match the
   full-width OCR line they sit on. For each matched rectangle, the OCR pipeline:
-  1. Maps the rectangle's left/right edges to a character range within the text.
-  2. Scans that range (plus a small buffer) for a known OCR superscript artefact
-     character (`'` `'` `′` `` ` `` `ʹ` `´`).
-  3. If an artefact is found: removes it and inserts `[^label]` at that exact
-     position — the marker replaces the artefact inline.
-  4. If no artefact is found: inserts `[^label]` at the right-edge estimate.
+  1. Estimates the character-index centre from the rectangle's horizontal
+     fraction of the OCR line width (pixel position → character index).
+  2. Scans a ±15% buffer window around that centre for a known OCR superscript
+     artefact character (`'` `'` `′` `` ` `` `ʹ` `´`); picks the one nearest
+     the centre. The 15% buffer (vs. the previous 3%) tolerates the nonlinear
+     mapping error common in Thai and other variable-width scripts.
+  3. If no artefact is found in the window, scans the entire OCR line and picks
+     the nearest unused artefact character (each artefact is reserved so two Ref
+     Mark rectangles never share the same one).
+  4. If an artefact is found by either search: removes it and inserts `[^label]`
+     at that exact position — the marker replaces the artefact inline.
+  5. If no artefact exists anywhere in the line: inserts `[^label]` at the
+     right-edge estimate.
   Multiple Ref Mark rectangles on the same OCR line are all collected,
   sorted left-to-right, and applied right-to-left so earlier insertions do not
   shift later indices. Draw one Ref Mark rectangle per footnote reference
