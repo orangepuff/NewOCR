@@ -222,6 +222,13 @@ with `book-sections.json` as user memory. Checked rows are skipped by
 **Process OCR All** because the user has marked them complete, but the checkbox
 must not affect EPUB build logic.
 
+The section row **Title** field is book-structure metadata. It is saved in
+`book-sections.json` and used as the first-choice chapter/TOC title when
+building EPUB. It must not be passed into OCR, used to remove OCR lines, or
+inserted/replaced as a heading when generated OCR Markdown is written. Saving
+Markdown from the OCR editor writes the editor content as-is; it does not apply
+the section row Title to the `.md` files.
+
 When an existing project opens with split PDF files, the section list should
 auto-scroll to the first row whose **Ready for EPUB** checkbox is not checked.
 This helps resume work at the next unfinished section.
@@ -430,6 +437,10 @@ For real section PDFs:
   `Process OCR All`
 
 The OCR source must be the section file path, not the original PDF.
+The Section List **Title** field is not an OCR input. OCR must not use it to
+remove matching title/header lines and must not insert it into generated
+Markdown as a heading. Layout-area `header` rules and the recognized PDF text
+itself are the mechanisms that can create headings in OCR output.
 
 ### OCR Output
 
@@ -726,20 +737,10 @@ This should only remove top/bottom lines that match the entered filter text.
 When the working folder changes, filtered text should be cleared so a filter
 from one book does not affect another book.
 
-During OCR, NewOCR also checks the first configured OCR lines on the first page
-only against the section title. `OCR_TITLE_MATCH_TOP_LINES=3` means the first
-three OCR text lines on page 1 are checked. If a top line matches the title
-words in order, for example section title `Do my best` matching OCR text like
-`Do 01 my best`, that line is removed before Markdown is created. If OCR splits
-the title across multiple top lines on page 1, such as one line containing
-`28 ความสำเร็จที่` and the next line containing `ไร้ความหมายที่สุด`, NewOCR
-matches the combined top lines and removes all title lines that formed the
-match.
-
-Title removal must be length-aware: remove only close title/header matches, not
-a normal body sentence that merely contains the section title. For example, a
-first body line beginning with `สถานีทาคาระซึกะมินามิงุจิเป็น...` must stay in
-Markdown even though the section title is `สถานีทาคาระซึกะมินามิงุจิ`.
+OCR must not remove text by comparing it to the Section List **Title** field.
+That title is reserved for EPUB chapter/TOC metadata. Header/footer removal
+should come only from user-entered filtered text and approved Scan Header
+`REMOVE:` entries.
 
 ### Scan Header
 
@@ -1210,7 +1211,7 @@ Expected EPUB behavior:
 - include manual sections with Markdown
 - include manual sections in TOC
 - apply the project `Styles/` assets to manual sections and PDF sections
-- use saved UI title first for chapter title
+- use the saved Section List Title first for chapter/TOC title
 - fall back to first Markdown heading
 - fall back to display name
 - copy `Styles/`
@@ -1556,6 +1557,9 @@ These are intentional and should not be changed casually:
   before OCR. Sections checked **Ready for EPUB** are skipped.
 - Manual sections do not run OCR but can create/edit Markdown.
 - OCR must use section PDF paths, not the original PDF.
+- Section List Title is EPUB chapter/TOC metadata only. Run OCR, Process OCR
+  All, and Save Markdown must not use it to remove OCR text or write headings
+  into `.md` files.
 - Empty paragraph slots from the paragraph editor should survive Preview and
   EPUB build.
 - Header/footer removal requires `header-footer-review.txt` REMOVE entries.

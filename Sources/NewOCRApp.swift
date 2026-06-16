@@ -4942,10 +4942,6 @@ final class AppState: ObservableObject {
         let filterTopLinesValue = filterTopLines
         let filterBottomLinesValue = filterBottomLines
         let filteredTextValue = filteredText
-        let titles = Dictionary(uniqueKeysWithValues: sectionItems.map { item in
-            (item.url.path, pdfTitles[item.id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
-        })
-
         DispatchQueue.global(qos: .userInitiated).async {
             var completed = 0
             var logs: [String] = []
@@ -4957,7 +4953,6 @@ final class AppState: ObservableObject {
                     }
 
                     let pdfPath = item.url.path
-                    let title = titles[pdfPath] ?? ""
                     try self.removeAppleVisionResources(for: item.url)
 
                     DispatchQueue.main.async {
@@ -4974,7 +4969,7 @@ final class AppState: ObservableObject {
                         filterTopLines: filterTopLinesValue,
                         filterBottomLines: filterBottomLinesValue,
                         filteredText: filteredTextValue,
-                        documentTitle: title
+                        documentTitle: ""
                     )
                     completed += 1
                     logs.append("\(item.url.lastPathComponent): \(result.pages) pages, \(result.characters) characters")
@@ -5021,7 +5016,6 @@ final class AppState: ObservableObject {
         let filterTopLinesValue = filterTopLines
         let filterBottomLinesValue = filterBottomLines
         let filteredTextValue = filteredText
-        let documentTitle = selectedPDFTitle
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -5030,7 +5024,7 @@ final class AppState: ObservableObject {
                     filterTopLines: filterTopLinesValue,
                     filterBottomLines: filterBottomLinesValue,
                     filteredText: filteredTextValue,
-                    documentTitle: documentTitle
+                    documentTitle: ""
                 )
 
                 DispatchQueue.main.async {
@@ -5088,7 +5082,8 @@ final class AppState: ObservableObject {
 
         let topCount = parseLineCount(filterTopLines, defaultValue: 1)
         let bottomCount = parseLineCount(filterBottomLines, defaultValue: 1)
-        let titleMatchTopLineCount = ocrTitleMatchTopLineCount
+        let cleanDocumentTitle = documentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let titleMatchTopLineCount = cleanDocumentTitle.isEmpty ? 0 : ocrTitleMatchTopLineCount
         let filterValues = parseFilterValues(filteredText)
         let layoutRules = loadOCRLayoutAreaRules(for: pdfURL)
         var rawPages: [[OCRLine]] = []
@@ -5137,7 +5132,7 @@ final class AppState: ObservableObject {
                 topCount: topCount,
                 bottomCount: bottomCount,
                 filterValues: filterValues,
-                documentTitle: documentTitle,
+                documentTitle: cleanDocumentTitle,
                 titleMatchTopLineCount: pageIndex == 0 ? titleMatchTopLineCount : 0,
                 repeatedHeaderFooterKeys: repeatedHeaderFooterKeys
             )
@@ -5152,7 +5147,7 @@ final class AppState: ObservableObject {
             removedLines += rawLines.count - filteredTextLines.count
             let builtPageText = buildMarkdownPage(from: filteredTextLines, imageRegions: imageRegions, layoutRules: pageLayoutRules)
             let pageText = pageIndex == 0
-                ? applyMarkdownTitle(documentTitle, to: builtPageText, replaceExistingHeading: layoutAreaRules(pageLayoutRules, type: "header").isEmpty)
+                ? applyMarkdownTitle(cleanDocumentTitle, to: builtPageText, replaceExistingHeading: layoutAreaRules(pageLayoutRules, type: "header").isEmpty)
                 : builtPageText
 
             pageMarkdownItems.append(
@@ -5181,7 +5176,7 @@ final class AppState: ObservableObject {
             try pageMarkdown.text.write(to: pageURL, atomically: true, encoding: .utf8)
         }
 
-        let fullText = applyMarkdownTitle(documentTitle, to: buildMarkdownPage(from: allPageLines, imageRegions: allPageImageRegions), replaceExistingHeading: true)
+        let fullText = applyMarkdownTitle(cleanDocumentTitle, to: buildMarkdownPage(from: allPageLines, imageRegions: allPageImageRegions), replaceExistingHeading: true)
 
         return (mdFolder.path, pageCount, fullText.count, removedLines)
     }
