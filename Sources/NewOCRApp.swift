@@ -229,6 +229,8 @@ struct OCRLayoutAreaRule: Codable, Equatable, Identifiable {
     // Comma-separated marker labels for footnote areas (e.g. "1,2,3" or "*,†").
     // Single marker label for refmark areas (e.g. "1" or "*").
     var markers: String?
+    // For refmark: the exact word in the selected area after which [^markers] is inserted.
+    var anchorWord: String?
 }
 
 struct OCRLayoutAreaRect: Codable, Equatable {
@@ -251,6 +253,7 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var savedRuleCount: Int = 0
     @Published var loadedRule: OCRLayoutAreaRule?
     @Published var markers: String = ""
+    @Published var anchorWord: String = ""
     private var pdfPageCounts: [String: Int] = [:]
 
     init(pdfItems: [PDFFileItem], initialPDF: PDFFileItem, initialPage: Int = 1) {
@@ -368,6 +371,7 @@ final class LayoutAreaEditorState: ObservableObject {
         )
         self.selectionRect = selRect
         self.markers = rule.markers ?? ""
+        self.anchorWord = rule.anchorWord ?? ""
     }
 
     func clearLoadedRule() {
@@ -621,6 +625,7 @@ final class AppState: ObservableObject {
     @Published var pendingClearOCRItem: PDFFileItem?
     @Published var isClearAllOCRConfirmationPresented: Bool = false
 
+    @Published var ocrRenderScale: CGFloat = 4.0
     @Published var pdfListMinHeight: CGFloat = 420
     @Published var mainWindowWidth: CGFloat = 780
     @Published var mainWindowHeight: CGFloat = 520
@@ -2588,28 +2593,29 @@ final class AppState: ObservableObject {
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
-    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil) throws -> Int {
+    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil, anchorWord: String? = nil) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
         let cleanScope = scope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let cleanMarkers = markers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let cleanAnchorWord = anchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
             rules = [
-                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers)
+                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
             ]
         case "selected_sections":
             rules = selectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers)
+                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
             }
         case "page":
             rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers)
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
             ]
         default:
             rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers)
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
             ]
         }
         areas.rules.append(contentsOf: rules)
@@ -2617,7 +2623,7 @@ final class AppState: ObservableObject {
         return areas.rules.count
     }
 
-    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect, newMarkers: String? = nil) throws -> Int {
+    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect, newMarkers: String? = nil, newAnchorWord: String? = nil) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
         if let index = areas.rules.firstIndex(of: oldRule) {
@@ -2625,23 +2631,24 @@ final class AppState: ObservableObject {
         }
         let cleanScope = newScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let cleanMarkers = newMarkers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let cleanAnchorWord = newAnchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect, markers: cleanMarkers)
+                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
             ]
         case "selected_sections":
             rules = newSelectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
             }
         case "page":
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect, markers: cleanMarkers)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
             ]
         default:
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
             ]
         }
         areas.rules.append(contentsOf: rules)
@@ -5429,7 +5436,7 @@ final class AppState: ObservableObject {
                 continue
             }
 
-            let image = try renderPDFPageToCGImage(page)
+            let image = try renderPDFPageToCGImage(page, scale: ocrRenderScale)
             let rawLines = try recognizeTextWithAppleVision(in: image)
             rawPages.append(rawLines)
             pageImages.append(image)
@@ -6027,7 +6034,7 @@ final class AppState: ObservableObject {
             guard let page = document.page(at: pageIndex) else {
                 continue
             }
-            let image = try renderPDFPageToCGImage(page)
+            let image = try renderPDFPageToCGImage(page, scale: ocrRenderScale)
             rawPages.append(try recognizeTextWithAppleVision(in: image))
             progress?(pageIndex, document.pageCount)
         }
@@ -6333,7 +6340,7 @@ final class AppState: ObservableObject {
         case header3(OCRLine)
         case blockquote(OCRLine)
         case footnote(OCRLine, [String])  // ordered marker labels from rule (e.g. ["1","2","3"])
-        case refmark(OCRLine, [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)])  // insertion data: marker + left/right fractions within line text
+        case refmark(OCRLine, [(marker: String, anchorWord: String?, fractionLeft: CGFloat, fractionRight: CGFloat)])  // insertion data: marker + optional anchor word + fractions
         case image(OCRImageRegion)
 
         var top: CGFloat {
@@ -6471,11 +6478,12 @@ final class AppState: ObservableObject {
             let matchingRefmarks = refmarkRules
                 .filter { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.10) }
                 .sorted { $0.rect.left < $1.rect.left }
-            let refData: [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)] = matchingRefmarks.compactMap { rule in
+            let refData: [(marker: String, anchorWord: String?, fractionLeft: CGFloat, fractionRight: CGFloat)] = matchingRefmarks.compactMap { rule in
                 guard let m = rule.markers?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty else { return nil }
                 let fl = min(max((rule.rect.left  - line.left) / lineWidth, 0), 1)
                 let fr = min(max((rule.rect.right - line.left) / lineWidth, 0), 1)
-                return (marker: m, fractionLeft: fl, fractionRight: fr)
+                let aw = rule.anchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                return (marker: m, anchorWord: aw, fractionLeft: fl, fractionRight: fr)
             }
             if !refData.isEmpty {
                 return .refmark(line, refData)
@@ -6499,7 +6507,7 @@ final class AppState: ObservableObject {
         // footnote: (line, markers list from the matching rule)
         var pendingFootnoteLines: [(OCRLine, [String])] = []
         // refmark: (line, insertion entries sorted left-to-right)
-        var pendingRefmarkLines: [(OCRLine, [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)])] = []
+        var pendingRefmarkLines: [(OCRLine, [(marker: String, anchorWord: String?, fractionLeft: CGFloat, fractionRight: CGFloat)])] = []
         var hadFootnotes = false
 
         func flushText() {
@@ -6658,44 +6666,75 @@ final class AppState: ObservableObject {
     // OCR characters that represent superscript numbers the recogniser couldn't classify.
     private static let superscriptArtefacts: Set<Unicode.Scalar> = ["'", "\u{2019}", "`", "′", "ʹ", "´", "ʼ", "\u{02BC}"]
 
-    // Replaces OCR superscript artefact characters with [^marker] tags inline.
+    // Inserts [^marker] into text for each refmark entry (sorted left-to-right).
     //
-    // Strategy per refmark (sorted left-to-right):
-    //   1. Estimate the character-index centre from the rectangle's horizontal fraction.
-    //      Thai text is non-linear (variable-width glyphs, stacked diacritics), so a
-    //      15 % buffer is used instead of 3 % to tolerate the mapping error.
-    //   2. Search that widened window for an artefact; pick the one nearest the centre.
-    //   3. If none found in the window, scan the whole line for the nearest unused artefact.
-    //   4. If still none, insert [^marker] at the estimated right-edge position.
-    //   Each matched artefact index is reserved so two refmarks never share one.
+    // When a refmark has an anchorWord:
+    //   1. Try exact unicode-scalar match of the anchor word in the line text.
+    //   2. If not found, retry after stripping Thai above-base diacritic marks from
+    //      both the anchor word and the line (tolerates OCR dropping ็ ่ ้ etc.).
+    //   3. On a match, insert [^marker] immediately after the word AND remove the
+    //      nearest superscript artefact within 20 chars (OCR residue from the original
+    //      printed superscript number/symbol).
+    //   4. If still not found, fall through to the legacy artefact-detection strategy.
     //
-    // All mutations are applied right-to-left so earlier indices stay valid.
-    private func applyRefmarkInsertions(_ text: String, refmarks: [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)]) -> String {
+    // When a refmark has no anchorWord (legacy rules):
+    //   Use the original superscript-artefact strategy:
+    //   1. Estimate character-index centre from the rectangle's horizontal fraction.
+    //   2. Search a ±15 % window for an artefact; pick the nearest.
+    //   3. If none in the window, scan the full line for the nearest unused artefact.
+    //   4. If still none, insert at the right-edge estimate.
+    //
+    // All mutations are collected then applied right-to-left so earlier indices stay valid.
+    private func applyRefmarkInsertions(_ text: String, refmarks: [(marker: String, anchorWord: String?, fractionLeft: CGFloat, fractionRight: CGFloat)]) -> String {
         guard !refmarks.isEmpty, !text.isEmpty else { return text }
         var scalars = Array(text.unicodeScalars)
         let total = scalars.count
 
-        struct Op {
-            let removeIndex: Int?
-            let insertIndex: Int
-            let marker: String
+        enum OpKind {
+            case replaceArtifact(at: Int, marker: String) // remove artifact, insert [^marker]
+            case insertOnly(at: Int, marker: String)       // just insert [^marker]
+            case removeOnly(at: Int)                       // just remove artifact residue
+        }
+        var ops: [OpKind] = []
+        func sortKey(_ op: OpKind) -> Int {
+            switch op {
+            case .replaceArtifact(let i, _): return i
+            case .insertOnly(let i, _):      return i
+            case .removeOnly(let i):         return i
+            }
         }
 
-        // Pre-collect all artefact positions so we can do nearest-match globally.
+        // Pre-collect artefact positions (used by both paths).
         var availableArtefacts: Set<Int> = []
         for i in scalars.indices where Self.superscriptArtefacts.contains(scalars[i]) {
             availableArtefacts.insert(i)
         }
 
-        var ops: [Op] = []
-
         for refmark in refmarks {
+            // — Anchor-word path —
+            if let anchor = refmark.anchorWord, !anchor.isEmpty {
+                let insertIdx = indexAfterAnchor(in: scalars, anchor: anchor)
+
+                if let idx = insertIdx {
+                    let clampedIdx = min(idx, total)
+                    ops.append(.insertOnly(at: clampedIdx, marker: refmark.marker))
+                    // Remove the nearest superscript artifact within 20 chars (OCR residue).
+                    let nearby = availableArtefacts.filter { abs($0 - clampedIdx) <= 20 }
+                    if let nearest = nearby.min(by: { abs($0 - clampedIdx) < abs($1 - clampedIdx) }) {
+                        availableArtefacts.remove(nearest)
+                        ops.append(.removeOnly(at: nearest))
+                    }
+                    continue
+                }
+                // Anchor not found — fall through to legacy artefact-detection.
+            }
+
+            // — Legacy artefact-detection path (no anchorWord, or anchor not found) —
             let centre = Int((CGFloat(total) * (refmark.fractionLeft + refmark.fractionRight) / 2).rounded())
             let buffer = max(Int((CGFloat(total) * 0.15).rounded()), 4)
             let lo = max(0, centre - buffer)
             let hi = min(total, centre + buffer)
 
-            // Step 1: search the widened window, pick artefact nearest centre.
             var bestIdx: Int? = nil
             var bestDist = Int.max
             for i in lo..<hi {
@@ -6703,37 +6742,95 @@ final class AppState: ObservableObject {
                 let d = abs(i - centre)
                 if d < bestDist { bestDist = d; bestIdx = i }
             }
-
-            // Step 2: if still none, search full line for nearest unused artefact.
             if bestIdx == nil {
                 for i in availableArtefacts {
                     let d = abs(i - centre)
                     if d < bestDist { bestDist = d; bestIdx = i }
                 }
             }
-
             if let ai = bestIdx {
                 availableArtefacts.remove(ai)
-                ops.append(Op(removeIndex: ai, insertIndex: ai, marker: refmark.marker))
+                ops.append(.replaceArtifact(at: ai, marker: refmark.marker))
             } else {
-                // No artefact anywhere — insert at right-edge estimate.
-                let insertAt = min(hi, total)
-                ops.append(Op(removeIndex: nil, insertIndex: insertAt, marker: refmark.marker))
+                ops.append(.insertOnly(at: min(hi, total), marker: refmark.marker))
             }
         }
 
         // Apply right-to-left so earlier indices remain valid.
-        ops.sort { $0.insertIndex > $1.insertIndex }
+        // Tiebreaker: when two ops share the same index, removeOnly runs before insertOnly so
+        // the artifact is gone before [^marker] is spliced in at the same position.
+        ops.sort {
+            let k0 = sortKey($0), k1 = sortKey($1)
+            if k0 != k1 { return k0 > k1 }
+            if case .removeOnly = $0 { return true }
+            return false
+        }
         for op in ops {
-            let tag = Array("[^\(op.marker)]".unicodeScalars)
-            if let ri = op.removeIndex {
-                scalars.remove(at: ri)
-                scalars.insert(contentsOf: tag, at: ri)
-            } else {
-                scalars.insert(contentsOf: tag, at: op.insertIndex)
+            switch op {
+            case .replaceArtifact(let i, let marker):
+                let tag = Array("[^\(marker)]".unicodeScalars)
+                scalars.remove(at: i)
+                scalars.insert(contentsOf: tag, at: i)
+            case .insertOnly(let i, let marker):
+                let tag = Array("[^\(marker)]".unicodeScalars)
+                scalars.insert(contentsOf: tag, at: i)
+            case .removeOnly(let i):
+                if i < scalars.count { scalars.remove(at: i) }
             }
         }
         return String(String.UnicodeScalarView(scalars))
+    }
+
+    // Thai above-base diacritic marks that OCR may drop, used for fuzzy anchor matching.
+    private static let thaiAboveBaseMarks: Set<UInt32> = [
+        0x0E47, // ็ mai tai khu
+        0x0E48, // ่ mai ek
+        0x0E49, // ้ mai tho
+        0x0E4A, // ๊ mai tri
+        0x0E4B, // ๋ mai jattawa
+        0x0E4C, // ์ thanthakat
+        0x0E4D, // ํ nikhahit
+        0x0E4E, // ๎ yamakkan
+    ]
+
+    // Returns the scalar index immediately after the first occurrence of `anchor` in `scalars`.
+    // Tries exact match first; falls back to Thai-diacritic-normalized match.
+    private func indexAfterAnchor(in scalars: [Unicode.Scalar], anchor: String) -> Int? {
+        // Exact match
+        if let pos = indexAfterSubsequence(in: scalars, target: anchor) { return pos }
+        // Normalized match: strip Thai above-base marks from both sides and search,
+        // then map the end position back to the original scalar array.
+        let anchorNorm = Array(anchor.unicodeScalars.filter { !Self.thaiAboveBaseMarks.contains($0.value) })
+        guard !anchorNorm.isEmpty else { return nil }
+        var normScalars: [Unicode.Scalar] = []
+        var normToOrigNextIdx: [Int] = [] // normToOrigNextIdx[k] = original index AFTER the k-th normalized scalar
+        for (origIdx, s) in scalars.enumerated() {
+            if !Self.thaiAboveBaseMarks.contains(s.value) {
+                normScalars.append(s)
+                normToOrigNextIdx.append(origIdx + 1)
+            }
+        }
+        guard normScalars.count >= anchorNorm.count else { return nil }
+        for i in 0...(normScalars.count - anchorNorm.count) {
+            if normScalars[i..<(i + anchorNorm.count)].elementsEqual(anchorNorm) {
+                let normEndIdx = i + anchorNorm.count - 1
+                return normEndIdx < normToOrigNextIdx.count ? normToOrigNextIdx[normEndIdx] : nil
+            }
+        }
+        return nil
+    }
+
+    // Returns the scalar index immediately after the first occurrence of `target` in `scalars`,
+    // or nil if not found.
+    private func indexAfterSubsequence(in scalars: [Unicode.Scalar], target: String) -> Int? {
+        let needle = Array(target.unicodeScalars)
+        guard !needle.isEmpty, scalars.count >= needle.count else { return nil }
+        for i in 0...(scalars.count - needle.count) {
+            if scalars[i..<(i + needle.count)].elementsEqual(needle) {
+                return i + needle.count
+            }
+        }
+        return nil
     }
 
     private func normalizedOverlapArea(_ line: OCRLine, _ imageRegion: OCRImageRegion) -> CGFloat {
@@ -7581,6 +7678,7 @@ final class AppState: ObservableObject {
             mainWindowWidth = CGFloat(parseDouble(values["MAIN_WINDOW_WIDTH"], defaultValue: 780, minimum: 640))
             mainWindowHeight = CGFloat(parseDouble(values["MAIN_WINDOW_HEIGHT"], defaultValue: 520, minimum: 480))
         }
+        ocrRenderScale = CGFloat(min(parseDouble(values["OCR_RENDER_SCALE"], defaultValue: 4.0, minimum: 1.0), 8.0))
         ocrParagraphTextAreaMinHeight = CGFloat(parseDouble(values["OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT"], defaultValue: 58, minimum: 40))
         ocrTitleMatchTopLineCount = Int(parseDouble(values["OCR_TITLE_MATCH_TOP_LINES"], defaultValue: 3, minimum: 0))
         previewTextScalePercent = min(parseDouble(values["PREVIEW_TEXT_SCALE_PERCENT"], defaultValue: 170, minimum: 80), 220)
@@ -9352,6 +9450,21 @@ private struct LayoutAreaRuleRow: View {
                         if let page = rule.page {
                             Text("Page \(page)")
                                 .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        }
+                    }
+                }
+
+                if rule.type == "refmark" {
+                    HStack(spacing: 6) {
+                        if let m = rule.markers, !m.isEmpty {
+                            Text("[^\(m)]")
+                                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                                .foregroundStyle(Color(red: 160/255, green: 100/255, blue: 240/255))
+                        }
+                        if let aw = rule.anchorWord, !aw.isEmpty {
+                            Text("after \"\(aw)\"")
+                                .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(NewOCRMainPalette.secondaryText)
                         }
                     }
@@ -14014,6 +14127,9 @@ struct LayoutAreaEditorWindowView: View {
     private func performSave() {
         guard let url = state.selectedPDFURL else { return }
         let markersValue = markersApply(to: state.selectedType) ? state.markers : nil
+        let anchorWordValue = state.selectedType == "refmark"
+            ? (state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
         do {
             let count: Int
             if let loadedRule = state.loadedRule {
@@ -14025,7 +14141,8 @@ struct LayoutAreaEditorWindowView: View {
                     newSelectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                     newPageNumber: state.selectedPage,
                     newRect: state.normalizedOCRRect,
-                    newMarkers: markersValue
+                    newMarkers: markersValue,
+                    newAnchorWord: anchorWordValue
                 )
                 state.loadedRule = nil
                 state.status = "Updated \(displayName(for: state.selectedType)) area."
@@ -14037,7 +14154,8 @@ struct LayoutAreaEditorWindowView: View {
                     selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                     pageNumber: state.selectedPage,
                     rect: state.normalizedOCRRect,
-                    markers: markersValue
+                    markers: markersValue,
+                    anchorWord: anchorWordValue
                 )
                 state.status = savedStatusMessage(for: state.selectedType)
             }
@@ -14067,11 +14185,13 @@ struct LayoutAreaEditorWindowView: View {
                 Text("Define Layout")
                     .font(.largeTitle.weight(.semibold))
                     .foregroundStyle(NewOCRMainPalette.primaryText)
-                Text(state.selectedPDFName)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                if !state.status.isEmpty {
+                    Text(state.status)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
 
             Spacer()
@@ -14256,14 +14376,6 @@ struct LayoutAreaEditorWindowView: View {
                     .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
             )
 
-            if !state.status.isEmpty {
-                Text(state.status)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 280, alignment: .trailing)
-            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -14310,6 +14422,9 @@ struct LayoutAreaEditorWindowView: View {
                     if !markersApply(to: type.id) {
                         state.markers = ""
                     }
+                    if type.id != "refmark" {
+                        state.anchorWord = ""
+                    }
                     let pageOnlyTypes: Set<String> = ["image", "image_desc", "blockquote", "footnote", "refmark"]
                     if pageOnlyTypes.contains(type.id) {
                         state.selectedScope = "page"
@@ -14324,9 +14439,56 @@ struct LayoutAreaEditorWindowView: View {
     }
 
     private var markersField: some View {
-        let isRefmark    = state.selectedType == "refmark"
-        let isImage      = state.selectedType == "image"
-        let isImageDesc  = state.selectedType == "image_desc"
+        let isRefmark   = state.selectedType == "refmark"
+        let isImage     = state.selectedType == "image"
+        let isImageDesc = state.selectedType == "image_desc"
+
+        if isRefmark {
+            return AnyView(
+                HStack(spacing: 6) {
+                    // Ref label field
+                    Image(systemName: "textformat.superscript")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    TextField("Ref label (e.g. 1)", text: $state.markers)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.black)
+                        .frame(width: 60)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.black.opacity(0.22), lineWidth: 1)
+                        )
+                        .help("Marker label — inserted as [^\u{200B}label] after the anchor word")
+
+                    // Anchor word field
+                    Image(systemName: "character.cursor.ibeam")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .padding(.leading, 4)
+                    TextField("Word in area", text: $state.anchorWord)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.black)
+                        .frame(width: 130)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.black.opacity(0.22), lineWidth: 1)
+                        )
+                        .help("Exact word from the selected area — [^\u{200B}label] is inserted right after this word during OCR")
+                }
+                .padding(.leading, 8)
+            )
+        }
+
         let placeholder: String
         let helpText: String
         let fieldIcon: String
@@ -14338,37 +14500,34 @@ struct LayoutAreaEditorWindowView: View {
             placeholder = "Matching image label (e.g. Image#1)"
             helpText    = "Must match the label of an Image area — description is placed right after that image in the output"
             fieldIcon   = "captions.bubble"
-        } else if isRefmark {
-            placeholder = "Ref label (e.g. 1)"
-            helpText    = "Single marker appended after body text in this area as [^label]"
-            fieldIcon   = "textformat.superscript"
         } else {
             placeholder = "Labels (e.g. 1,2,3)"
             helpText    = "Comma-separated labels assigned to footnote lines in order"
             fieldIcon   = "list.number"
         }
 
-        return HStack(spacing: 6) {
-            Image(systemName: fieldIcon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(NewOCRMainPalette.secondaryText)
-
-            TextField(placeholder, text: $state.markers)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(Color.black)
-                .frame(width: isRefmark ? 110 : (isImage || isImageDesc) ? 200 : 160)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color.white)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(Color.black.opacity(0.22), lineWidth: 1)
-                )
-                .help(helpText)
-        }
-        .padding(.leading, 8)
+        return AnyView(
+            HStack(spacing: 6) {
+                Image(systemName: fieldIcon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                TextField(placeholder, text: $state.markers)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Color.black)
+                    .frame(width: (isImage || isImageDesc) ? 200 : 160)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.black.opacity(0.22), lineWidth: 1)
+                    )
+                    .help(helpText)
+            }
+            .padding(.leading, 8)
+        )
     }
 
     private var scopePicker: some View {
@@ -14505,6 +14664,9 @@ struct LayoutAreaEditorWindowView: View {
         }
 
         let markersValue = markersApply(to: state.selectedType) ? state.markers : nil
+        let anchorWordValue = state.selectedType == "refmark"
+            ? (state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
         do {
             let count: Int
             if let loadedRule = state.loadedRule {
@@ -14516,7 +14678,8 @@ struct LayoutAreaEditorWindowView: View {
                     newSelectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                     newPageNumber: state.selectedPage,
                     newRect: state.normalizedOCRRect,
-                    newMarkers: markersValue
+                    newMarkers: markersValue,
+                    newAnchorWord: anchorWordValue
                 )
                 state.loadedRule = nil
                 state.status = "Updated \(displayName(for: state.selectedType)) area."
@@ -14528,7 +14691,8 @@ struct LayoutAreaEditorWindowView: View {
                     selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                     pageNumber: state.selectedPage,
                     rect: state.normalizedOCRRect,
-                    markers: markersValue
+                    markers: markersValue,
+                    anchorWord: anchorWordValue
                 )
                 state.status = savedStatusMessage(for: state.selectedType)
             }

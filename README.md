@@ -717,15 +717,23 @@ Supported rule types:
   `†`) on each line.
 - `refmark` — shown in the UI tooltip as **Ref Mark**. Draw this rectangle over
   the body-text paragraph that contains the inline reference for a specific
-  footnote. Enter a single label in the **Ref label** field (e.g. `1` or `*`).
-  During OCR the captured text has `[^label]` appended at the end:
-  ```
-  "อาร์ชี แต่เขากลับนึกถึงเอมีล" + label "1"  →  "อาร์ชี แต่เขากลับนึกถึงเอมีล[^1]"
-  ```
+  footnote. Fill in two fields:
+  - **Ref label** (e.g. `1` or `*`) — the footnote marker that will be inserted as `[^label]`.
+  - **Word in area** — the exact word from the OCR text of that line after which
+    `[^label]` is placed. Type the word exactly as it will appear in the OCR
+    output (case-sensitive, character-exact). During OCR, NewOCR searches the
+    recognized text for this word and inserts `[^label]` immediately after it.
+    If the word is not found the marker is placed at the right-edge position
+    estimate as a fallback.
+  Example: if the OCR line reads "อาร์ชี แต่เขากลับนึกถึงเอมีล" and the
+  reference follows "เอมีล", enter **Ref label** `1` and **Word in area**
+  `เอมีล` → OCR produces `อาร์ชี แต่เขากลับนึกถึงเอมีล[^1]`.
   Draw one Ref Mark rectangle per footnote reference location, each with its
-  own label, so multiple references on the same page each produce the correct
-  `[^N]` marker.
-  If no label is entered, the text is kept unchanged.
+  own label and anchor word, so multiple references on the same page each
+  produce the correct `[^N]` marker.
+  If no label is entered the text is kept unchanged.
+  Old rules saved without an anchor word fall back to the previous
+  superscript-artefact detection strategy.
 - `ignore` — OCR lines in the rectangle are removed from Markdown.
 
 Advanced JSON example:
@@ -847,7 +855,7 @@ UI notes:
   Scope segmented control share one compact control row when space allows; the
   row may wrap before it overflows. Page navigation lives in its own slider row
   below. Define Layout does not show default instruction text in this control
-  row; save/error status appears in the page slider row only after an action.
+  row; save/error status appears in the header area (below the Define Layout title) after an action, not in the page slider row.
 - Do not use the native AppKit segmented picker for Scope on this dark surface;
   its text can inherit dark colors and become unreadable. Use the custom
   SwiftUI segmented control style with explicit light text and a clear selected
@@ -864,7 +872,7 @@ UI notes:
   `layout-areas.json` files.
 - Page navigation in Define Layout uses a large custom slider with a
   thicker track and a `Page n / total` readout. Action status text appears in
-  this page slider row when needed.
+  the top header (as a third line below the Define Layout title), not in this row.
 - Define Layout scope options are **All**, **Selected**, **Section**, and
   **Page**. Selected opens a dark modal sheet listing section filenames with
   preview thumbnails, checkboxes, Select All, Unselect All, OK, and Close buttons.
@@ -1477,6 +1485,7 @@ ADD_SPLIT_WINDOW_WIDTH=FULL
 ADD_SPLIT_WINDOW_HEIGHT=720
 OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
 OCR_TITLE_MATCH_TOP_LINES=3
+OCR_RENDER_SCALE=4.0
 PREVIEW_TEXT_SCALE_PERCENT=170
 CODEX_EXECUTABLE_PATH=/Applications/Codex.app/Contents/Resources/codex
 CODEX_FINALIZE_PROMPT_FILE=codex-finalize-prompt.txt
@@ -1489,6 +1498,13 @@ Width values may be numeric or `FULL` for full-screen opening.
 
 Key notes:
 
+- `OCR_RENDER_SCALE` — controls the pixel density used when rasterising PDF pages
+  for Apple Vision OCR. PDF points are 72 pt/inch, so the effective DPI is
+  `72 × scale`. The default `4.0` gives ≈ 288 DPI, which is enough for most
+  scanned books. For 600 DPI source scans with small or italic text, try `6.0`
+  (≈ 432 DPI) for better recognition accuracy. Range: 1.0–8.0. Higher values
+  increase memory use and OCR time proportionally. The Define Layout preview
+  thumbnails always render at 2.0 regardless of this setting.
 - `CODEX_FINALIZE_MODEL` — configurable model for Codex Review. If the key is
   missing or blank, NewOCR uses `gpt-5.4-mini`. Set another model name only when
   your Codex account and provider support it. ChatGPT accounts do not support
@@ -1743,41 +1759,36 @@ These are intentional and should not be changed casually:
   because old splits may no longer match the cropped page layout.
 - Define Layout is enabled only when at least one real `section-###.pdf` file
   exists. The button is disabled if no section PDFs are present.
-- Opening Define Layout does not show a confirmation popup, even if the project
-  has existing OCR output or sections marked **Ready for EPUB**. The layout editor
-  opens directly. Users can then modify layout rules without warning about clearing
-  existing OCR data.
 - When saving a layout rule, the system checks for duplicates by comparing type,
   scope, section, page, and rectangle position (with 0.01 tolerance). If a duplicate
   is found, a beautiful warning dialog appears with the yellow warning icon, showing
   the existing rule's details. Users can cancel or save anyway despite the duplicate.
-- Opening Define Layout with existing OCR output or PDF sections marked
-  **Ready for EPUB** asks for confirmation. OK clears PDF-section OCR resources
-  and resets PDF-section Ready flags; Close does nothing.
 - Define Layout coordinates are saved and applied relative to cropped
   `section-###.pdf` page `.cropBox` renders. OCR layout rules must not use
   `_original.pdf` coordinates.
 - The **Ref Mark** layout area (`refmark` type) uses a low overlap threshold
   (10% of OCR line area) so that small, word-sized rectangles reliably match the
-  full-width OCR line they sit on. For each matched rectangle, the OCR pipeline:
-  1. Estimates the character-index centre from the rectangle's horizontal
-     fraction of the OCR line width (pixel position → character index).
-  2. Scans a ±15% buffer window around that centre for a known OCR superscript
-     artefact character (`'` `'` `′` `` ` `` `ʹ` `´`); picks the one nearest
-     the centre. The 15% buffer (vs. the previous 3%) tolerates the nonlinear
-     mapping error common in Thai and other variable-width scripts.
-  3. If no artefact is found in the window, scans the entire OCR line and picks
-     the nearest unused artefact character (each artefact is reserved so two Ref
-     Mark rectangles never share the same one).
-  4. If an artefact is found by either search: removes it and inserts `[^label]`
-     at that exact position — the marker replaces the artefact inline.
-  5. If no artefact exists anywhere in the line: inserts `[^label]` at the
-     right-edge estimate.
+  full-width OCR line they sit on. Each Ref Mark rule has a **Ref label** (e.g. `1`)
+  and an **Anchor word** — the exact word from the OCR text of that line after which
+  `[^label]` is inserted. During OCR:
+  1. NewOCR searches the recognized text for the anchor word using an exact
+     unicode scalar match (case-sensitive).
+  2. If the exact match fails, it retries after stripping Thai above-base diacritic
+     marks (็ ่ ้ ๊ ๋ ์ ํ ๎, U+0E47–U+0E4E) from both the anchor word and the line.
+     This tolerates the common OCR pattern of dropping or misreading Thai tone marks
+     without the user needing to know the exact OCR output form.
+  3. When a match is found (by either method), `[^label]` is inserted immediately
+     after the anchor word AND any superscript artefact character within 20 characters
+     of that position is also removed (the OCR residue of the original printed
+     superscript number or symbol).
+  4. If no match is found, the legacy artefact-detection strategy is used as a fallback:
+     find the nearest superscript artefact character to the rectangle's horizontal
+     centre and replace it with `[^label]`.
   Multiple Ref Mark rectangles on the same OCR line are all collected,
   sorted left-to-right, and applied right-to-left so earlier insertions do not
   shift later indices. Draw one Ref Mark rectangle per footnote reference
-  location; each gets its own label. If no label is entered, the text is
-  kept unchanged.
+  location; each gets its own label and anchor word.
+  Old rules saved without an anchor word use only the legacy artefact-detection strategy.
 - The **Footnote** layout area supports two drawing styles:
   - **One rectangle per footnote line** (recommended): each rectangle has a
     single label (e.g. `1`, `2`, `3`). OCR uses that label directly regardless
