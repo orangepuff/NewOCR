@@ -167,7 +167,7 @@ Important actions:
 - **Crop**: open the crop window for the working PDF.
 - **Revert Original**: restore from `_original.pdf` and clear generated output.
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
-- **Define Layout Areas**: draw project-wide OCR layout-area rules for forcing
+- **Define Layout**: draw project-wide OCR layout-area rules for forcing
   header, blockquote, image, footnote, or ignore behavior across sections.
 - **Codex Review**: run local Codex on selected sections to edit their
   existing page Markdown files in place.
@@ -248,6 +248,10 @@ Add Split creates `section-###.pdf` files from page ranges of the working PDF.
 
 Expected behavior:
 
+- Add Split is available only after the working PDF has passed the Crop step.
+  The crop-completed marker is the backup PDF created beside the working PDF
+  when Crop PDF is saved. Once that marker exists, Add Split should remain
+  editable regardless of existing split ranges.
 - If no section files exist, default **From** to page 1.
 - If section files exist, default **From** to the last created section page
   count plus 1.
@@ -262,6 +266,9 @@ All pages have already been split.
 - `Split` must validate title on click and show `Title is required.` when the
   title is empty.
 - After successful split, the Split button should become active again.
+- When Add Split was opened from the **New** project route and the user closes
+  it before creating any split files, warn that no split PDF exists yet. The
+  user may continue splitting or exit anyway.
 - Section output file names are sequential:
 
 ```text
@@ -344,12 +351,24 @@ outline into the cropped working PDF so Detect Split can still use bookmarks.
 
 The crop window may open full screen based on config.
 It should use the same dark NewOCR window style as Add Split and OCR windows:
-icon-only Save/Close buttons, larger readable labels, and a page slider instead
-of previous/next chevron buttons.
+icon-only Save/Close buttons, larger readable labels, and the shared thick
+NewOCR page slider instead of previous/next chevron buttons. The Crop page
+slider uses slightly faster drag sensitivity so page changes feel responsive.
 
 When Crop PDF was opened from the **New** project route, saving the crop should
 close Crop PDF and then open Add Split. Opening Crop from the existing project
 menu should only save/close Crop and must not automatically open Add Split.
+
+If Crop PDF was opened from the **New** project route and the user closes it
+before saving a crop, warn that the crop is required before continuing to Add
+Split. The user may return to cropping or close anyway; closing anyway leaves
+Add Split unavailable until a crop is saved.
+
+When saving a crop while one or more `section-###.pdf` split files already
+exist, show a warning that saving the crop will remove those split files because
+they were created from the previous page layout. If confirmed, remove the split
+PDFs and clear stored split ranges so the user can split the newly cropped PDF
+again.
 
 ## Manual Sections
 
@@ -458,7 +477,7 @@ finishes.
 ## OCR Layout-Driven Special Areas
 
 NewOCR does not automatically detect images, blockquotes, or footnotes during
-OCR. Those special areas are controlled by **Edit PDF > Define Layout Areas** so
+OCR. Those special areas are controlled by **Edit PDF > Define Layout** so
 the user can draw the exact page area that should become an image, quote,
 footnote, header, or ignored text.
 
@@ -473,7 +492,7 @@ with `>` or `![`, NewOCR keeps the paragraphs separate.
 
 ## OCR Layout Areas
 
-**Edit PDF > Define Layout Areas** opens a project-wide visual editor. Choose a
+**Edit PDF > Define Layout** opens a project-wide visual editor. Choose a
 sample section/page, select **Header**, **Quote**, **Image**, **Footnote**, or
 **Ignore**, drag the rectangle over the page area, choose whether it applies to
 **All Sections** or only **This Section**, then click **Save Area**.
@@ -483,6 +502,9 @@ The editor writes the project layout rules automatically to:
 ```text
 AppleVision/layout-areas.json
 ```
+
+Define Layout is available only after at least one `section-###.pdf` split file
+exists in the project folder.
 
 This is a main-window action because the same rules can apply across all
 sections. The JSON file is still available from the editor's **Advanced** button
@@ -548,10 +570,18 @@ the line overlaps the rectangle enough or the line center falls inside it.
 
 Rule scope:
 
-- `scope: "all_sections"` applies to every section in the project.
-- `section: "section-003.pdf"` or `section: "section-003"` limits the rule to
-  one section.
-- `page` limits the rule to a page number inside each matching section.
+- **All** saves `scope: "all_sections"` with no `page`, so the rule applies to
+  every page in every section.
+- **Selected** opens a modal section picker with first-page previews, checkboxes
+  unchecked by default, and Select All/Unselect All commands. Saving writes one
+  filename-specific rule per checked section.
+- **Section** saves the current section filename with no `page`, so the rule
+  applies to every page in the current section.
+- **Page** saves the current section filename plus the current `page`, so the
+  rule applies only to that page of the current section.
+- `section: "section-003.pdf"` or `section: "section-003"` limits any saved
+  rule to that section filename/stem.
+- `page` limits a saved rule to a page number inside each matching section.
 
 OCR priority:
 
@@ -568,23 +598,26 @@ for debugging or unusual layout rules.
 
 UI notes:
 
-- Define Layout Areas should stay visually consistent with Crop/Add Split/Detect
+- Define Layout should stay visually consistent with Crop/Add Split/Detect
   Split windows: full-size dark working window, white header icon tile, large
   readable title/subtitle, `OCRIconButton` command icons, bordered dark panels,
   and a large expanding PDF preview area.
-- Define Layout Areas known-good window values: `NSWindow` content rect
-  `1180x820`, `contentMinSize = NSSize(width: 1040, height: 760)`,
+- Define Layout known-good window values: `NSWindow` content rect
+  `1180x820`, `contentMinSize = NSSize(width: 900, height: 720)`,
   `NSHostingView.sizingOptions = []`, open with `window.setFrame(visibleFrame,
-  display: true)`, root view top padding `120`, horizontal padding `22`, bottom
-  padding `22`, and root minimum frame `1040x760`.
+  display: true)`, root view top padding `44`, horizontal padding `36`, bottom
+  padding `22`, and root minimum frame height `720` without forcing a fixed
+  minimum width.
 - Use a split working layout. The left panel is the section file list, about
   `300` points wide, with large clickable rows (`minHeight: 68`) for selecting
   the active section PDF. Do not use a compact Section dropdown for this window.
-  The right side gets the remaining width and contains Page/Scope controls,
-  layout-type buttons, status, and the expanding PDF preview.
-- Keep the controls from being cut off: Page and Scope live on the first control
-  row, and the layout-type buttons use an adaptive wrapping grid. Do not
-  collapse these back into one fixed-width horizontal command row.
+  The right side gets the remaining width and contains the instruction/status
+  text, Scope controls, icon-only layout-type buttons, a large Page slider, and
+  the expanding PDF preview.
+- Keep the controls from being cut off: the instruction/status text,
+  layout-type icon buttons, and wider Scope segmented control share one compact
+  control row when space allows; the row may wrap before it overflows. Page
+  navigation lives in its own slider row below.
 - Do not use the native AppKit segmented picker for Scope on this dark surface;
   its text can inherit dark colors and become unreadable. Use the custom
   SwiftUI segmented control style with explicit light text and a clear selected
@@ -594,6 +627,15 @@ UI notes:
   primary commands to a bottom footer where an expanding preview can push them
   off-screen. Put the saved-rule count in this top header immediately before
   the command buttons, using large readable header text.
+- The layout-type commands, Header, Quote, Image, Footnote, and Ignore, are
+  icon-only buttons. Show their text labels in floating `NSPopover` tooltips on
+  hover, matching the other NewOCR icon controls.
+- Page navigation in Define Layout uses a large custom slider with a
+  thicker track and a `Page n / total` readout. The instruction/status text
+  lives in the control row above it, next to Scope.
+- Define Layout scope options are **All**, **Selected**, **Section**, and
+  **Page**. Selected opens a dark modal sheet listing section filenames with
+  preview thumbnails, checkboxes, Select All, Unselect All, and Close.
 
 ### User-Added Images
 
@@ -1232,7 +1274,7 @@ Key notes:
 - Buttons should be clear, friendly, and consistent.
 - The main top bar groups commands into compact menus instead of many separate
   buttons: Project contains New, Open, Revert Original, and Open Config; Edit
-  PDF contains Add Split, Crop, Apply CSS, Define Layout Areas, Codex Review,
+  PDF contains Crop, Add Split, Define Layout, Apply CSS, Codex Review,
   and Clear Scan Report; Build EPUB and Close remain single top-level commands. View EPUB appears in Project when
   a built EPUB file exists. Top-bar dropdowns are custom popovers, not native
   macOS menus, so rows can use larger text and visible hover/pressed
@@ -1340,7 +1382,7 @@ Key notes:
   create an `NSWindow` with `contentRect: NSRect(x: 0, y: 0, width: 1180,
   height: 820)` unless the window has a documented reason for another size; set
   `styleMask` to `[.titled, .closable, .miniaturizable, .resizable]`; set
-  `contentMinSize` to at least `NSSize(width: 1040, height: 760)` for visual
+  `contentMinSize` to at least `NSSize(width: 900, height: 720)` for visual
   crop/preview tools or `NSSize(width: 1100, height: 620)` for split/list tools;
   create an `NSHostingView`, set `hostingView.sizingOptions = []`, assign it to
   `window.contentView`, then call `window.setFrame(visibleFrame, display: true)`
@@ -1350,10 +1392,10 @@ Key notes:
   `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)`,
   then explicit padding, then a minimum frame. For manually-created full-size
   windows whose content can sit under the macOS title bar, use an explicit top
-  clearance. Define Layout Areas uses `.padding(.top, 120)`,
-  `.padding(.horizontal, 22)`, `.padding(.bottom, 22)`, and
-  `.frame(minWidth: 1040, minHeight: 760)`. This value was screenshot-tested;
-  use it as the starting point for similar full-window tools.
+  clearance. Define Layout uses `.padding(.top, 44)`,
+  `.padding(.horizontal, 36)`, `.padding(.bottom, 22)`, and
+  `.frame(minWidth: 0, minHeight: 720)`. This value was screenshot-tested; use
+  it as the starting point for similar full-window tools.
 - Use `NewOCRMainPalette.windowBackground` as the outer background,
   `panelBackground` plus `stroke` for command/status panels, and
   `fieldBackground` for the main preview/work area. Header layout should use a
@@ -1459,6 +1501,13 @@ These are intentional and should not be changed casually:
 
 - Add Split uses actual created `section-###.pdf` files to determine next page,
   not only `split-plan.json`.
+- Add Split is enabled only after Crop PDF has been saved for the working PDF.
+  Existing split files do not satisfy the crop-completed condition by
+  themselves.
+- Saving Crop PDF removes existing `section-###.pdf` files after confirmation,
+  because old splits may no longer match the cropped page layout.
+- Define Layout is enabled only when at least one real `section-###.pdf` file
+  exists.
 - `split-plan.json` stores only created section files and includes `file`.
 - Add Split preview navigation updates From until Title is non-empty, then To.
 - Set From updates only From. Set To updates only To.

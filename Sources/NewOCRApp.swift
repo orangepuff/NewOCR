@@ -219,6 +219,7 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var pageCount: Int
     @Published var selectedType: String = "blockquote"
     @Published var selectedScope: String = "all_sections"
+    @Published var selectedLayoutSectionPaths: Set<String> = []
     @Published var selectionRect: CGRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
     @Published var status: String = ""
     @Published var savedRuleCount: Int = 0
@@ -269,6 +270,26 @@ final class LayoutAreaEditorState: ObservableObject {
 
     func pageCount(for item: PDFFileItem) -> Int {
         pdfPageCounts[item.url.path] ?? 1
+    }
+
+    func setAllLayoutSectionsSelected(_ isSelected: Bool) {
+        selectedLayoutSectionPaths = isSelected ? Set(pdfItems.map(\.url.path)) : []
+    }
+
+    func isLayoutSectionSelected(_ item: PDFFileItem) -> Bool {
+        selectedLayoutSectionPaths.contains(item.url.path)
+    }
+
+    func setLayoutSection(_ item: PDFFileItem, selected: Bool) {
+        if selected {
+            selectedLayoutSectionPaths.insert(item.url.path)
+        } else {
+            selectedLayoutSectionPaths.remove(item.url.path)
+        }
+    }
+
+    var selectedLayoutSectionItems: [PDFFileItem] {
+        pdfItems.filter { selectedLayoutSectionPaths.contains($0.url.path) }
     }
 
     var normalizedOCRRect: OCRLayoutAreaRect {
@@ -340,9 +361,15 @@ private struct OCRCompareDifference: Identifiable {
 
 private final class WindowCleanupDelegate: NSObject, NSWindowDelegate {
     private let onClose: (NSWindow) -> Void
+    private let onShouldClose: ((NSWindow) -> Bool)?
 
-    init(onClose: @escaping (NSWindow) -> Void) {
+    init(onShouldClose: ((NSWindow) -> Bool)? = nil, onClose: @escaping (NSWindow) -> Void) {
+        self.onShouldClose = onShouldClose
         self.onClose = onClose
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onShouldClose?(sender) ?? true
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -672,12 +699,17 @@ final class AppState: ObservableObject {
             sourcePDFURL = firstPDFInFolder(projectFolderURL)
         }
         guard let sourcePDFURL,
-              let document = PDFDocument(url: sourcePDFURL),
-              document.pageCount > 0 else {
+              FileManager.default.fileExists(atPath: backupPDFURL(for: sourcePDFURL).path) else {
             return false
         }
 
         return true
+    }
+
+    var canDefineLayoutForSelectedFolder: Bool {
+        guard !selectedFolderPath.isEmpty else { return false }
+        let projectFolderURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
+        return hasSectionPDFs(in: projectFolderURL)
     }
 
     var localAppleVisionOutputFolderPathIfExists: String? {
@@ -764,6 +796,10 @@ final class AppState: ObservableObject {
         let projectFolderURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
         do {
             let plan = try loadOrCreateSplitPlan(from: projectFolderURL)
+            guard FileManager.default.fileExists(atPath: backupPDFURL(for: plan.sourcePDFURL).path) else {
+                showAlert(title: "Crop Required", message: "Save a crop for the working PDF before opening Add Split.")
+                return
+            }
             openAddSplitPDFWindow(bookmarkData: plan.bookmarkData, fallbackURL: plan.sourcePDFURL, projectFolderURL: projectFolderURL)
         } catch {
             configStatus = "Could not open add split: \(error.localizedDescription)"
@@ -1151,7 +1187,12 @@ final class AppState: ObservableObject {
             addSplitWindowHeight: addSplitWindowHeight,
             shouldOpenAddSplitWindowFullScreen: shouldOpenAddSplitWindowFullScreen,
             shouldOpenCropWindowAfterLoad: true
-        )
+        ) { _ in
+            if self.selectedFolderPath == projectFolderURL.path {
+                self.loadPDFFiles()
+                self.saveBookSections()
+            }
+        }
         detachedSplitPlannerStates.append(plannerState)
     }
 
@@ -2205,6 +2246,11 @@ final class AppState: ObservableObject {
             showAlert(title: "No Project Selected", message: "Open a NewOCR project folder before defining layout areas.")
             return
         }
+        let projectFolderURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
+        guard hasSectionPDFs(in: projectFolderURL) else {
+            showAlert(title: "No PDF Sections", message: "Create at least one split PDF before defining layout areas.")
+            return
+        }
 
         do {
             _ = try ensureLayoutAreasFile()
@@ -2224,8 +2270,8 @@ final class AppState: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "Define Layout Areas"
-            window.contentMinSize = NSSize(width: 1040, height: 760)
+            window.title = "Define Layout"
+            window.contentMinSize = NSSize(width: 900, height: 720)
             window.isReleasedWhenClosed = false
 
             let hostingView = NSHostingView(
@@ -2278,6 +2324,15 @@ final class AppState: ObservableObject {
         return url
     }
 
+    private func hasSectionPDFs(in projectFolderURL: URL) -> Bool {
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: projectFolderURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .nameKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return urls.contains { sectionPDFIndex($0) != nil }
+    }
+
     func layoutAreaPreviewImage(pdfURL: URL, pageNumber: Int) -> NSImage? {
         guard let document = PDFDocument(url: pdfURL),
               let page = document.page(at: max(pageNumber - 1, 0)),
@@ -2287,19 +2342,30 @@ final class AppState: ObservableObject {
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
-    func saveLayoutAreaRule(type: String, scope: String, sectionURL: URL, pageNumber: Int, rect: OCRLayoutAreaRect) throws -> Int {
+    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
-        let cleanScope = scope == "all_sections" ? "all_sections" : nil
-        let cleanSection = scope == "section" ? sectionURL.lastPathComponent : nil
-        let rule = OCRLayoutAreaRule(
-            type: type,
-            scope: cleanScope,
-            section: cleanSection,
-            page: pageNumber,
-            rect: rect
-        )
-        areas.rules.append(rule)
+        let cleanScope = scope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let rules: [OCRLayoutAreaRule]
+        switch cleanScope {
+        case "all_sections":
+            rules = [
+                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect)
+            ]
+        case "selected_sections":
+            rules = selectedSectionURLs.map { sectionURL in
+                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect)
+            }
+        case "page":
+            rules = [
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect)
+            ]
+        default:
+            rules = [
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect)
+            ]
+        }
+        areas.rules.append(contentsOf: rules)
         try writeLayoutAreasFile(areas, to: url)
         return areas.rules.count
     }
@@ -7359,6 +7425,10 @@ struct StepOneLoadPDFView: View {
                             activeMenuID: $activeTopBarMenuID
                         ) { close in
                             if appState.canOpenSplitPlannerForSelectedFolder {
+                                TopBarDropdownRow(title: "Crop", systemImage: "crop", close: close) {
+                                    appState.openSelectedFolderCropPDF()
+                                }
+
                                 TopBarDropdownRow(
                                     title: "Add Split",
                                     systemImage: "rectangle.split.2x1",
@@ -7367,10 +7437,15 @@ struct StepOneLoadPDFView: View {
                                 ) {
                                     appState.openSelectedFolderAddSplit()
                                 }
+                            }
 
-                                TopBarDropdownRow(title: "Crop", systemImage: "crop", close: close) {
-                                    appState.openSelectedFolderCropPDF()
-                                }
+                            TopBarDropdownRow(
+                                title: "Define Layout",
+                                systemImage: "rectangle.dashed",
+                                isDisabled: !appState.canDefineLayoutForSelectedFolder,
+                                close: close
+                            ) {
+                                appState.openLayoutAreasEditor()
                             }
 
                             TopBarDropdownRow(
@@ -7380,15 +7455,6 @@ struct StepOneLoadPDFView: View {
                                 close: close
                             ) {
                                 appState.applyStylesheet()
-                            }
-
-                            TopBarDropdownRow(
-                                title: "Define Layout Areas",
-                                systemImage: "rectangle.dashed",
-                                isDisabled: appState.selectedFolderPath.isEmpty,
-                                close: close
-                            ) {
-                                appState.openLayoutAreasEditor()
                             }
 
                             TopBarDropdownRow(
@@ -10584,6 +10650,8 @@ final class SplitPlannerState: ObservableObject {
     private let shouldOpenAddSplitWindowFullScreen: Bool
     private var shouldOpenCropWindowAfterLoad: Bool
     private var shouldOpenAddSplitWindowAfterLoad: Bool
+    private var hasSavedCropInCurrentCropWindow: Bool = false
+    private var shouldWarnAddSplitCloseWithoutSplits: Bool = false
     private let onSectionsSaved: ([(URL, String)]) -> Void
 
     init(
@@ -10628,6 +10696,30 @@ final class SplitPlannerState: ObservableObject {
         pdfURL.lastPathComponent
     }
 
+    var hasCompletedCropStep: Bool {
+        FileManager.default.fileExists(atPath: backupPDFURL(for: pdfURL).path)
+    }
+
+    var hasExistingSplitFiles: Bool {
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: projectFolderURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .nameKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return urls.contains { sectionPDFIndex($0) != nil }
+    }
+
+    func confirmCropSaveIfNeeded() -> Bool {
+        guard hasExistingSplitFiles else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Save Crop and Remove Existing Split Files?"
+        alert.informativeText = "Saving this crop will remove all existing split PDF files because they were created from the previous page layout. You will need to split the cropped PDF again. Are you sure you want to continue?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Save Crop")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     func openPDF() {
         NSWorkspace.shared.open(pdfURL)
     }
@@ -10641,6 +10733,7 @@ final class SplitPlannerState: ObservableObject {
             status = "PDF is not loaded yet."
             return
         }
+        hasSavedCropInCurrentCropWindow = false
 
         let initialRect: NSRect
         if shouldOpenCropWindowFullScreen, let visibleFrame = NSScreen.main?.visibleFrame {
@@ -10667,6 +10760,7 @@ final class SplitPlannerState: ObservableObject {
                 .environmentObject(self)
         )
         cropWindows.append(window)
+        trackCropWindow(window)
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -10696,6 +10790,7 @@ final class SplitPlannerState: ObservableObject {
             window.center()
         }
         addSplitWindows.append(window)
+        trackAddSplitWindow(window)
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -10716,6 +10811,68 @@ final class SplitPlannerState: ObservableObject {
         }
         detectSplitWindows.removeAll()
         closeAddSplitWindows()
+    }
+
+    private func trackCropWindow(_ window: NSWindow) {
+        let key = ObjectIdentifier(window)
+        let delegate = WindowCleanupDelegate(
+            onShouldClose: { [weak self] _ in
+                self?.confirmCropWindowCloseIfNeeded() ?? true
+            },
+            onClose: { [weak self] closedWindow in
+                guard let self else { return }
+                closedWindow.contentView = nil
+                self.cropWindows.removeAll { $0 === closedWindow }
+                self.retainedWindowDelegates.removeValue(forKey: ObjectIdentifier(closedWindow))
+            }
+        )
+        retainedWindowDelegates[key] = delegate
+        window.delegate = delegate
+    }
+
+    private func confirmCropWindowCloseIfNeeded() -> Bool {
+        guard shouldOpenAddSplitWindowAfterLoad && !hasSavedCropInCurrentCropWindow && !hasCompletedCropStep else {
+            return true
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Crop Required Before Splitting"
+        alert.informativeText = "This project must be cropped before you can continue to the split step. If you close Crop PDF now, Add Split will remain unavailable until you save a crop."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Continue Cropping")
+        alert.addButton(withTitle: "Close Anyway")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    private func trackAddSplitWindow(_ window: NSWindow) {
+        let key = ObjectIdentifier(window)
+        let delegate = WindowCleanupDelegate(
+            onShouldClose: { [weak self] _ in
+                self?.confirmAddSplitWindowCloseIfNeeded() ?? true
+            },
+            onClose: { [weak self] closedWindow in
+                guard let self else { return }
+                closedWindow.contentView = nil
+                self.addSplitWindows.removeAll { $0 === closedWindow }
+                self.retainedWindowDelegates.removeValue(forKey: ObjectIdentifier(closedWindow))
+            }
+        )
+        retainedWindowDelegates[key] = delegate
+        window.delegate = delegate
+    }
+
+    private func confirmAddSplitWindowCloseIfNeeded() -> Bool {
+        guard shouldWarnAddSplitCloseWithoutSplits && !hasExistingSplitFiles else {
+            return true
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Exit Without Creating a Split?"
+        alert.informativeText = "No split PDF files have been created yet. If you close Add Split now, the project will not be ready for Define Layout or OCR until you create at least one split. Are you sure you want to exit?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Continue Splitting")
+        alert.addButton(withTitle: "Exit")
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     func openDetectSplitWindow() {
@@ -11060,6 +11217,7 @@ final class SplitPlannerState: ObservableObject {
 
                 let backupURL = self.backupPDFURL(for: sourceURL)
                 try self.replaceSourcePDF(at: sourceURL, with: temporaryURL, backupURL: backupURL)
+                try self.removeSplitFilesAfterCrop()
                 let newBookmarkData = try sourceURL.bookmarkData(
                     options: [.withSecurityScope],
                     includingResourceValuesForKeys: nil,
@@ -11071,8 +11229,10 @@ final class SplitPlannerState: ObservableObject {
                     self.bookmarkData = newBookmarkData
                     try? self.saveCurrentSplitPlan()
                     self.loadProjectPDFs()
+                    self.hasSavedCropInCurrentCropWindow = true
                     self.status = "Saved cropped PDF. Backup: \(backupURL.lastPathComponent)"
                     completion(true)
+                    self.onSectionsSaved([])
                     self.loadPDF()
                 }
             } catch {
@@ -11083,6 +11243,16 @@ final class SplitPlannerState: ObservableObject {
                 }
             }
         }
+    }
+
+    private func removeSplitFilesAfterCrop() throws {
+        loadProjectPDFs()
+        let sectionURLs = existingSectionPDFURLs()
+        for url in sectionURLs where FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+        ranges = []
+        isUsingFallbackRange = false
     }
 
     private func loadPDF() {
@@ -11142,6 +11312,7 @@ final class SplitPlannerState: ObservableObject {
             if shouldOpenAddSplitWindowAfterLoad {
                 shouldOpenAddSplitWindowAfterLoad = false
                 if canAddMoreSplits {
+                    shouldWarnAddSplitCloseWithoutSplits = true
                     openAddSplitWindow()
                 } else {
                     status = "All pages have already been split."
@@ -11457,6 +11628,7 @@ final class SplitPlannerState: ObservableObject {
 struct LayoutAreaEditorWindowView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var state: LayoutAreaEditorState
+    @State private var isSelectedSectionsPopoverPresented = false
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
         ("header", "Header", "textformat.size"),
@@ -11482,14 +11654,23 @@ struct LayoutAreaEditorWindowView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .padding(.top, 120)
-        .padding(.horizontal, 22)
+        .padding(.top, 44)
+        .padding(.horizontal, 36)
         .padding(.bottom, 22)
-        .frame(minWidth: 1040, minHeight: 760)
+        .frame(minWidth: 0, minHeight: 720)
         .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
         .onChange(of: state.selectedPage) { _, newValue in
             state.selectedPage = min(max(newValue, 1), max(state.pageCount, 1))
+        }
+        .onChange(of: state.selectedScope) { _, newValue in
+            isSelectedSectionsPopoverPresented = newValue == "selected_sections"
+        }
+        .sheet(isPresented: $isSelectedSectionsPopoverPresented) {
+            LayoutAreaSelectedSectionsModal(state: state) {
+                isSelectedSectionsPopoverPresented = false
+            }
+            .environmentObject(appState)
         }
     }
 
@@ -11506,7 +11687,7 @@ struct LayoutAreaEditorWindowView: View {
             }
 
             VStack(alignment: .leading, spacing: 3) {
-                Text("Define Layout Areas")
+                Text("Define Layout")
                     .font(.largeTitle.weight(.semibold))
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Text(state.selectedPDFName)
@@ -11605,7 +11786,7 @@ struct LayoutAreaEditorWindowView: View {
             )
         }
         .padding(12)
-        .frame(width: 300)
+        .frame(width: 280)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -11616,16 +11797,24 @@ struct LayoutAreaEditorWindowView: View {
     }
 
     private var statusBar: some View {
-        HStack {
-            Text(state.status.isEmpty ? "Draw an area, choose the type, then save it." : state.status)
-                .font(.system(size: 15, weight: .semibold))
+        let totalPages = max(state.pageCount, 1)
+
+        return HStack {
+            Text("Page")
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(NewOCRMainPalette.primaryText)
                 .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer()
+
+            Text("\(state.selectedPage) / \(totalPages)")
+                .font(.system(size: 18, weight: .semibold).monospacedDigit())
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+                .frame(width: 74, alignment: .leading)
+
+            NewOCRPageSlider(page: $state.selectedPage, pageCount: totalPages)
+                .frame(minWidth: 380, maxWidth: .infinity)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
@@ -11635,48 +11824,21 @@ struct LayoutAreaEditorWindowView: View {
     }
 
     private var controls: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 14) {
-                Text("Page")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
-
-                Stepper(
-                    "\(state.selectedPage) / \(max(state.pageCount, 1))",
-                    value: $state.selectedPage,
-                    in: 1...max(state.pageCount, 1)
-                )
-                .controlSize(.large)
-                .font(.system(size: 16, weight: .semibold).monospacedDigit())
-                .foregroundStyle(NewOCRMainPalette.primaryText)
-                .frame(width: 150, alignment: .leading)
-
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 16) {
+                instructionText
+                typeButtons
                 Spacer(minLength: 12)
-
-                HStack(spacing: 8) {
-                    Text("Scope")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.primaryText)
-
-                    LayoutAreaScopePicker(selection: $state.selectedScope)
-                        .frame(width: 300)
-                }
+                scopePicker
             }
 
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 104, maximum: 128), spacing: 12)],
-                alignment: .leading,
-                spacing: 12
-            ) {
-                ForEach(areaTypes, id: \.id) { type in
-                    LayoutAreaTypeButton(
-                        title: type.label,
-                        systemImage: type.icon,
-                        isSelected: state.selectedType == type.id
-                    ) {
-                        state.selectedType = type.id
-                    }
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center, spacing: 16) {
+                    instructionText
+                    Spacer(minLength: 12)
+                    scopePicker
                 }
+                typeButtons
             }
         }
         .padding(14)
@@ -11686,6 +11848,39 @@ struct LayoutAreaEditorWindowView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
         )
+    }
+
+    private var instructionText: some View {
+        Text(state.status.isEmpty ? "Draw an area, choose the type, then save it." : state.status)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(NewOCRMainPalette.primaryText)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .layoutPriority(1)
+    }
+
+    private var typeButtons: some View {
+        HStack(spacing: 8) {
+            ForEach(areaTypes, id: \.id) { type in
+                LayoutAreaTypeButton(
+                    title: type.label,
+                    systemImage: type.icon,
+                    isSelected: state.selectedType == type.id
+                ) {
+                    state.selectedType = type.id
+                }
+            }
+        }
+    }
+
+    private var scopePicker: some View {
+        LayoutAreaScopePicker(
+            selection: $state.selectedScope,
+            selectedCount: state.selectedLayoutSectionItems.count
+        ) {
+            isSelectedSectionsPopoverPresented = true
+        }
+        .frame(minWidth: 460, idealWidth: 520, maxWidth: 560)
     }
 
     private var preview: some View {
@@ -11704,7 +11899,7 @@ struct LayoutAreaEditorWindowView: View {
                         LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
                     }
                 }
-                .frame(minWidth: 820, minHeight: 520)
+                .frame(minWidth: 0, minHeight: 460)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(NewOCRMainPalette.fieldBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -11714,7 +11909,7 @@ struct LayoutAreaEditorWindowView: View {
                 )
             } else {
                 ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
-                    .frame(minWidth: 820, minHeight: 520)
+                    .frame(minWidth: 0, minHeight: 460)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .foregroundStyle(NewOCRMainPalette.primaryText)
             }
@@ -11723,18 +11918,38 @@ struct LayoutAreaEditorWindowView: View {
 
     private func saveCurrentArea() {
         guard let url = state.selectedPDFURL else { return }
+        if state.selectedScope == "selected_sections" && state.selectedLayoutSectionItems.isEmpty {
+            state.status = "Choose at least one selected section."
+            isSelectedSectionsPopoverPresented = true
+            return
+        }
         do {
-            let count = try appState.saveLayoutAreaRule(
+            let count = try appState.saveLayoutAreaRules(
                 type: state.selectedType,
                 scope: state.selectedScope,
-                sectionURL: url,
+                currentSectionURL: url,
+                selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
                 pageNumber: state.selectedPage,
                 rect: state.normalizedOCRRect
             )
             state.savedRuleCount = count
-            state.status = "Saved \(displayName(for: state.selectedType)) area for page \(state.selectedPage)."
+            state.status = savedStatusMessage(for: state.selectedType)
         } catch {
             state.status = "Could not save: \(error.localizedDescription)"
+        }
+    }
+
+    private func savedStatusMessage(for type: String) -> String {
+        let areaName = displayName(for: type)
+        switch state.selectedScope {
+        case "all_sections":
+            return "Saved \(areaName) area for all sections."
+        case "selected_sections":
+            return "Saved \(areaName) area for \(state.selectedLayoutSectionItems.count) selected section(s)."
+        case "page":
+            return "Saved \(areaName) area for current section page \(state.selectedPage)."
+        default:
+            return "Saved \(areaName) area for current section."
         }
     }
 
@@ -11774,38 +11989,122 @@ struct LayoutAreaEditorWindowView: View {
     }
 }
 
+private struct NewOCRPageSlider: View {
+    @Binding var page: Int
+    let pageCount: Int
+    var dragSensitivity: CGFloat = 1.18
+
+    private var totalPages: Int {
+        max(pageCount, 1)
+    }
+
+    private var sliderPageCount: Int {
+        max(totalPages, 2)
+    }
+
+    private var isEnabled: Bool {
+        totalPages > 1
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(proxy.size.width, 1)
+            let progress = CGFloat(max(min(page, totalPages), 1) - 1) / CGFloat(sliderPageCount - 1)
+            let knobSize: CGFloat = 22
+            let trackHeight: CGFloat = 10
+            let knobX = min(max(progress * width, knobSize / 2), width - knobSize / 2)
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.black.opacity(isEnabled ? 0.22 : 0.12))
+                    .frame(height: trackHeight)
+
+                Capsule()
+                    .fill(Color(red: 30/255, green: 139/255, blue: 238/255).opacity(isEnabled ? 1 : 0.45))
+                    .frame(width: max(knobX, knobSize / 2), height: trackHeight)
+
+                Circle()
+                    .fill(isEnabled ? Color.white : Color.white.opacity(0.60))
+                    .frame(width: knobSize, height: knobSize)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.black.opacity(0.20), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(isEnabled ? 0.22 : 0.10), radius: 4, x: 0, y: 2)
+                    .offset(x: knobX - knobSize / 2)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard isEnabled else { return }
+                        let acceleratedX = value.location.x + value.translation.width * (dragSensitivity - 1)
+                        let clampedX = min(max(acceleratedX, 0), width)
+                        let nextPage = Int((clampedX / width * CGFloat(sliderPageCount - 1)).rounded()) + 1
+                        page = min(max(nextPage, 1), totalPages)
+                    }
+            )
+        }
+        .frame(height: 34)
+        .opacity(isEnabled ? 1 : 0.55)
+        .accessibilityLabel("Page")
+        .accessibilityValue("\(page) of \(totalPages)")
+    }
+}
+
 private struct LayoutAreaTypeButton: View {
     let title: String
     let systemImage: String
     let isSelected: Bool
     let action: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 24, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-            }
+            Image(systemName: systemImage)
+                .font(.system(size: 22, weight: .semibold))
             .foregroundStyle(isSelected ? Color.white : NewOCRMainPalette.primaryText)
-            .frame(width: 104, height: 64)
+            .frame(width: 62, height: 48)
             .background(isSelected ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.fieldBackground)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isSelected ? Color.white.opacity(0.18) : NewOCRMainPalette.stroke, lineWidth: 1)
+                    .stroke(isSelected ? Color.white.opacity(0.18) : (isHovered ? NewOCRMainPalette.primaryText.opacity(0.30) : NewOCRMainPalette.stroke), lineWidth: 1)
             )
+            .shadow(color: Color.black.opacity(isHovered ? 0.13 : 0.06), radius: isHovered ? 6 : 3, x: 0, y: isHovered ? 2 : 1)
         }
         .buttonStyle(.plain)
+        .frame(width: 62, height: 48)
+        .contentShape(Rectangle())
+        .background(FloatingTooltip(title: title, isEnabled: true))
+        .accessibilityLabel(title)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear {
+            if isHovered {
+                NSCursor.arrow.set()
+                isHovered = false
+            }
+        }
     }
 }
 
 private struct LayoutAreaScopePicker: View {
     @Binding var selection: String
+    let selectedCount: Int
+    let openSelectedSections: () -> Void
     private let options = [
-        ("all_sections", "All Sections"),
-        ("section", "This Section")
+        ("all_sections", "All"),
+        ("selected_sections", "Selected"),
+        ("section", "Section"),
+        ("page", "Page")
     ]
 
     var body: some View {
@@ -11813,11 +12112,15 @@ private struct LayoutAreaScopePicker: View {
             ForEach(options, id: \.0) { option in
                 Button {
                     selection = option.0
+                    if option.0 == "selected_sections" {
+                        openSelectedSections()
+                    }
                 } label: {
-                    Text(option.1)
+                    Text(label(for: option))
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(selection == option.0 ? Color.white : NewOCRMainPalette.primaryText)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.82)
                         .frame(maxWidth: .infinity, minHeight: 34)
                         .padding(.horizontal, 12)
                         .background(segmentBackground(for: option.0))
@@ -11839,6 +12142,169 @@ private struct LayoutAreaScopePicker: View {
         selection == id
             ? Color(red: 30/255, green: 139/255, blue: 238/255)
             : NewOCRMainPalette.rowBackground.opacity(0.65)
+    }
+
+    private func label(for option: (String, String)) -> String {
+        option.0 == "selected_sections" ? "Selected (\(selectedCount))" : option.1
+    }
+}
+
+private struct LayoutAreaSelectedSectionsModal: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject var state: LayoutAreaEditorState
+    let close: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 52, height: 52)
+                    Image(systemName: "checklist")
+                        .font(.system(size: 25, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Selected Sections")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Text("\(state.selectedLayoutSectionItems.count) of \(state.pdfItems.count) selected")
+                        .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+
+                Spacer()
+
+                OCRIconButton(
+                    title: "Select All",
+                    systemImage: "checkmark.square",
+                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                    foregroundColor: .black,
+                    size: 34
+                ) {
+                    state.setAllLayoutSectionsSelected(true)
+                }
+
+                OCRIconButton(
+                    title: "Unselect All",
+                    systemImage: "square",
+                    backgroundColor: Color.white.opacity(0.92),
+                    foregroundColor: .black,
+                    size: 34
+                ) {
+                    state.setAllLayoutSectionsSelected(false)
+                }
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white,
+                    size: 34
+                ) {
+                    close()
+                }
+            }
+
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(state.pdfItems) { item in
+                        LayoutAreaSelectedSectionRow(
+                            item: item,
+                            isSelected: state.isLayoutSectionSelected(item),
+                            previewImage: appState.layoutAreaPreviewImage(pdfURL: item.url, pageNumber: 1)
+                        ) {
+                            state.setLayoutSection(item, selected: !state.isLayoutSectionSelected(item))
+                        }
+                    }
+                }
+                .padding(8)
+            }
+            .frame(width: 520, height: 420)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+        }
+        .padding(18)
+        .frame(width: 590, height: 540)
+        .background(NewOCRMainPalette.panelBackground)
+    }
+}
+
+private struct LayoutAreaSelectedSectionRow: View {
+    let item: PDFFileItem
+    let isSelected: Bool
+    let previewImage: NSImage?
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color(red: 53/255, green: 200/255, blue: 90/255) : NewOCRMainPalette.secondaryText)
+                    .frame(width: 32)
+
+                Group {
+                    if let previewImage {
+                        Image(nsImage: previewImage)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        NewOCRMainPalette.fieldBackground
+                    }
+                }
+                .frame(width: 58, height: 76)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.url.deletingPathExtension().lastPathComponent)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(item.url.lastPathComponent)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(8)
+            .background(isSelected ? Color(red: 30/255, green: 139/255, blue: 238/255).opacity(0.26) : (isHovered ? NewOCRMainPalette.rowBackground.opacity(0.78) : NewOCRMainPalette.rowBackground.opacity(0.55)))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .onDisappear {
+            if isHovered {
+                NSCursor.arrow.set()
+                isHovered = false
+            }
+        }
     }
 }
 
@@ -12144,6 +12610,7 @@ struct CropPDFWindowView: View {
                 Spacer()
 
                 OCRIconButton(title: "Save Crop", systemImage: "square.and.arrow.down", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255), size: 42) {
+                    guard planner.confirmCropSaveIfNeeded() else { return }
                     let window = NSApp.keyWindow
                     planner.saveCrop(normalizedRect: cropRect) { saved in
                         if saved {
@@ -12159,27 +12626,28 @@ struct CropPDFWindowView: View {
             }
 
             HStack(spacing: 14) {
-                Text("Page \(min(previewPageIndex + 1, max(planner.pageCount, 1))) of \(max(planner.pageCount, 1))")
+                Text("Page \(min(previewPageIndex + 1, max(planner.pageCount, 1))) / \(max(planner.pageCount, 1))")
                     .font(.system(size: 16, weight: .semibold).monospacedDigit())
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                     .frame(width: 120, alignment: .leading)
 
-                Slider(
-                    value: Binding(
-                        get: { Double(min(previewPageIndex + 1, max(planner.pageCount, 1))) },
+                NewOCRPageSlider(
+                    page: Binding(
+                        get: { min(previewPageIndex + 1, max(planner.pageCount, 1)) },
                         set: { value in
-                            previewPageIndex = min(max(Int(value.rounded()) - 1, 0), max(planner.pageCount - 1, 0))
+                            previewPageIndex = min(max(value - 1, 0), max(planner.pageCount - 1, 0))
                         }
                     ),
-                    in: 1...Double(max(planner.pageCount, 1)),
-                    step: 1
+                    pageCount: max(planner.pageCount, 1),
+                    dragSensitivity: 1.24
                 )
-                .disabled(planner.pageCount <= 1)
+                .frame(minWidth: 380, maxWidth: .infinity)
 
                 Spacer(minLength: 0)
 
             }
-            .padding(10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
             .background(NewOCRMainPalette.panelBackground)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
