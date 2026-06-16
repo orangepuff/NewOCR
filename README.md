@@ -491,6 +491,38 @@ Image crops are written to:
 AppleVision/MD/section-001/Images/
 ```
 
+After each OCR run, an **OCR confidence review report** is written to:
+
+```text
+AppleVision/MD/section-001/ocr-review.json
+```
+
+The report lists every OCR line where Apple Vision's confidence score fell below 75%. Each
+flagged item includes the page number, line number within that page, the recognized text,
+and the confidence percentage. The report is regenerated on every OCR run and deleted when
+**Clear OCR** removes the section folder.
+
+After OCR finishes the **OCR Review** window opens automatically when any issues are found.
+The window is dark-styled (matching Compare/Log windows) and is split into two clearly
+labelled sections:
+
+**1. Corrections** (shown first, blue header)
+During OCR, underscore characters that appear at word boundaries are automatically removed
+from the `.md` output before saving. This corrects a common Vision OCR artifact where
+italic-styled text is misread as Markdown italic syntax (e.g. `_บทที่ 1` → `บทที่ 1`).
+Each row shows the original struck-through text with an arrow to the corrected version so
+the user can verify every fix. The correction is already applied to the saved `page*.md`
+files.
+
+**2. Low-Confidence** (shown second, amber header)
+Lines where Vision's recognition confidence score fell below 75% are flagged for manual
+review. The badge colour indicates severity: amber ≥ 65%, orange ≥ 50%, red < 50%.
+
+Within each section, items are grouped by section (when running *Process OCR All*) then by
+page, with a count badge showing how many lines are in that group. The window header shows
+separate totals: **N auto-corrected** (blue) and **M low-confidence** (amber). The OCR Log
+window shows a one-line summary count for reference.
+
 ### Process OCR All
 
 The button appears next to the Sections count:
@@ -512,7 +544,9 @@ Expected behavior:
 - keep `AppleVision/LineCache/header-footer-review.txt`; it is shared review
   input used by OCR to remove approved header/footer lines
 - replace existing Markdown with newly generated Markdown
-- show finished successfully when done
+- after OCR, automatically collect low-confidence lines (Vision confidence < 75%) and save
+  `AppleVision/MD/<section>/ocr-review.json` per section
+- show finished successfully when done, with a count of low-confidence lines flagged across all sections
 
 ### Scan Header All
 
@@ -527,8 +561,8 @@ finishes.
 
 NewOCR does not automatically detect images, blockquotes, or footnotes during
 OCR. Those special areas are controlled by **Edit PDF > Define Layout** so
-the user can draw the exact page area that should become an image, quote,
-footnote, header, or ignored text.
+the user can draw the exact page area that should become an image, image
+description caption, quote, footnote, header, or ignored text.
 
 Process OCR still detects large vertical gaps between OCR text lines as blank
 paragraph breaks. The surrounding text paragraphs stay unchanged, and NewOCR
@@ -543,9 +577,9 @@ with `>` or `![`, NewOCR keeps the paragraphs separate.
 
 **Edit PDF > Define Layout** opens a project-wide visual editor. Choose a
 sample section/page, select **Section Title**, **Quote**, **Image**,
-**Footnote**, or **Ignore**, drag the rectangle over the page area, choose
-whether it applies to **All Sections** or only **This Section**, then click
-**Save Area**.
+**Image Description**, **Footnote**, or **Ignore**, drag the rectangle over
+the page area, choose whether it applies to **All Sections** or only
+**This Section**, then click **Save Area**.
 
 The editor writes the project layout rules automatically to:
 
@@ -559,7 +593,7 @@ The **View Rules** button in the Define Layout header opens a formatted report o
 layout area rules. The report is styled as a beautiful dark panel, consistent with other
 NewOCR confirmations, and displays each rule with:
 
-- **Type icon and label** (Section Title, Quote, Image, Footnote, Ignore)
+- **Type icon and label** (Section Title, Quote, Image, Image Description, Footnote, Ignore)
 - **Scope information** (All Sections, specific section, or page number)
 - **Load button** (blue pencil icon) to load the rule's settings for editing
 - **Delete button** (trash icon) to remove individual rules
@@ -596,6 +630,19 @@ The report uses consistent NewOCR dark styling with color-coded rule type icons 
 scanning. The close button is distinct from delete buttons, preventing accidental closure
 when attempting to delete a rule.
 
+### Define Layout PDF Preview Zoom
+
+The PDF preview in Define Layout supports zoom in/out for precise area selection.
+A `[−] 120% [+]` zoom pill sits in the page-slider row to the right of the slider.
+
+- **[−]** decreases zoom by 25% per click (minimum 50%)
+- **[+]** increases zoom by 25% per click (maximum 400%)
+- Tap the **percentage** label to reset zoom to 100% (fit to viewport)
+- When zoomed in, the preview becomes scrollable (trackpad scroll to pan)
+- A "Scroll to pan · drag to set area" hint appears in the bottom-right corner whenever zoom ≠ 100%
+- Zoom resets to 100% automatically when switching to a different section
+- Drawing the selection rectangle and moving/resizing handles work at any zoom level
+
 Define Layout is available only after at least one `section-###.pdf` split file
 exists in the project folder. The **Define Layout** button in the main window is
 disabled until at least one section PDF is created.
@@ -624,9 +671,37 @@ Supported rule types:
   Header rules only apply to the first page of each section, never to subsequent pages.
   This prevents section titles from appearing on every page.
 - `blockquote` — OCR lines in the rectangle are written as Markdown
-  blockquotes with `>`.
+  blockquotes with `>`. A blank paragraph (`<br/>`) is automatically inserted
+  after every blockquote block so the following body text has visual separation.
 - `image` — the rectangle is cropped from the rendered PDF page, saved to
-  `Images/`, and inserted as Markdown image syntax.
+  `Images/`, and inserted as Markdown image syntax. Enter an **Image label**
+  in the label field (e.g. `Image#1`, `Fig 3`) — this label appears as the
+  image's alt-text and is used to match with a corresponding `image_desc` rule.
+  If left empty the system uses `Image N` (auto-numbered by position).
+  A blank paragraph (`<br/>`) is automatically inserted after every image block
+  (including after its description when one is matched) so the following body
+  text has visual separation.
+- `image_desc` — shown in the UI as **Image Description**. Draw this rectangle
+  over the caption or description text for a specific image (e.g. a figure
+  caption that appears at the bottom of the page, not immediately below the
+  image). Enter the **same label** used in the matching `image` rule into the
+  label field. During OCR:
+  - The OCR text from the `image_desc` area is extracted and removed from the
+    normal text flow.
+  - It is placed in italics immediately after its matching image in the Markdown
+    output, regardless of where the caption physically appears on the page.
+  - A blank paragraph follows the image+description block:
+    ```markdown
+    ![Image#1](Images/page2-Image1.png)
+
+    *ภาพที่ 1 แสดงให้เห็นถึงโครงสร้างหลักของอาคาร*
+
+    <br/>
+
+    body text continues here...
+    ```
+  - If no matching `image` label is found the description text is silently
+    discarded (it was removed from normal flow but not placed anywhere).
 - `footnote` — OCR lines in the rectangle are written as Markdown footnote
   definitions. When saving a Footnote area in Define Layout, enter a
   comma-separated list of labels in the **Labels** field (e.g. `1,2,3` or

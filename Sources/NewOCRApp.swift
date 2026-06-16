@@ -156,6 +156,7 @@ private struct OCRLine: Codable {
     let right: CGFloat
     let bottom: CGFloat
     let top: CGFloat
+    var confidence: Float = 1.0
 
     var width: CGFloat {
         right - left
@@ -168,6 +169,25 @@ private struct OCRLine: Codable {
     var centerX: CGFloat {
         (left + right) / 2
     }
+}
+
+private struct OCRReviewItem: Codable {
+    let page: Int
+    let line: Int
+    let text: String        // final text (already corrected when reason == "auto_corrected")
+    let confidence: Float
+    let reason: String      // "low_confidence" | "auto_corrected"
+    var original: String? = nil  // raw OCR text before auto-correction (nil for low_confidence)
+}
+
+private struct OCRReviewReport: Codable {
+    let section: String
+    let generatedAt: String
+    let confidenceThreshold: Float
+    let totalLines: Int
+    let flaggedCount: Int
+    let correctedCount: Int
+    let items: [OCRReviewItem]
 }
 
 private struct OCRLineCachePage: Codable {
@@ -185,7 +205,9 @@ private struct HeaderFooterGroup {
 }
 
 private struct OCRImageRegion {
+    let label: String
     let markdown: String
+    var description: String?
     let imageURL: URL
     let left: CGFloat
     let right: CGFloat
@@ -630,6 +652,7 @@ final class AppState: ObservableObject {
     private var isRestoring = false
     private var ocrWindows: [NSWindow] = []
     private var ocrCompareWindows: [NSWindow] = []
+    private var ocrReviewWindows: [NSWindow] = []
     private var finalizeAIWindows: [NSWindow] = []
     private var finalizeAIInstructionWindows: [NSWindow] = []
     private var layoutAreaWindows: [NSWindow] = []
@@ -1470,6 +1493,11 @@ final class AppState: ObservableObject {
             forceCloseWindowAndAttachedSheets(window)
         }
         ocrCompareWindows.removeAll()
+
+        for window in ocrReviewWindows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        ocrReviewWindows.removeAll()
 
         for window in finalizeAIWindows {
             forceCloseWindowAndAttachedSheets(window)
@@ -3412,6 +3440,7 @@ final class AppState: ObservableObject {
             closedWindow.contentView = nil
             self.ocrWindows.removeAll { $0 === closedWindow }
             self.ocrCompareWindows.removeAll { $0 === closedWindow }
+            self.ocrReviewWindows.removeAll { $0 === closedWindow }
             self.finalizeAIWindows.removeAll { $0 === closedWindow }
             self.finalizeAIInstructionWindows.removeAll { $0 === closedWindow }
             self.layoutAreaWindows.removeAll { $0 === closedWindow }
@@ -3420,6 +3449,37 @@ final class AppState: ObservableObject {
         }
         retainedWindowDelegates[key] = delegate
         window.delegate = delegate
+    }
+
+    private func loadOCRReviewReport(from mdFolder: URL) -> OCRReviewReport? {
+        let url = mdFolder.appendingPathComponent("ocr-review.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(OCRReviewReport.self, from: data)
+    }
+
+    fileprivate func openOCRReviewReport(sections: [(name: String, report: OCRReviewReport)]) {
+        let totalFlagged = sections.reduce(0) { $0 + $1.report.flaggedCount }
+        let windowTitle = sections.count == 1
+            ? "OCR Review — \(sections[0].name)"
+            : "OCR Review — \(sections.count) sections"
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = windowTitle
+        window.center()
+        window.isReleasedWhenClosed = false
+        let hostingView = NSHostingView(
+            rootView: OCRReviewReportWindowView(sections: sections, totalFlagged: totalFlagged)
+        )
+        hostingView.sizingOptions = []
+        window.contentView = hostingView
+        window.setFrame(NSScreen.main?.visibleFrame ?? window.frame, display: true)
+        ocrReviewWindows.append(window)
+        trackRetainedWindow(window)
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func previewHTML(for markdown: String) -> String {
@@ -5168,6 +5228,7 @@ final class AppState: ObservableObject {
         let filteredTextValue = filteredText
         DispatchQueue.global(qos: .userInitiated).async {
             var completed = 0
+            var totalFlagged = 0
             var logs: [String] = []
 
             do {
@@ -5196,7 +5257,9 @@ final class AppState: ObservableObject {
                         documentTitle: ""
                     )
                     completed += 1
-                    logs.append("\(item.url.lastPathComponent): \(result.pages) pages, \(result.characters) characters")
+                    totalFlagged += result.flaggedLines
+                    let flagNote = result.flaggedLines > 0 ? ", \(result.flaggedLines) flagged" : ""
+                    logs.append("\(item.url.lastPathComponent): \(result.pages) pages, \(result.characters) characters\(flagNote)")
                 }
 
                 DispatchQueue.main.async {
@@ -5204,13 +5267,35 @@ final class AppState: ObservableObject {
                     self.isOCRCancelling = false
                     self.ocrProgressPercent = 100
                     self.ocrStatus = "Processed OCR for \(completed) sections."
-                    self.logOutput = logs.joined(separator: "\n")
+                    var logText = logs.joined(separator: "\n")
+                    if totalFlagged > 0 {
+                        logText += "\n\n⚠ OCR Review: \(totalFlagged) low-confidence line(s) flagged across \(completed) section(s).\nOpen each section's OCR Log or check ocr-review.json for details."
+                    } else {
+                        logText += "\n\nOCR Review: No low-confidence lines detected."
+                    }
+                    self.logOutput = logText
+                    let flagSummary = totalFlagged > 0
+                        ? "\(totalFlagged) low-confidence line(s) need review."
+                        : "No OCR issues detected."
                     self.bulkOCRProgressTitle = "Finished Successfully"
-                    self.bulkOCRProgressMessage = "Finished OCR for \(completed) sections."
+                    self.bulkOCRProgressMessage = "Finished OCR for \(completed) sections. \(flagSummary)"
                     self.bulkOCRCurrentFile = ""
                     self.bulkOCRCompletedCount = completed
                     self.isBulkOCRFinished = true
                     self.loadPDFFiles()
+                    if totalFlagged > 0 {
+                        var reviewSections: [(name: String, report: OCRReviewReport)] = []
+                        for item in sectionItems {
+                            let mdFolder = self.appleVisionOutputFolderURL(for: item.url)
+                                .appendingPathComponent(item.url.deletingPathExtension().lastPathComponent, isDirectory: true)
+                            if let report = self.loadOCRReviewReport(from: mdFolder), report.flaggedCount > 0 {
+                                reviewSections.append((name: item.url.deletingPathExtension().lastPathComponent, report: report))
+                            }
+                        }
+                        if !reviewSections.isEmpty {
+                            self.openOCRReviewReport(sections: reviewSections)
+                        }
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -5256,6 +5341,20 @@ final class AppState: ObservableObject {
                     self.isOCRCancelling = false
                     self.ocrProgressPercent = 100
                     self.ocrStatus = "AppleVision OCR completed and Markdown files saved."
+                    let reviewNote: String
+                    if result.flaggedLines > 0 {
+                        if let data = try? Data(contentsOf: URL(fileURLWithPath: result.mdFolder).appendingPathComponent("ocr-review.json")),
+                           let rep = try? JSONDecoder().decode(OCRReviewReport.self, from: data) {
+                            var parts: [String] = []
+                            if rep.correctedCount > 0 { parts.append("\(rep.correctedCount) auto-corrected") }
+                            if rep.flaggedCount > 0 { parts.append("\(rep.flaggedCount) low-confidence") }
+                            reviewNote = "\n\nOCR Review: \(parts.joined(separator: ", ")) — see Review window."
+                        } else {
+                            reviewNote = "\n\nOCR Review: \(result.flaggedLines) issue(s) — see Review window."
+                        }
+                    } else {
+                        reviewNote = "\n\nOCR Review: No issues detected."
+                    }
                     self.logOutput = """
                     AppleVision used Apple's Vision framework only.
 
@@ -5265,7 +5364,13 @@ final class AppState: ObservableObject {
                     Pages: \(result.pages)
                     Characters: \(result.characters)
                     Header/footer lines removed: \(result.removedLines)
-                    """
+                    """ + reviewNote
+                    if result.flaggedLines > 0 {
+                        let mdFolderURL = URL(fileURLWithPath: result.mdFolder)
+                        if let report = self.loadOCRReviewReport(from: mdFolderURL) {
+                            self.openOCRReviewReport(sections: [(name: self.selectedPDFName, report: report)])
+                        }
+                    }
                     if let text = self.loadAppleVisionMarkdownText() {
                         self.ocrText = text
                         self.updateSelectedPDFTitleFromOCRText(text)
@@ -5289,7 +5394,7 @@ final class AppState: ObservableObject {
         filterBottomLines: String,
         filteredText: String,
         documentTitle: String
-    ) throws -> (mdFolder: String, pages: Int, characters: Int, removedLines: Int) {
+    ) throws -> (mdFolder: String, pages: Int, characters: Int, removedLines: Int, flaggedLines: Int) {
         let pdfURL = URL(fileURLWithPath: pdfPath)
         guard let document = PDFDocument(url: pdfURL) else {
             throw NSError(domain: "NewOCR", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not open PDF: \(pdfPath)"])
@@ -5340,17 +5445,22 @@ final class AppState: ObservableObject {
         let repeatedHeaderFooterKeys = repeatedHeaderFooterKeys(for: pdfURL)
         var removedLines = 0
         var pageMarkdownItems: [OCRPageMarkdown] = []
+        let confidenceThreshold: Float = 0.75
+        var reviewItems: [OCRReviewItem] = []
+        var totalLineCount = 0
+        var correctedCount = 0
 
         for (pageIndex, rawLines) in rawPages.enumerated() {
             let pageNumber = pageIndex + 1
             let pageLayoutRules = matchingLayoutAreaRules(layoutRules, pdfURL: pdfURL, pageNumber: pageNumber)
             let pageImage = pageImages.indices.contains(pageIndex) ? pageImages[pageIndex] : nil
-            let imageRegions = try imageRegionsFromLayoutRules(
+            var imageRegions = try imageRegionsFromLayoutRules(
                 layoutAreaRules(pageLayoutRules, type: "image"),
                 in: pageImage,
                 pageNumber: pageNumber,
                 outputFolder: mdFolder
             )
+            let imageDescRules = layoutAreaRules(pageLayoutRules, type: "image_desc")
             let filteredLines = removeTopBottomLines(
                 rawLines,
                 topCount: topCount,
@@ -5360,16 +5470,69 @@ final class AppState: ObservableObject {
                 titleMatchTopLineCount: pageIndex == 0 ? titleMatchTopLineCount : 0,
                 repeatedHeaderFooterKeys: repeatedHeaderFooterKeys
             )
+            let headingRules = layoutAreaRules(pageLayoutRules, type: "header")
+                + layoutAreaRules(pageLayoutRules, type: "h2")
+                + layoutAreaRules(pageLayoutRules, type: "header3")
             let filteredTextLines = filteredLines.filter { line in
                 !layoutAreaRules(pageLayoutRules, type: "ignore").contains { rule in
                     lineOverlapsLayoutArea(line, rule.rect, threshold: 0.30)
                 }
-                && !imageRegions.contains { imageRegion in
-                    normalizedOverlapArea(line, imageRegion) >= 0.18
+                && (headingRules.contains { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }
+                    || !imageRegions.contains { imageRegion in
+                        normalizedOverlapArea(line, imageRegion) >= 0.18
+                    })
+                && !imageDescRules.contains { rule in
+                    lineOverlapsLayoutArea(line, rule.rect, threshold: 0.30)
+                }
+            }
+            // Assign descriptions extracted from image_desc areas to their matching image regions.
+            if !imageDescRules.isEmpty {
+                let descriptions = imageDescriptionsFromLayoutRules(imageDescRules, ocrLines: filteredLines)
+                for i in imageRegions.indices {
+                    if let desc = descriptions[imageRegions[i].label] {
+                        imageRegions[i].description = desc
+                    }
                 }
             }
             removedLines += rawLines.count - filteredTextLines.count
-            let builtPageText = buildMarkdownPage(from: filteredTextLines, imageRegions: imageRegions, layoutRules: pageLayoutRules)
+            totalLineCount += filteredTextLines.count
+
+            // Apply underscore-artifact cleanup and collect review items.
+            var cleanedLines: [OCRLine] = []
+            for (lineIndex, line) in filteredTextLines.enumerated() {
+                let cleaned = cleanOCRLineText(line.text)
+                let wasChanged = cleaned != line.text
+
+                if wasChanged {
+                    correctedCount += 1
+                    reviewItems.append(OCRReviewItem(
+                        page: pageNumber,
+                        line: lineIndex + 1,
+                        text: cleaned,
+                        confidence: line.confidence,
+                        reason: "auto_corrected",
+                        original: line.text
+                    ))
+                    cleanedLines.append(OCRLine(
+                        text: cleaned,
+                        left: line.left, right: line.right,
+                        bottom: line.bottom, top: line.top,
+                        confidence: line.confidence
+                    ))
+                } else {
+                    cleanedLines.append(line)
+                    if line.confidence < confidenceThreshold {
+                        reviewItems.append(OCRReviewItem(
+                            page: pageNumber,
+                            line: lineIndex + 1,
+                            text: line.text,
+                            confidence: line.confidence,
+                            reason: "low_confidence"
+                        ))
+                    }
+                }
+            }
+            let builtPageText = buildMarkdownPage(from: cleanedLines, imageRegions: imageRegions, layoutRules: pageLayoutRules)
             let pageText = pageIndex == 0
                 ? applyMarkdownTitle(cleanDocumentTitle, to: builtPageText, replaceExistingHeading: layoutAreaRules(pageLayoutRules, type: "header").isEmpty)
                 : builtPageText
@@ -5378,11 +5541,11 @@ final class AppState: ObservableObject {
                 OCRPageMarkdown(
                     pageNumber: pageNumber,
                     text: pageText,
-                    firstTextLineContinuesPreviousPage: firstTextLineContinuesPreviousPage(filteredTextLines),
-                    lastTextLineCanContinueNextPage: lastTextLineCanContinueNextPage(filteredTextLines)
+                    firstTextLineContinuesPreviousPage: firstTextLineContinuesPreviousPage(cleanedLines),
+                    lastTextLineCanContinueNextPage: lastTextLineCanContinueNextPage(cleanedLines)
                 )
             )
-            allPageLines.append(contentsOf: filteredTextLines)
+            allPageLines.append(contentsOf: cleanedLines)
             allPageImageRegions.append(contentsOf: imageRegions)
 
             DispatchQueue.main.async {
@@ -5402,7 +5565,22 @@ final class AppState: ObservableObject {
 
         let fullText = applyMarkdownTitle(cleanDocumentTitle, to: buildMarkdownPage(from: allPageLines, imageRegions: allPageImageRegions), replaceExistingHeading: true)
 
-        return (mdFolder.path, pageCount, fullText.count, removedLines)
+        let lowConfidenceCount = reviewItems.filter { $0.reason == "low_confidence" }.count
+        let report = OCRReviewReport(
+            section: pdfURL.deletingPathExtension().lastPathComponent,
+            generatedAt: ISO8601DateFormatter().string(from: Date()),
+            confidenceThreshold: confidenceThreshold,
+            totalLines: totalLineCount,
+            flaggedCount: lowConfidenceCount,
+            correctedCount: correctedCount,
+            items: reviewItems
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let reportURL = mdFolder.appendingPathComponent("ocr-review.json")
+        try encoder.encode(report).write(to: reportURL)
+
+        return (mdFolder.path, pageCount, fullText.count, removedLines, lowConfidenceCount + correctedCount)
     }
 
     private func renderPDFPageToCGImage(_ page: PDFPage, scale: CGFloat = 2.0) throws -> CGImage {
@@ -5454,18 +5632,38 @@ final class AppState: ObservableObject {
         }
 
         return observations.compactMap { observation in
-            guard let text = observation.topCandidates(1).first?.string.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !text.isEmpty else {
-                return nil
-            }
+            guard let candidate = observation.topCandidates(1).first else { return nil }
+            let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
             return OCRLine(
                 text: text,
                 left: observation.boundingBox.minX,
                 right: observation.boundingBox.maxX,
                 bottom: observation.boundingBox.minY,
-                top: observation.boundingBox.maxY
+                top: observation.boundingBox.maxY,
+                confidence: candidate.confidence
             )
         }
+    }
+
+    private func cleanOCRLineText(_ text: String) -> String {
+        // Remove underscore OCR artifacts produced when Vision reads italic-styled text.
+        // Rule: drop `_` that sits at a word boundary (preceded/followed by space or
+        // at the very start/end of the line). Underscores inside words (e.g.
+        // variable_name) are preserved.
+        let chars = Array(text)
+        var result: [Character] = []
+        for i in chars.indices {
+            let ch = chars[i]
+            guard ch == "_" else { result.append(ch); continue }
+            let prev = i > 0 ? chars[i - 1] : nil
+            let next = i < chars.count - 1 ? chars[i + 1] : nil
+            let atWordStart = prev == nil || prev == " "
+            let atWordEnd   = next == nil || next == " "
+            if !atWordStart && !atWordEnd { result.append(ch) }
+            // else: boundary underscore — skip (OCR italic artifact)
+        }
+        return String(result)
     }
 
     private func hasMeaningfulOCRText(_ lines: [OCRLine]) -> Bool {
@@ -5507,7 +5705,12 @@ final class AppState: ObservableObject {
                     return nil
                 }
 
-                let fileName = "page\(pageNumber)-image\(index + 1).png"
+                let rawLabel = rule.markers?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let label = rawLabel.isEmpty ? "Image \(index + 1)" : rawLabel
+                let safeName = label
+                    .components(separatedBy: CharacterSet(charactersIn: "/:*?\"<>|\\"))
+                    .joined(separator: "-")
+                let fileName = "page\(pageNumber)-\(safeName).png"
                 let imageURL = imagesFolder.appendingPathComponent(fileName)
                 try writePNG(croppedImage, to: imageURL)
 
@@ -5516,7 +5719,9 @@ final class AppState: ObservableObject {
                 let top = 1 - (cropRect.minY / CGFloat(image.height))
                 let bottom = 1 - (cropRect.maxY / CGFloat(image.height))
                 return OCRImageRegion(
-                    markdown: "![Page \(pageNumber) image \(index + 1)](Images/\(fileName))",
+                    label: label,
+                    markdown: "![\(label)](Images/\(fileName))",
+                    description: nil,
                     imageURL: imageURL,
                     left: left,
                     right: right,
@@ -5524,6 +5729,28 @@ final class AppState: ObservableObject {
                     top: top
                 )
             }
+    }
+
+    // Extracts OCR text from each image_desc rule area and keys it by the matching image label.
+    private func imageDescriptionsFromLayoutRules(
+        _ descRules: [OCRLayoutAreaRule],
+        ocrLines: [OCRLine]
+    ) -> [String: String] {
+        var result: [String: String] = [:]
+        for rule in descRules {
+            let label = rule.markers?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !label.isEmpty else { continue }
+            let matchingLines = ocrLines
+                .filter { lineOverlapsLayoutArea($0, rule.rect, threshold: 0.18) }
+                .sorted { $0.top > $1.top }
+            let text = matchingLines.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            if !text.isEmpty {
+                result[label] = text
+            }
+        }
+        return result
     }
 
     private func pixelCropRect(for rect: OCRLayoutAreaRect, imageWidth: Int, imageHeight: Int) -> CGRect {
@@ -6102,6 +6329,8 @@ final class AppState: ObservableObject {
     private enum OCRMarkdownBlock {
         case text(OCRLine)
         case header(OCRLine)
+        case h2(OCRLine)
+        case header3(OCRLine)
         case blockquote(OCRLine)
         case footnote(OCRLine, [String])  // ordered marker labels from rule (e.g. ["1","2","3"])
         case refmark(OCRLine, [(marker: String, fractionLeft: CGFloat, fractionRight: CGFloat)])  // insertion data: marker + left/right fractions within line text
@@ -6111,6 +6340,8 @@ final class AppState: ObservableObject {
             switch self {
             case .text(let line): return line.top
             case .header(let line): return line.top
+            case .h2(let line): return line.top
+            case .header3(let line): return line.top
             case .blockquote(let line): return line.top
             case .footnote(let line, _): return line.top
             case .refmark(let line, _): return line.top
@@ -6122,6 +6353,8 @@ final class AppState: ObservableObject {
             switch self {
             case .text(let line): return line.left
             case .header(let line): return line.left
+            case .h2(let line): return line.left
+            case .header3(let line): return line.left
             case .blockquote(let line): return line.left
             case .footnote(let line, _): return line.left
             case .refmark(let line, _): return line.left
@@ -6132,13 +6365,15 @@ final class AppState: ObservableObject {
 
     private func buildMarkdownPage(from lines: [OCRLine], imageRegions: [OCRImageRegion], layoutRules: [OCRLayoutAreaRule] = []) -> String {
         let headerRules = layoutAreaRules(layoutRules, type: "header")
+        let h2Rules = layoutAreaRules(layoutRules, type: "h2")
+        let header3Rules = layoutAreaRules(layoutRules, type: "header3")
         let blockquoteRules = layoutAreaRules(layoutRules, type: "blockquote")
         let footnoteRules = layoutAreaRules(layoutRules, type: "footnote")
         let refmarkRules = layoutAreaRules(layoutRules, type: "refmark")
-        let hasForcedLayout = !headerRules.isEmpty || !blockquoteRules.isEmpty || !footnoteRules.isEmpty || !refmarkRules.isEmpty
+        let hasForcedLayout = !headerRules.isEmpty || !h2Rules.isEmpty || !header3Rules.isEmpty || !blockquoteRules.isEmpty || !footnoteRules.isEmpty || !refmarkRules.isEmpty
 
         if hasForcedLayout {
-            return buildMarkdownPageWithForcedLayout(from: lines, imageRegions: imageRegions, headerRules: headerRules, blockquoteRules: blockquoteRules, footnoteRules: footnoteRules, refmarkRules: refmarkRules)
+            return buildMarkdownPageWithForcedLayout(from: lines, imageRegions: imageRegions, headerRules: headerRules, h2Rules: h2Rules, header3Rules: header3Rules, blockquoteRules: blockquoteRules, footnoteRules: footnoteRules, refmarkRules: refmarkRules)
         }
 
         if imageRegions.isEmpty {
@@ -6171,6 +6406,12 @@ final class AppState: ObservableObject {
             case .header(let line):
                 flushText()
                 rendered.append("## \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            case .h2(let line):
+                flushText()
+                rendered.append("## \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            case .header3(let line):
+                flushText()
+                rendered.append("### \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
             case .blockquote(let line):
                 flushText()
                 rendered.append("> \(line.text.trimmingCharacters(in: .whitespacesAndNewlines))")
@@ -6182,7 +6423,12 @@ final class AppState: ObservableObject {
                 rendered.append(applyRefmarkInsertions(line.text.trimmingCharacters(in: .whitespacesAndNewlines), refmarks: refData))
             case .image(let imageRegion):
                 flushText()
-                rendered.append(imageRegion.markdown)
+                var imageBlock = imageRegion.markdown
+                if let desc = imageRegion.description, !desc.isEmpty {
+                    imageBlock += "\n\n*\(desc)*"
+                }
+                rendered.append(imageBlock)
+                rendered.append("<br/>")
             }
         }
         flushText()
@@ -6194,6 +6440,8 @@ final class AppState: ObservableObject {
         from lines: [OCRLine],
         imageRegions: [OCRImageRegion],
         headerRules: [OCRLayoutAreaRule],
+        h2Rules: [OCRLayoutAreaRule] = [],
+        header3Rules: [OCRLayoutAreaRule] = [],
         blockquoteRules: [OCRLayoutAreaRule],
         footnoteRules: [OCRLayoutAreaRule],
         refmarkRules: [OCRLayoutAreaRule] = []
@@ -6201,6 +6449,12 @@ final class AppState: ObservableObject {
         var blocks: [OCRMarkdownBlock] = lines.map { line in
             if headerRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
                 return .header(line)
+            }
+            if h2Rules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
+                return .h2(line)
+            }
+            if header3Rules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
+                return .header3(line)
             }
             if blockquoteRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
                 return .blockquote(line)
@@ -6239,6 +6493,8 @@ final class AppState: ObservableObject {
         var rendered: [String] = []
         var pendingTextLines: [OCRLine] = []
         var pendingHeaderLines: [OCRLine] = []
+        var pendingH2Lines: [OCRLine] = []
+        var pendingHeader3Lines: [OCRLine] = []
         var pendingQuoteLines: [OCRLine] = []
         // footnote: (line, markers list from the matching rule)
         var pendingFootnoteLines: [(OCRLine, [String])] = []
@@ -6262,9 +6518,30 @@ final class AppState: ObservableObject {
             }
         }
 
+        func flushH2() {
+            if !pendingH2Lines.isEmpty {
+                let h2Lines = pendingH2Lines
+                    .map { "## \($0.text.trimmingCharacters(in: .whitespacesAndNewlines))" }
+                    .joined(separator: "\n")
+                rendered.append(h2Lines)
+                pendingH2Lines.removeAll()
+            }
+        }
+
+        func flushHeader3() {
+            if !pendingHeader3Lines.isEmpty {
+                let header3Lines = pendingHeader3Lines
+                    .map { "### \($0.text.trimmingCharacters(in: .whitespacesAndNewlines))" }
+                    .joined(separator: "\n")
+                rendered.append(header3Lines)
+                pendingHeader3Lines.removeAll()
+            }
+        }
+
         func flushQuote() {
             if !pendingQuoteLines.isEmpty {
                 rendered.append(buildBlockquoteMarkdown(from: pendingQuoteLines))
+                rendered.append("<br/>")
                 pendingQuoteLines.removeAll()
             }
         }
@@ -6305,26 +6582,39 @@ final class AppState: ObservableObject {
         for block in blocks {
             switch block {
             case .text(let line):
-                flushHeader(); flushQuote(); flushFootnote(); flushRefmark()
+                flushHeader(); flushH2(); flushHeader3(); flushQuote(); flushFootnote(); flushRefmark()
                 pendingTextLines.append(line)
             case .header(let line):
-                flushText(); flushQuote(); flushFootnote(); flushRefmark()
+                flushText(); flushH2(); flushHeader3(); flushQuote(); flushFootnote(); flushRefmark()
                 pendingHeaderLines.append(line)
+            case .h2(let line):
+                flushText(); flushHeader(); flushHeader3(); flushQuote(); flushFootnote(); flushRefmark()
+                pendingH2Lines.append(line)
+            case .header3(let line):
+                flushText(); flushHeader(); flushH2(); flushQuote(); flushFootnote(); flushRefmark()
+                pendingHeader3Lines.append(line)
             case .blockquote(let line):
-                flushHeader(); flushText(); flushFootnote(); flushRefmark()
+                flushHeader(); flushH2(); flushHeader3(); flushText(); flushFootnote(); flushRefmark()
                 pendingQuoteLines.append(line)
             case .footnote(let line, let markers):
-                flushHeader(); flushText(); flushQuote(); flushRefmark()
+                flushHeader(); flushH2(); flushHeader3(); flushText(); flushQuote(); flushRefmark()
                 pendingFootnoteLines.append((line, markers))
             case .refmark(let line, let refData):
-                flushHeader(); flushText(); flushQuote(); flushFootnote()
+                flushHeader(); flushH2(); flushHeader3(); flushText(); flushQuote(); flushFootnote()
                 pendingRefmarkLines.append((line, refData))
             case .image(let imageRegion):
-                flushHeader(); flushText(); flushQuote(); flushFootnote(); flushRefmark()
-                rendered.append(imageRegion.markdown)
+                flushHeader(); flushH2(); flushHeader3(); flushText(); flushQuote(); flushFootnote(); flushRefmark()
+                var imageBlock = imageRegion.markdown
+                if let desc = imageRegion.description, !desc.isEmpty {
+                    imageBlock += "\n\n*\(desc)*"
+                }
+                rendered.append(imageBlock)
+                rendered.append("<br/>")
             }
         }
         flushHeader()
+        flushH2()
+        flushHeader3()
         flushText()
         flushQuote()
         flushFootnote()
@@ -6426,7 +6716,7 @@ final class AppState: ObservableObject {
         }
         return decoded.rules.filter { rule in
             let type = rule.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard ["header", "blockquote", "image", "footnote", "ignore", "refmark"].contains(type) else { return false }
+            guard ["header", "h2", "header3", "blockquote", "image", "image_desc", "footnote", "ignore", "refmark"].contains(type) else { return false }
             return rule.rect.left < rule.rect.right && rule.rect.bottom < rule.rect.top
         }
     }
@@ -8673,8 +8963,11 @@ private struct LayoutAreasReportView: View {
     private var typeColors: [String: Color] {
         [
             "header": Color(red: 30/255, green: 139/255, blue: 238/255),
+            "h2": Color(red: 50/255, green: 160/255, blue: 240/255),
+            "header3": Color(red: 100/255, green: 180/255, blue: 255/255),
             "blockquote": Color(red: 255/255, green: 182/255, blue: 216/255),
             "image": Color(red: 255/255, green: 152/255, blue: 0/255),
+            "image_desc": Color(red: 255/255, green: 200/255, blue: 80/255),
             "footnote": Color(red: 120/255, green: 220/255, blue: 100/255),
             "refmark": Color(red: 160/255, green: 100/255, blue: 240/255),
             "ignore": Color.red.opacity(0.8)
@@ -8683,9 +8976,12 @@ private struct LayoutAreasReportView: View {
 
     private var typeIcons: [String: String] {
         [
-            "header": "textformat.size",
+            "header": "book.closed",
+            "h2": "textformat.size",
+            "header3": "textformat.size.smaller",
             "blockquote": "quote.bubble",
             "image": "photo",
+            "image_desc": "captions.bubble.fill",
             "footnote": "text.badge.plus",
             "refmark": "textformat.superscript",
             "ignore": "eye.slash"
@@ -8695,8 +8991,11 @@ private struct LayoutAreasReportView: View {
     private var typeLabels: [String: String] {
         [
             "header": "Section Title",
+            "h2": "H2",
+            "header3": "H3",
             "blockquote": "Quote",
             "image": "Image",
+            "image_desc": "Image Description",
             "footnote": "Footnote",
             "refmark": "Ref Mark",
             "ignore": "Ignore"
@@ -9122,17 +9421,23 @@ private struct DuplicateRuleWarningView: View {
 
     private let typeLabels: [String: String] = [
         "header": "Section Title",
+        "h2": "H2",
+        "header3": "H3",
         "blockquote": "Quote",
         "image": "Image",
+        "image_desc": "Image Description",
         "footnote": "Footnote",
         "refmark": "Ref Mark",
         "ignore": "Ignore"
     ]
 
     private let typeIcons: [String: String] = [
-        "header": "textformat.size",
+        "header": "book.closed",
+        "h2": "textformat.size",
+        "header3": "textformat.size.smaller",
         "blockquote": "quote.bubble",
         "image": "photo",
+        "image_desc": "captions.bubble.fill",
         "footnote": "text.badge.plus",
         "refmark": "textformat.superscript",
         "ignore": "eye.slash"
@@ -11444,6 +11749,325 @@ private struct OCRCompareDifferenceRow: View {
     }
 }
 
+private struct OCRReviewReportWindowView: View {
+    let sections: [(name: String, report: OCRReviewReport)]
+    let totalFlagged: Int
+
+    private var totalCorrected: Int {
+        sections.reduce(0) { $0 + $1.report.correctedCount }
+    }
+    private var totalIssues: Int { totalFlagged + totalCorrected }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "exclamationmark.magnifyingglass")
+                        .font(.system(size: 27, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("OCR Review")
+                        .font(.system(size: 31, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(sections.count == 1 ? sections[0].name : "\(sections.count) sections")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 10)
+
+                if totalCorrected > 0 {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("\(totalCorrected) auto-corrected")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color(red: 40/255, green: 150/255, blue: 220/255))
+                    .clipShape(Capsule())
+                }
+
+                if totalFlagged > 0 {
+                    HStack(spacing: 5) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("\(totalFlagged) low-confidence")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color(red: 220/255, green: 130/255, blue: 30/255))
+                    .clipShape(Capsule())
+                }
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white
+                ) {
+                    NSApp.keyWindow?.close()
+                }
+            }
+
+            if totalIssues == 0 {
+                VStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 42, weight: .semibold))
+                        .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
+                    Text("No OCR issues detected")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text("Apple Vision OCR returned clean, high-confidence results for all lines.")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(22)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+            } else {
+                let allCorrected  = sections.flatMap { s in s.report.items.filter { $0.reason == "auto_corrected" }.map { (name: s.name, item: $0) } }
+                let allFlagged    = sections.flatMap { s in s.report.items.filter { $0.reason == "low_confidence" }.map { (name: s.name, item: $0) } }
+
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 20) {
+
+                        // ── Section 1: Corrections ──────────────────────────
+                        if !allCorrected.isEmpty {
+                            reviewSection(
+                                title: "Corrections",
+                                subtitle: "Underscore artifacts auto-removed from the saved Markdown",
+                                icon: "checkmark.circle.fill",
+                                accentColor: Color(red: 40/255, green: 150/255, blue: 220/255),
+                                entries: allCorrected
+                            )
+                        }
+
+                        // ── Section 2: Low-Confidence ───────────────────────
+                        if !allFlagged.isEmpty {
+                            reviewSection(
+                                title: "Low-Confidence",
+                                subtitle: "Lines where Vision confidence < 75% — review manually",
+                                icon: "exclamationmark.triangle.fill",
+                                accentColor: Color(red: 220/255, green: 130/255, blue: 30/255),
+                                entries: allFlagged
+                            )
+                        }
+                    }
+                    .padding(2)
+                }
+            }
+        }
+        .padding(22)
+        .frame(minWidth: 860, minHeight: 560)
+        .background(NewOCRMainPalette.windowBackground)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+
+    @ViewBuilder
+    private func reviewSection(
+        title: String,
+        subtitle: String,
+        icon: String,
+        accentColor: Color,
+        entries: [(name: String, item: OCRReviewItem)]
+    ) -> some View {
+        let multiSection = sections.count > 1
+        let groupedBySectionThenPage: [(sectionName: String, pages: [(page: Int, items: [OCRReviewItem])])] = {
+            let bySection = Dictionary(grouping: entries, by: \.name)
+            return sections
+                .map { $0.name }
+                .filter { bySection[$0] != nil }
+                .map { name -> (String, [(Int, [OCRReviewItem])]) in
+                    let pages = Dictionary(grouping: bySection[name]!.map(\.item), by: \.page)
+                        .map { (page: $0.key, items: $0.value) }
+                        .sorted { $0.page < $1.page }
+                    return (name, pages)
+                }
+        }()
+
+        VStack(alignment: .leading, spacing: 12) {
+            // Section header bar
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(accentColor)
+                Text(title)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(NewOCRMainPalette.headingText)
+                Text("\(entries.count)")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(accentColor)
+                    .clipShape(Capsule())
+                Spacer()
+                Text(subtitle)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(accentColor.opacity(0.10))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(accentColor.opacity(0.30), lineWidth: 1)
+            )
+
+            ForEach(groupedBySectionThenPage, id: \.sectionName) { sectionGroup in
+                VStack(alignment: .leading, spacing: 10) {
+                    if multiSection {
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            Text(sectionGroup.sectionName)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.headingText)
+                            Spacer()
+                        }
+                    }
+
+                    ForEach(sectionGroup.pages, id: \.page) { group in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Text("Page \(group.page)")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(NewOCRMainPalette.headingText)
+                                Text("\(group.items.count)")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(Color.black)
+                                    .frame(minWidth: 22, minHeight: 18)
+                                    .background(Color.white.opacity(0.85))
+                                    .clipShape(Capsule())
+                                Spacer()
+                            }
+                            ForEach(group.items.sorted { $0.line < $1.line }, id: \.line) { item in
+                                OCRReviewItemRow(item: item)
+                            }
+                        }
+                        .padding(12)
+                        .background(NewOCRMainPalette.fieldBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                        )
+                    }
+                }
+                .padding(14)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+            }
+        }
+    }
+}
+
+private struct OCRReviewItemRow: View {
+    let item: OCRReviewItem
+
+    private var isAutoCorrection: Bool { item.reason == "auto_corrected" }
+
+    private var confidenceColor: Color {
+        switch item.confidence {
+        case 0.65...: return Color(red: 220/255, green: 150/255, blue: 30/255)
+        case 0.50...: return Color(red: 220/255, green: 90/255, blue: 30/255)
+        default:      return Color(red: 210/255, green: 50/255, blue: 50/255)
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            // Badge column
+            VStack(spacing: 4) {
+                if isAutoCorrection {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Fixed")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(Color(red: 40/255, green: 150/255, blue: 220/255))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                } else {
+                    Text("\(Int(item.confidence * 100))%")
+                        .font(.system(size: 13, weight: .bold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 44)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(confidenceColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
+                Text("Line \(item.line)")
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(NewOCRMainPalette.tertiaryText)
+            }
+
+            // Text column
+            VStack(alignment: .leading, spacing: 6) {
+                if isAutoCorrection, let original = item.original {
+                    // Show original (struck-through) → corrected
+                    Text(original)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                        .strikethrough(true, color: NewOCRMainPalette.tertiaryText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color(red: 40/255, green: 150/255, blue: 220/255))
+                        Text(item.text)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    Text(item.text)
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 struct WebPreviewView: NSViewRepresentable {
     let url: URL
     let readAccessURL: URL
@@ -13279,11 +13903,15 @@ struct LayoutAreaEditorWindowView: View {
     @State private var isSelectedSectionsPopoverPresented = false
     @State private var isLayoutAreasReportPresented = false
     @State private var pendingDuplicateRule: OCRLayoutAreaRule?
+    @State private var layoutZoomScale: CGFloat = 1.0
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
-        ("header", "Section Title", "textformat.size"),
+        ("header", "Section Title", "book.closed"),
+        ("h2", "H2", "textformat.size"),
+        ("header3", "H3", "textformat.size.smaller"),
         ("blockquote", "Quote", "quote.bubble"),
         ("image", "Image", "photo"),
+        ("image_desc", "Image Description", "captions.bubble.fill"),
         ("footnote", "Footnote", "text.badge.plus"),
         ("refmark", "Ref Mark", "textformat.superscript"),
         ("ignore", "Ignore", "eye.slash")
@@ -13316,6 +13944,9 @@ struct LayoutAreaEditorWindowView: View {
         }
         .onChange(of: state.selectedScope) { _, newValue in
             isSelectedSectionsPopoverPresented = newValue == "selected_sections"
+        }
+        .onChange(of: state.selectedPDFPath) { _, _ in
+            layoutZoomScale = 1.0
         }
         .sheet(isPresented: $isSelectedSectionsPopoverPresented) {
             LayoutAreaSelectedSectionsModal(state: state) {
@@ -13378,7 +14009,7 @@ struct LayoutAreaEditorWindowView: View {
     }
 
     private func markersApply(to type: String) -> Bool {
-        type == "footnote" || type == "refmark"
+        type == "footnote" || type == "refmark" || type == "image" || type == "image_desc"
     }
 
     private var header: some View {
@@ -13518,7 +14149,7 @@ struct LayoutAreaEditorWindowView: View {
     private var statusBar: some View {
         let totalPages = max(state.pageCount, 1)
 
-        return HStack {
+        return HStack(spacing: 10) {
             Text("Page")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(NewOCRMainPalette.primaryText)
@@ -13530,7 +14161,61 @@ struct LayoutAreaEditorWindowView: View {
                 .frame(width: 74, alignment: .leading)
 
             NewOCRPageSlider(page: $state.selectedPage, pageCount: totalPages)
-                .frame(minWidth: 380, maxWidth: .infinity)
+                .frame(minWidth: 200, maxWidth: .infinity)
+
+            // Zoom control pill
+            HStack(spacing: 0) {
+                Button {
+                    layoutZoomScale = max(0.5, (layoutZoomScale - 0.25).rounded(toPlaces: 2))
+                } label: {
+                    Image(systemName: "minus")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 32, height: 32)
+                        .foregroundStyle(layoutZoomScale <= 0.5 ? NewOCRMainPalette.tertiaryText : NewOCRMainPalette.primaryText)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(layoutZoomScale <= 0.5)
+                .pointingHandCursor()
+
+                Rectangle()
+                    .fill(NewOCRMainPalette.stroke)
+                    .frame(width: 1, height: 20)
+
+                Text("\(Int((layoutZoomScale * 100).rounded()))%")
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                    .frame(minWidth: 52)
+                    .padding(.horizontal, 6)
+                    .frame(height: 32)
+                    .contentShape(Rectangle())
+                    .onTapGesture { layoutZoomScale = 1.0 }
+                    .pointingHandCursor()
+                    .help("Tap to reset zoom to 100%")
+
+                Rectangle()
+                    .fill(NewOCRMainPalette.stroke)
+                    .frame(width: 1, height: 20)
+
+                Button {
+                    layoutZoomScale = min(4.0, (layoutZoomScale + 0.25).rounded(toPlaces: 2))
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 32, height: 32)
+                        .foregroundStyle(layoutZoomScale >= 4.0 ? NewOCRMainPalette.tertiaryText : NewOCRMainPalette.primaryText)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(layoutZoomScale >= 4.0)
+                .pointingHandCursor()
+            }
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
 
             if !state.status.isEmpty {
                 Text(state.status)
@@ -13538,11 +14223,11 @@ struct LayoutAreaEditorWindowView: View {
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(maxWidth: 360, alignment: .trailing)
+                    .frame(maxWidth: 280, alignment: .trailing)
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 12)
+        .padding(.vertical, 8)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
@@ -13586,6 +14271,10 @@ struct LayoutAreaEditorWindowView: View {
                     if !markersApply(to: type.id) {
                         state.markers = ""
                     }
+                    let pageOnlyTypes: Set<String> = ["image", "image_desc", "blockquote", "footnote", "refmark"]
+                    if pageOnlyTypes.contains(type.id) {
+                        state.selectedScope = "page"
+                    }
                 }
             }
 
@@ -13596,14 +14285,32 @@ struct LayoutAreaEditorWindowView: View {
     }
 
     private var markersField: some View {
-        let isRefmark = state.selectedType == "refmark"
-        let placeholder = isRefmark ? "Ref label (e.g. 1)" : "Labels (e.g. 1,2,3)"
-        let helpText = isRefmark
-            ? "Single marker appended after body text in this area as [^label]"
-            : "Comma-separated labels assigned to footnote lines in order"
+        let isRefmark    = state.selectedType == "refmark"
+        let isImage      = state.selectedType == "image"
+        let isImageDesc  = state.selectedType == "image_desc"
+        let placeholder: String
+        let helpText: String
+        let fieldIcon: String
+        if isImage {
+            placeholder = "Image label (e.g. Image#1)"
+            helpText    = "Unique label for this image — OCR maps it to a matching Image Description area"
+            fieldIcon   = "photo"
+        } else if isImageDesc {
+            placeholder = "Matching image label (e.g. Image#1)"
+            helpText    = "Must match the label of an Image area — description is placed right after that image in the output"
+            fieldIcon   = "captions.bubble"
+        } else if isRefmark {
+            placeholder = "Ref label (e.g. 1)"
+            helpText    = "Single marker appended after body text in this area as [^label]"
+            fieldIcon   = "textformat.superscript"
+        } else {
+            placeholder = "Labels (e.g. 1,2,3)"
+            helpText    = "Comma-separated labels assigned to footnote lines in order"
+            fieldIcon   = "list.number"
+        }
 
         return HStack(spacing: 6) {
-            Image(systemName: isRefmark ? "textformat.superscript" : "list.number")
+            Image(systemName: fieldIcon)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(NewOCRMainPalette.secondaryText)
 
@@ -13611,7 +14318,7 @@ struct LayoutAreaEditorWindowView: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Color.black)
-                .frame(width: isRefmark ? 110 : 160)
+                .frame(width: isRefmark ? 110 : (isImage || isImageDesc) ? 200 : 160)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
                 .background(Color.white)
@@ -13640,18 +14347,32 @@ struct LayoutAreaEditorWindowView: View {
             if let url = state.selectedPDFURL,
                let image = appState.layoutAreaPreviewImage(pdfURL: url, pageNumber: state.selectedPage) {
                 GeometryReader { proxy in
-                    let imageFrame = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size, zoomScale: 1.12)
+                    let baseFit = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size, zoomScale: 1.0)
+                    let imageW = baseFit.width * layoutZoomScale
+                    let imageH = baseFit.height * layoutZoomScale
+                    let contentW = max(imageW, proxy.size.width)
+                    let contentH = max(imageH, proxy.size.height)
+                    let imageFrame = CGRect(
+                        x: (contentW - imageW) / 2,
+                        y: (contentH - imageH) / 2,
+                        width: imageW,
+                        height: imageH
+                    )
 
-                    ZStack(alignment: .topLeading) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .frame(width: imageFrame.width, height: imageFrame.height)
-                            .position(x: imageFrame.midX, y: imageFrame.midY)
+                    ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                        ZStack(alignment: .topLeading) {
+                            Image(nsImage: image)
+                                .resizable()
+                                .interpolation(.high)
+                                .frame(width: imageFrame.width, height: imageFrame.height)
+                                .position(x: imageFrame.midX, y: imageFrame.midY)
+                                .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 2)
 
-                        LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
+                            LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
+                        }
+                        .frame(width: contentW, height: contentH)
                     }
-                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
-                    .clipped()
+                    .background(Color.black.opacity(0.10))
                 }
                 .frame(minWidth: 0, minHeight: 460)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -13661,6 +14382,18 @@ struct LayoutAreaEditorWindowView: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
                 )
+                .overlay(alignment: .bottomTrailing) {
+                    if layoutZoomScale != 1.0 {
+                        Text("Scroll to pan · drag to set area")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(NewOCRMainPalette.panelBackground.opacity(0.92))
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .padding(10)
+                    }
+                }
             } else {
                 ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
                     .frame(minWidth: 0, minHeight: 460)
@@ -13783,7 +14516,7 @@ struct LayoutAreaEditorWindowView: View {
     private func clearRules() {
         let alert = NSAlert()
         alert.messageText = "Clear Layout Rules?"
-        alert.informativeText = "This removes all saved header, quote, image, footnote, ref mark, and ignore layout areas for the current project."
+        alert.informativeText = "This removes all saved header, quote, image, image description, footnote, ref mark, and ignore layout areas for the current project."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Clear")
         alert.addButton(withTitle: "Cancel")
@@ -13800,20 +14533,16 @@ struct LayoutAreaEditorWindowView: View {
 
     private func displayName(for type: String) -> String {
         switch type {
-        case "header":
-            return "header"
-        case "blockquote":
-            return "quote"
-        case "image":
-            return "image"
-        case "footnote":
-            return "footnote"
-        case "refmark":
-            return "ref mark"
-        case "ignore":
-            return "ignore"
-        default:
-            return "layout"
+        case "header":     return "section title"
+        case "h2":         return "H2 heading"
+        case "header3":    return "H3 subheading"
+        case "blockquote": return "quote"
+        case "image":      return "image"
+        case "image_desc": return "image description"
+        case "footnote":   return "footnote"
+        case "refmark":    return "ref mark"
+        case "ignore":     return "ignore"
+        default:           return "layout"
         }
     }
 }
@@ -14383,6 +15112,13 @@ private struct LayoutAreaOverlayView: View {
         let upperX = max(min(maxX, 1), lowerX + 0.02)
         let upperY = max(min(maxY, 1), lowerY + 0.02)
         return CGRect(x: lowerX, y: lowerY, width: upperX - lowerX, height: upperY - lowerY)
+    }
+}
+
+private extension CGFloat {
+    func rounded(toPlaces places: Int) -> CGFloat {
+        let factor = pow(10.0, CGFloat(places))
+        return (self * factor).rounded() / factor
     }
 }
 
