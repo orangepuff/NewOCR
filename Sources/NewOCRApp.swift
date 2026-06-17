@@ -101,6 +101,66 @@ final class ImageDescOCRState: ObservableObject {
     }
 }
 
+// MARK: - Auto Detect Image by Codex
+
+private struct AutoDetectCodexResults: Codable {
+    let results: [AutoDetectCodexPageResult]
+}
+private struct AutoDetectCodexPageResult: Codable {
+    let filename: String
+    let images: [AutoDetectCodexImage]
+}
+private struct AutoDetectCodexImage: Codable {
+    let label: String
+    // PNG image coordinates: (0,0) = top-left, (1,1) = bottom-right
+    let x1: Double; let y1: Double; let x2: Double; let y2: Double
+    let captionText: String?
+    let captionX1: Double?; let captionY1: Double?
+    let captionX2: Double?; let captionY2: Double?
+}
+
+struct AutoDetectLocalCandidate: Identifiable {
+    let id = UUID()
+    let sectionFileName: String
+    let pageNumber: Int
+    let pdfURL: URL
+    let mdFolderURL: URL
+    fileprivate var pageTextObservations: [OCRLine]
+    var isSelected: Bool = true
+    var detectionNote: String = "Large empty region detected — likely contains an image"
+}
+
+struct AutoDetectImageResult: Identifiable {
+    let id = UUID()
+    let sectionFileName: String
+    let pageNumber: Int
+    var label: String
+    let pdfURL: URL
+    let mdFileURL: URL?
+    var imageRect: OCRLayoutAreaRect
+    var captionRect: OCRLayoutAreaRect?
+    var captionText: String
+    var imageSelected: Bool = true
+    var captionSelected: Bool
+    fileprivate var pageTextObservations: [OCRLine]
+    var errorMessage: String = ""
+}
+
+final class AutoDetectImageState: ObservableObject {
+    @Published var localCandidates: [AutoDetectLocalCandidate] = []
+    @Published var results: [AutoDetectImageResult] = []
+    @Published var isRunningLocal: Bool = false
+    @Published var isRunningCodex: Bool = false
+    @Published var localDone: Bool = false
+    @Published var isDone: Bool = false
+    @Published var runLog: String = ""
+    @Published var status: String = "Press 'Process Local' to scan for image pages using Apple Vision."
+    var constrainedSectionURL: URL? = nil
+
+    var isRunning: Bool { isRunningLocal || isRunningCodex }
+    var hasSelectedCandidates: Bool { localCandidates.contains { $0.isSelected } }
+}
+
 private let defaultCodexFinalizePrompt = """
 You are correcting existing OCR Markdown files for a scanned book EPUB workflow.
 This is a correction task, not a new OCR task.
@@ -687,6 +747,7 @@ final class AppState: ObservableObject {
     private var finalizeAIWindows: [NSWindow] = []
     private var finalizeAIInstructionWindows: [NSWindow] = []
     private var imageDescOCRWindows: [NSWindow] = []
+    private var autoDetectImageWindows: [NSWindow] = []
     private var layoutAreaWindows: [NSWindow] = []
     private var configEditorWindows: [NSWindow] = []
     private weak var codexFinalizeLogWindow: NSWindow?
@@ -818,6 +879,19 @@ final class AppState: ObservableObject {
         guard !selectedFolderPath.isEmpty else { return false }
         let projectFolderURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
         return hasSectionPDFs(in: projectFolderURL)
+    }
+
+    var canAutoDetectImageForSelectedFolder: Bool {
+        guard !selectedFolderPath.isEmpty else { return false }
+        let avMD = URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("AppleVision/MD", isDirectory: true)
+        return pdfFiles.contains { item in
+            guard !item.isManualSection && !epubReadySectionIDs.contains(item.id) else { return false }
+            let sectionName = item.url.deletingPathExtension().lastPathComponent
+            let mdFolder = avMD.appendingPathComponent(sectionName, isDirectory: true)
+            return (try? FileManager.default.contentsOfDirectory(atPath: mdFolder.path))?
+                .contains { $0.hasPrefix("page") && $0.hasSuffix(".md") } == true
+        }
     }
 
     var localAppleVisionOutputFolderPathIfExists: String? {
@@ -1551,6 +1625,11 @@ final class AppState: ObservableObject {
         }
         configEditorWindows.removeAll()
 
+        for window in autoDetectImageWindows {
+            forceCloseWindowAndAttachedSheets(window)
+        }
+        autoDetectImageWindows.removeAll()
+
         if let logWin = codexFinalizeLogWindow {
             forceCloseWindowAndAttachedSheets(logWin)
             codexFinalizeLogWindow = nil
@@ -1879,6 +1958,39 @@ final class AppState: ObservableObject {
         window.makeKeyAndOrderFront(nil)
     }
 
+    func openAutoDetectImageWindow(constrainedTo item: PDFFileItem? = nil) {
+        guard !selectedFolderPath.isEmpty else {
+            showAlert(title: "No Project Selected", message: "Open a project folder first.")
+            return
+        }
+        let state = AutoDetectImageState()
+        state.constrainedSectionURL = item?.url
+        let windowTitle: String
+        if let item {
+            let sectionName = item.url.deletingPathExtension().lastPathComponent
+            windowTitle = "Auto Detect Image — \(sectionName)"
+            state.status = "Press 'Process Local' to scan \(sectionName) for image pages."
+        } else {
+            windowTitle = "Auto Detect Image by Codex"
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 960, height: 720),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = windowTitle
+        window.contentMinSize = NSSize(width: 720, height: 520)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: AutoDetectImageWindowView(state: state).environmentObject(self)
+        )
+        window.center()
+        autoDetectImageWindows.append(window)
+        trackRetainedWindow(window)
+        window.makeKeyAndOrderFront(nil)
+    }
+
     func buildImageDescOCRCandidates() -> [ImageDescOCRCandidate] {
         guard let layoutURL = layoutAreasFileURL(),
               let data = try? Data(contentsOf: layoutURL),
@@ -2051,6 +2163,470 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    func runAutoDetectLocalScan(state: AutoDetectImageState) {
+        guard !state.isRunning else { return }
+        let projectPath = selectedFolderPath
+        let projectURL = URL(fileURLWithPath: projectPath, isDirectory: true)
+
+        let constrainedURL = state.constrainedSectionURL
+        let eligibleSections: [(pdfURL: URL, sectionName: String, mdFolderURL: URL)] = pdfFiles.compactMap { item in
+            guard !item.isManualSection && !epubReadySectionIDs.contains(item.id) else { return nil }
+            if let constrainedURL, item.url != constrainedURL { return nil }
+            let sectionName = item.url.deletingPathExtension().lastPathComponent
+            let mdFolder = projectURL.appendingPathComponent("AppleVision/MD/\(sectionName)", isDirectory: true)
+            guard (try? FileManager.default.contentsOfDirectory(atPath: mdFolder.path))?
+                .contains(where: { $0.hasPrefix("page") && $0.hasSuffix(".md") }) == true else { return nil }
+            return (item.url, sectionName, mdFolder)
+        }
+
+        guard !eligibleSections.isEmpty else {
+            state.status = "No sections with OCR output found."
+            return
+        }
+
+        state.isRunningLocal = true
+        state.localDone = false
+        state.localCandidates = []
+        state.results = []
+        state.isDone = false
+        state.runLog = "Phase 1: Scanning \(eligibleSections.count) section(s) — PDF structure + Apple Vision...\n"
+        state.status = "Scanning locally for image regions..."
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var candidates: [AutoDetectLocalCandidate] = []
+            for section in eligibleSections {
+                guard let doc = PDFDocument(url: section.pdfURL) else {
+                    DispatchQueue.main.async { state.runLog += "  ⚠ Could not open \(section.sectionName)\n" }
+                    continue
+                }
+                DispatchQueue.main.async {
+                    state.runLog += "  Scanning \(section.sectionName) (\(doc.pageCount) page(s))...\n"
+                }
+                for pageIndex in 0..<doc.pageCount {
+                    guard let page = doc.page(at: pageIndex) else { continue }
+                    let pageNumber = pageIndex + 1
+                    // Check 1: PDF structure — embedded raster image XObject (fast, zero false positives)
+                    let hasXObject = self.pageHasImageXObject(page)
+                    // Check 2: Vision text-gap heuristic (catches vector illustrations)
+                    guard let cgImage = try? self.renderPDFPageToCGImage(page, scale: 2.0) else { continue }
+                    let lines = (try? self.recognizeTextWithAppleVision(in: cgImage)) ?? []
+                    let hasGap = self.pageHasLargeEmptyRegion(textLines: lines)
+                    guard hasXObject || hasGap else { continue }
+                    let note: String
+                    if hasXObject && hasGap {
+                        note = "Embedded image + large empty region detected"
+                    } else if hasXObject {
+                        note = "Embedded image detected in PDF structure"
+                    } else {
+                        note = "Large empty region detected — likely contains an image"
+                    }
+                    candidates.append(AutoDetectLocalCandidate(
+                        sectionFileName: section.pdfURL.lastPathComponent,
+                        pageNumber: pageNumber,
+                        pdfURL: section.pdfURL,
+                        mdFolderURL: section.mdFolderURL,
+                        pageTextObservations: lines,
+                        detectionNote: note
+                    ))
+                }
+            }
+            DispatchQueue.main.async {
+                state.localCandidates = candidates
+                state.isRunningLocal = false
+                state.localDone = true
+                if candidates.isEmpty {
+                    state.status = "No image regions detected. Nothing to send to Codex."
+                    state.runLog += "\nPhase 1 complete: no candidate pages found.\n"
+                } else {
+                    state.status = "\(candidates.count) page(s) flagged — uncheck false positives, then press 'Process by Codex'."
+                    state.runLog += "\nPhase 1 complete: \(candidates.count) page(s) flagged.\n"
+                }
+            }
+        }
+    }
+
+    func runAutoDetectCodexScan(state: AutoDetectImageState) {
+        guard !state.isRunning else { return }
+        let selectedCandidates = state.localCandidates.filter { $0.isSelected }
+        guard !selectedCandidates.isEmpty else { return }
+
+        let projectPath = selectedFolderPath
+        let executable = codexExecutablePath
+        let model = codexFinalizeModel
+        let renderScale = ocrRenderScale
+        let projectURL = URL(fileURLWithPath: projectPath, isDirectory: true)
+        let tempDirURL = projectURL.appendingPathComponent("AppleVision/auto-detect-temp", isDirectory: true)
+
+        state.isRunningCodex = true
+        state.isDone = false
+        state.results = []
+        state.runLog += "\nPhase 2: Rendering \(selectedCandidates.count) page(s) at scale \(renderScale)...\n"
+        state.status = "Rendering pages for Codex..."
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try FileManager.default.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+
+                var filenameToCandidate: [String: AutoDetectLocalCandidate] = [:]
+                var imageFilenames: [String] = []
+
+                for candidate in selectedCandidates {
+                    let sectionStem = URL(fileURLWithPath: candidate.sectionFileName).deletingPathExtension().lastPathComponent
+                    let filename = "\(sectionStem)-page\(candidate.pageNumber).png"
+                    guard let doc = PDFDocument(url: candidate.pdfURL),
+                          let page = doc.page(at: candidate.pageNumber - 1),
+                          let fullImage = try? self.renderPDFPageToCGImage(page, scale: renderScale) else {
+                        DispatchQueue.main.async { state.runLog += "  ⚠ Could not render \(candidate.sectionFileName) page \(candidate.pageNumber)\n" }
+                        continue
+                    }
+                    try self.writePNG(fullImage, to: tempDirURL.appendingPathComponent(filename))
+                    imageFilenames.append(filename)
+                    filenameToCandidate[filename] = candidate
+                    DispatchQueue.main.async { state.runLog += "  Rendered \(filename)\n" }
+                }
+
+                guard !imageFilenames.isEmpty else {
+                    DispatchQueue.main.async {
+                        state.isRunningCodex = false
+                        state.status = "Could not render any candidate pages."
+                    }
+                    return
+                }
+
+                DispatchQueue.main.async {
+                    state.runLog += "\nSending \(imageFilenames.count) page(s) to Codex...\n"
+                    state.status = "Running Codex image detection on \(imageFilenames.count) page(s)..."
+                }
+
+                let fileList = imageFilenames.map { "- \($0)" }.joined(separator: "\n")
+                let prompt = """
+                You are analyzing rendered book pages to identify embedded images.
+                The folder 'AppleVision/auto-detect-temp/' contains PNG files of scanned book pages.
+
+                For each PNG listed below, identify all embedded images — photos, illustrations, diagrams, charts, decorative artwork, or any non-text graphical region that occupies a meaningful area of the page. Do NOT flag body text, headers, footers, page numbers, or blank whitespace as images.
+
+                For each image found, also check if there is a caption or figure label text DIRECTLY adjacent to the image (immediately above or below it, visually distinct from the main body text). If a clear caption exists, transcribe it fully and exactly, preserving the original language.
+
+                PNG files to analyze:
+                \(fileList)
+
+                Coordinate system: use normalized fractions (0.0 to 1.0) where (0,0) is the TOP-LEFT corner of the page image and (1,1) is the BOTTOM-RIGHT corner. x increases rightward, y increases downward.
+                - x1/x2: left and right horizontal edges
+                - y1/y2: top and bottom vertical edges (y1 < y2, y1 closer to page top)
+
+                Write your results to 'AppleVision/auto-detect-temp/detect-results.json':
+                {
+                  "results": [
+                    {
+                      "filename": "section-003-page2.png",
+                      "images": [
+                        {
+                          "label": "Image1",
+                          "x1": 0.15, "y1": 0.28, "x2": 0.85, "y2": 0.55,
+                          "captionText": "ภาพที่ 1 ...",
+                          "captionX1": 0.20, "captionY1": 0.56, "captionX2": 0.80, "captionY2": 0.62
+                        }
+                      ]
+                    }
+                  ]
+                }
+
+                Rules:
+                - Include ALL listed pages in results, even when no images are found (use empty images array)
+                - Omit captionText and caption coordinates when no caption is present
+                - Label images sequentially per page: Image1, Image2, etc.
+                - Do not modify or delete any PNG files
+                - Write only the JSON file, no explanations or other output
+                """
+
+                let result = self.runCodexExec(prompt: prompt, projectPath: projectPath, executablePath: executable, model: model) { text in
+                    DispatchQueue.main.async { state.runLog += text }
+                }
+
+                let resultsURL = tempDirURL.appendingPathComponent("detect-results.json")
+
+                DispatchQueue.main.async {
+                    switch result {
+                    case .failure(let error):
+                        state.isRunningCodex = false
+                        state.status = "Codex failed: \(error.localizedDescription)"
+                        state.runLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                    case .success:
+                        guard let data = try? Data(contentsOf: resultsURL),
+                              let decoded = try? JSONDecoder().decode(AutoDetectCodexResults.self, from: data) else {
+                            state.isRunningCodex = false
+                            state.status = "Codex finished but could not read detect-results.json."
+                            state.runLog += "\n\n⚠ Could not read AppleVision/auto-detect-temp/detect-results.json"
+                            return
+                        }
+
+                        var detectedResults: [AutoDetectImageResult] = []
+                        for pageResult in decoded.results {
+                            guard let candidate = filenameToCandidate[pageResult.filename] else { continue }
+                            let mdFileURL = candidate.mdFolderURL.appendingPathComponent("page\(candidate.pageNumber).md")
+                            let mdExists = FileManager.default.fileExists(atPath: mdFileURL.path)
+                            for img in pageResult.images {
+                                // Convert from PNG image coords (y down) to OCR coords (y up, bottom-left origin)
+                                let imageRect = OCRLayoutAreaRect(
+                                    left: CGFloat(img.x1), right: CGFloat(img.x2),
+                                    top: CGFloat(1.0 - img.y1), bottom: CGFloat(1.0 - img.y2)
+                                )
+                                var captionRect: OCRLayoutAreaRect? = nil
+                                if let cx1 = img.captionX1, let cy1 = img.captionY1,
+                                   let cx2 = img.captionX2, let cy2 = img.captionY2 {
+                                    captionRect = OCRLayoutAreaRect(
+                                        left: CGFloat(cx1), right: CGFloat(cx2),
+                                        top: CGFloat(1.0 - cy1), bottom: CGFloat(1.0 - cy2)
+                                    )
+                                }
+                                let captionText = img.captionText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                                detectedResults.append(AutoDetectImageResult(
+                                    sectionFileName: candidate.sectionFileName,
+                                    pageNumber: candidate.pageNumber,
+                                    label: img.label,
+                                    pdfURL: candidate.pdfURL,
+                                    mdFileURL: mdExists ? mdFileURL : nil,
+                                    imageRect: imageRect,
+                                    captionRect: captionRect,
+                                    captionText: captionText,
+                                    captionSelected: !captionText.isEmpty && captionRect != nil,
+                                    pageTextObservations: candidate.pageTextObservations
+                                ))
+                            }
+                        }
+
+                        // Remove temp PNGs; keep detect-results.json for debugging
+                        for filename in imageFilenames {
+                            try? FileManager.default.removeItem(at: tempDirURL.appendingPathComponent(filename))
+                        }
+
+                        let total = detectedResults.count
+                        state.results = detectedResults
+                        state.isDone = true
+                        state.isRunningCodex = false
+                        state.status = total == 0
+                            ? "Codex found no images in the candidate pages."
+                            : "\(total) image(s) detected — review and save selected."
+                        state.runLog += "\n\n--- Done: \(total) image(s) detected ---"
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    state.isRunningCodex = false
+                    state.status = "Error: \(error.localizedDescription)"
+                    state.runLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func pageHasLargeEmptyRegion(textLines: [OCRLine]) -> Bool {
+        guard !textLines.isEmpty else { return true } // fully empty = likely full-page image
+        let binCount = 20
+        var occupied = Array(repeating: false, count: binCount)
+        for line in textLines {
+            guard line.right > 0.15 && line.left < 0.85 else { continue }
+            let centerY = (line.top + line.bottom) / 2.0
+            let bin = min(binCount - 1, max(0, Int(centerY * CGFloat(binCount))))
+            occupied[bin] = true
+        }
+        var idx = 0
+        while idx < binCount {
+            guard !occupied[idx] else { idx += 1; continue }
+            let gapStart = idx
+            while idx < binCount && !occupied[idx] { idx += 1 }
+            let gapLength = idx - gapStart
+            guard gapLength >= 4 else { continue }
+            let hasTextBelow = (0..<gapStart).contains { occupied[$0] }
+            let hasTextAbove = (idx..<binCount).contains { occupied[$0] }
+            // Path 1: classic sandwich — text on both sides at 20%+ gap
+            if hasTextBelow && hasTextAbove { return true }
+            // Path 2: large gap (≥30%) with text below only — catches images at the top of the
+            // page where no main-body text exists above (only a running header that Vision may miss)
+            if hasTextBelow && gapLength >= 6 { return true }
+        }
+        return false
+    }
+
+    // Scans the PDF page's resource dictionary for embedded raster image XObjects.
+    // Returns true immediately when the first Image subtype XObject is found.
+    private func pageHasImageXObject(_ pdfPage: PDFPage) -> Bool {
+        guard let cgPage = pdfPage.pageRef,
+              let pageDic = cgPage.dictionary else { return false }
+        var resourcesRef: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(pageDic, "Resources", &resourcesRef),
+              let resources = resourcesRef else { return false }
+        var xObjectRef: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(resources, "XObject", &xObjectRef),
+              let xObjects = xObjectRef else { return false }
+        var found = false
+        withUnsafeMutablePointer(to: &found) { foundPtr in
+            CGPDFDictionaryApplyBlock(xObjects, { _, objectRef, context in
+                guard let ctx = context else { return true }
+                let ptr = ctx.assumingMemoryBound(to: Bool.self)
+                if ptr.pointee { return false } // already found — stop early
+                var streamRef: CGPDFStreamRef?
+                guard CGPDFObjectGetValue(objectRef, .stream, &streamRef),
+                      let streamRef else { return true }
+                guard let streamDic = CGPDFStreamGetDictionary(streamRef) else { return true }
+                var subtypeName: UnsafePointer<Int8>?
+                if CGPDFDictionaryGetName(streamDic, "Subtype", &subtypeName),
+                   let subtypeName, String(cString: subtypeName) == "Image" {
+                    ptr.pointee = true
+                    return false
+                }
+                return true
+            }, foundPtr)
+        }
+        return found
+    }
+
+    func saveAutoDetectImageResults(_ results: [AutoDetectImageResult]) -> (saved: Int, errors: [String]) {
+        var savedCount = 0
+        var errors: [String] = []
+        let projectURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
+        let layoutFileURL = projectURL.appendingPathComponent("AppleVision/layout-areas.json")
+
+        // Load (or create) existing layout rules
+        var areas: OCRLayoutAreasFile
+        if FileManager.default.fileExists(atPath: layoutFileURL.path),
+           let data = try? Data(contentsOf: layoutFileURL),
+           let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
+            areas = decoded
+        } else {
+            areas = OCRLayoutAreasFile(rules: [])
+            let avURL = projectURL.appendingPathComponent("AppleVision", isDirectory: true)
+            try? FileManager.default.createDirectory(at: avURL, withIntermediateDirectories: true)
+        }
+
+        for result in results where result.imageSelected {
+            let sectionFileName = result.sectionFileName
+            let sectionStem = URL(fileURLWithPath: sectionFileName).deletingPathExtension().lastPathComponent
+            let pageNumber = result.pageNumber
+
+            // 1. Add image rule (skip exact duplicate)
+            let isDupImage = areas.rules.contains { r in
+                r.type == "image" && r.section == sectionFileName && r.page == pageNumber &&
+                abs(r.rect.left - result.imageRect.left) <= 0.01 &&
+                abs(r.rect.top - result.imageRect.top) <= 0.01
+            }
+            if !isDupImage {
+                areas.rules.append(OCRLayoutAreaRule(
+                    type: "image", scope: nil,
+                    section: sectionFileName, page: pageNumber,
+                    rect: result.imageRect, markers: result.label, anchorWord: nil
+                ))
+            }
+
+            // 2. Add image_desc rule if caption is selected
+            if result.captionSelected, let captionRect = result.captionRect, !result.captionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let isDupDesc = areas.rules.contains { r in
+                    r.type == "image_desc" && r.section == sectionFileName && r.page == pageNumber &&
+                    abs(r.rect.left - captionRect.left) <= 0.01 &&
+                    abs(r.rect.top - captionRect.top) <= 0.01
+                }
+                if !isDupDesc {
+                    areas.rules.append(OCRLayoutAreaRule(
+                        type: "image_desc", scope: nil,
+                        section: sectionFileName, page: pageNumber,
+                        rect: captionRect, markers: result.label, anchorWord: nil
+                    ))
+                }
+            }
+
+            // 3. Crop image from PDF and save to Images/
+            let imagesFolder = projectURL
+                .appendingPathComponent("AppleVision/MD/\(sectionStem)/Images", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: imagesFolder, withIntermediateDirectories: true)
+                guard let doc = PDFDocument(url: result.pdfURL),
+                      let pdfPage = doc.page(at: pageNumber - 1),
+                      let fullImage = try? renderPDFPageToCGImage(pdfPage, scale: ocrRenderScale) else {
+                    errors.append("\(sectionFileName) page \(pageNumber): Could not render PDF page")
+                    continue
+                }
+                let cropRect = pixelCropRect(for: result.imageRect, imageWidth: fullImage.width, imageHeight: fullImage.height)
+                guard let croppedImage = fullImage.cropping(to: cropRect) else {
+                    errors.append("\(sectionFileName) page \(pageNumber): Could not crop image region")
+                    continue
+                }
+                let labelSafe = result.label.replacingOccurrences(of: " ", with: "")
+                let imageFilename = "page\(pageNumber)-\(labelSafe).png"
+                try writePNG(croppedImage, to: imagesFolder.appendingPathComponent(imageFilename))
+
+                // 4. Insert image markdown into page*.md at best-effort position
+                if let mdFileURL = result.mdFileURL,
+                   let mdContent = try? String(contentsOf: mdFileURL, encoding: .utf8) {
+                    let captionTrimmed = result.captionText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    var imageMarkdown = "![\(result.label)](Images/\(imageFilename))"
+                    if result.captionSelected && !captionTrimmed.isEmpty {
+                        imageMarkdown += "\n\n*\(captionTrimmed)*"
+                    }
+                    imageMarkdown += "\n\n<br/>"
+                    let updatedContent = insertMarkdownNearImage(
+                        imageMarkdown,
+                        imageRect: result.imageRect,
+                        textObservations: result.pageTextObservations,
+                        into: mdContent
+                    )
+                    try updatedContent.write(to: mdFileURL, atomically: true, encoding: .utf8)
+                }
+
+                savedCount += 1
+            } catch {
+                errors.append("\(sectionFileName) page \(pageNumber): \(error.localizedDescription)")
+            }
+        }
+
+        // Write updated layout rules file
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(areas)
+            try data.write(to: layoutFileURL, options: .atomic)
+        } catch {
+            errors.append("Failed to save layout-areas.json: \(error.localizedDescription)")
+        }
+
+        return (savedCount, errors)
+    }
+
+    private func insertMarkdownNearImage(
+        _ markdown: String,
+        imageRect: OCRLayoutAreaRect,
+        textObservations: [OCRLine],
+        into content: String
+    ) -> String {
+        // Find the last text observation whose center Y is above imageRect.top
+        // (OCR coords: top of page = Y=1.0; imageRect.top is the upper edge of the image)
+        let obsAboveImage = textObservations
+            .filter { ($0.top + $0.bottom) / 2.0 > imageRect.top }
+            .sorted { ($0.top + $0.bottom) / 2.0 < ($1.top + $1.bottom) / 2.0 }
+            .last
+
+        let paragraphs = content.components(separatedBy: "\n\n")
+
+        if let anchorLine = obsAboveImage {
+            let anchor = anchorLine.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let searchPrefix = String(anchor.prefix(min(anchor.count, 20)))
+            var insertAfterIndex = -1
+            for (i, para) in paragraphs.enumerated() {
+                if (!anchor.isEmpty && para.contains(anchor)) ||
+                   (!searchPrefix.isEmpty && para.contains(searchPrefix)) {
+                    insertAfterIndex = i
+                }
+            }
+            if insertAfterIndex >= 0 {
+                var updated = paragraphs
+                updated.insert(markdown, at: insertAfterIndex + 1)
+                return updated.joined(separator: "\n\n")
+            }
+        }
+
+        // Fallback: append at end of file
+        return content.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + markdown
     }
 
     func saveImageDescOCRResults(_ candidates: [ImageDescOCRCandidate]) -> (saved: Int, errors: [String]) {
@@ -3716,6 +4292,7 @@ final class AppState: ObservableObject {
             self.finalizeAIInstructionWindows.removeAll { $0 === closedWindow }
             self.layoutAreaWindows.removeAll { $0 === closedWindow }
             self.configEditorWindows.removeAll { $0 === closedWindow }
+            self.autoDetectImageWindows.removeAll { $0 === closedWindow }
             self.retainedWindowDelegates.removeValue(forKey: ObjectIdentifier(closedWindow))
         }
         retainedWindowDelegates[key] = delegate
@@ -8792,6 +9369,15 @@ struct StepOneLoadPDFView: View {
                             }
 
                             TopBarDropdownRow(
+                                title: "Auto Detect Image by Codex",
+                                systemImage: "photo.badge.magnifyingglass",
+                                isDisabled: !appState.canAutoDetectImageForSelectedFolder,
+                                close: close
+                            ) {
+                                appState.openAutoDetectImageWindow()
+                            }
+
+                            TopBarDropdownRow(
                                 title: "Apply CSS",
                                 systemImage: "paintbrush",
                                 isDisabled: appState.selectedFolderPath.isEmpty,
@@ -10619,6 +11205,407 @@ private struct ImageDescOCRCandidateRow: View {
     }
 }
 
+// MARK: - Auto Detect Image Window
+
+struct AutoDetectImageWindowView: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject var state: AutoDetectImageState
+
+    private var canRunLocal: Bool { !state.isRunning && !state.isDone }
+    private var canRunCodex: Bool { state.localDone && state.hasSelectedCandidates && !state.isRunning && !state.isDone }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Header
+            HStack(alignment: .center, spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white.opacity(0.94))
+                        .frame(width: 58, height: 58)
+                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                    Image(systemName: "photo.badge.magnifyingglass")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(Color.black)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Auto Detect Image by Codex")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(state.status)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+
+                if state.isRunning {
+                    ProgressView().controlSize(.regular)
+                }
+
+                // Phase 1 results: Select All Candidates
+                if state.localDone && !state.isDone && !state.localCandidates.isEmpty {
+                    OCRIconButton(
+                        title: "Select All",
+                        systemImage: "checkmark.square",
+                        backgroundColor: Color(red: 60/255, green: 60/255, blue: 72/255),
+                        foregroundColor: .white,
+                        size: 44
+                    ) {
+                        for i in state.localCandidates.indices { state.localCandidates[i].isSelected = true }
+                    }
+                }
+
+                // Phase 2 results: Select All Results + Save
+                if state.isDone && !state.results.isEmpty {
+                    OCRIconButton(
+                        title: "Select All",
+                        systemImage: "checkmark.square",
+                        backgroundColor: Color(red: 60/255, green: 60/255, blue: 72/255),
+                        foregroundColor: .white,
+                        size: 44
+                    ) {
+                        for i in state.results.indices {
+                            state.results[i].imageSelected = true
+                            if state.results[i].captionRect != nil && !state.results[i].captionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                state.results[i].captionSelected = true
+                            }
+                        }
+                    }
+
+                    let saveReady = state.results.filter { $0.imageSelected }
+                    OCRIconButton(
+                        title: "Save (\(saveReady.count))",
+                        systemImage: "square.and.arrow.down",
+                        backgroundColor: saveReady.isEmpty
+                            ? Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.4)
+                            : Color(red: 53/255, green: 200/255, blue: 90/255),
+                        foregroundColor: .black,
+                        size: 44
+                    ) {
+                        let result = appState.saveAutoDetectImageResults(saveReady)
+                        if result.errors.isEmpty {
+                            state.status = "Saved \(result.saved) image(s) — rules and Markdown updated."
+                        } else {
+                            state.status = "Saved \(result.saved). Errors: \(result.errors.joined(separator: "; "))"
+                        }
+                    }
+                    .disabled(saveReady.isEmpty)
+                }
+
+                // Process Local button
+                OCRIconButton(
+                    title: "Process Local",
+                    systemImage: "eye.trianglebadge.exclamationmark",
+                    backgroundColor: canRunLocal
+                        ? Color(red: 80/255, green: 130/255, blue: 220/255)
+                        : Color(red: 80/255, green: 130/255, blue: 220/255).opacity(0.35),
+                    foregroundColor: .white,
+                    size: 44
+                ) {
+                    appState.runAutoDetectLocalScan(state: state)
+                }
+                .disabled(!canRunLocal)
+
+                // Process by Codex button
+                OCRIconButton(
+                    title: "Process by Codex",
+                    systemImage: "paperplane.fill",
+                    backgroundColor: canRunCodex
+                        ? Color(red: 53/255, green: 200/255, blue: 90/255)
+                        : Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.35),
+                    foregroundColor: .black,
+                    size: 44
+                ) {
+                    appState.runAutoDetectCodexScan(state: state)
+                }
+                .disabled(!canRunCodex)
+
+                OCRIconButton(
+                    title: "Close",
+                    systemImage: "xmark",
+                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                    foregroundColor: .white,
+                    size: 44
+                ) {
+                    NSApp.keyWindow?.close()
+                }
+            }
+
+            // Run log
+            if state.isRunning || !state.runLog.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(state.runLog.isEmpty ? " " : state.runLog)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .id("logEnd")
+                    }
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                    .frame(maxHeight: 140)
+                    .onChange(of: state.runLog) {
+                        withAnimation { proxy.scrollTo("logEnd", anchor: .bottom) }
+                    }
+                }
+            }
+
+            // Content area — three states
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if state.isDone {
+                        // Phase 2 done: show Codex results
+                        if state.results.isEmpty {
+                            Text("Codex found no images in the selected pages. Check the run log for details.")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                .padding(20)
+                        } else {
+                            ForEach($state.results) { $result in
+                                AutoDetectImageResultRow(result: $result, isDone: true)
+                            }
+                        }
+                    } else if state.localDone {
+                        // Phase 1 done: show candidate list for review
+                        if state.localCandidates.isEmpty {
+                            Text("Apple Vision found no pages with large empty regions. If you expect images, try lowering the detection threshold or check section content.")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                .padding(20)
+                        } else {
+                            Text("Apple Vision flagged the pages below as likely containing images. Uncheck any false positives before sending to Codex.")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                .padding(.horizontal, 4)
+                                .padding(.bottom, 4)
+                            ForEach($state.localCandidates) { $candidate in
+                                AutoDetectLocalCandidateRow(candidate: $candidate)
+                            }
+                        }
+                    } else {
+                        // Initial state
+                        Text("Press 'Process Local' to scan sections with Apple Vision and find pages that likely contain images. You can then review the list and remove false positives before sending to Codex.")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            .padding(20)
+                    }
+                }
+                .padding(10)
+            }
+            .background(NewOCRMainPalette.panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+        }
+        .padding(22)
+        .frame(minWidth: 720, minHeight: 520)
+        .background(NewOCRMainPalette.windowBackground)
+        .buttonStyle(NewOCRButtonStyle())
+    }
+}
+
+private struct AutoDetectLocalCandidateRow: View {
+    @Binding var candidate: AutoDetectLocalCandidate
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Toggle("", isOn: $candidate.isSelected)
+                .labelsHidden()
+                .toggleStyle(.checkbox)
+                .padding(.leading, 2)
+
+            Image(systemName: "doc.richtext")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.orange.opacity(0.85))
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(candidate.sectionFileName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("Page \(candidate.pageNumber)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color(red: 80/255, green: 130/255, blue: 220/255))
+                        .clipShape(Capsule())
+                }
+                Text(candidate.detectionNote)
+                    .font(.system(size: 11))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(
+                    candidate.isSelected
+                        ? Color(red: 80/255, green: 130/255, blue: 220/255).opacity(0.55)
+                        : NewOCRMainPalette.stroke,
+                    lineWidth: candidate.isSelected ? 2 : 1
+                )
+        )
+        .opacity(candidate.isSelected ? 1.0 : 0.55)
+        .contentShape(Rectangle())
+        .onTapGesture { candidate.isSelected.toggle() }
+        .onHover { hovering in
+            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+        }
+    }
+}
+
+private struct AutoDetectImageResultRow: View {
+    @Binding var result: AutoDetectImageResult
+    let isDone: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Section / page header
+            HStack(spacing: 8) {
+                Text(result.sectionFileName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Text("Page \(result.pageNumber)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                Text(result.label)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Color(red: 255/255, green: 152/255, blue: 0/255))
+                    .clipShape(Capsule())
+                if result.mdFileURL == nil {
+                    Text("no MD file")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color(red: 255/255, green: 71/255, blue: 71/255).opacity(0.15))
+                        .clipShape(Capsule())
+                }
+            }
+            .padding(.bottom, 8)
+
+            // Image row
+            HStack(alignment: .top, spacing: 10) {
+                if isDone {
+                    Toggle("", isOn: $result.imageSelected)
+                        .labelsHidden()
+                        .toggleStyle(.checkbox)
+                        .padding(.top, 2)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color(red: 255/255, green: 152/255, blue: 0/255))
+                        Text("Image")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                        Text(String(format: "rect: %.2f–%.2f × %.2f–%.2f",
+                                    result.imageRect.left, result.imageRect.right,
+                                    result.imageRect.bottom, result.imageRect.top))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                    }
+                }
+                Spacer()
+            }
+            .padding(10)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(
+                        isDone && result.imageSelected
+                            ? Color(red: 255/255, green: 152/255, blue: 0/255).opacity(0.5)
+                            : NewOCRMainPalette.stroke,
+                        lineWidth: isDone && result.imageSelected ? 2 : 1
+                    )
+            )
+
+            // Caption row (shown when Codex returned caption data or user wants to add one)
+            if isDone && result.captionRect != nil {
+                HStack(alignment: .top, spacing: 10) {
+                    Toggle("", isOn: $result.captionSelected)
+                        .labelsHidden()
+                        .toggleStyle(.checkbox)
+                        .padding(.top, 2)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "captions.bubble.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color(red: 255/255, green: 200/255, blue: 80/255))
+                            Text("Caption / Image Description")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            Text("(edit before saving)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                        }
+
+                        TextEditor(text: $result.captionText)
+                            .font(.system(size: 13))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .scrollContentBackground(.hidden)
+                            .background(NewOCRMainPalette.windowBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                            )
+                            .frame(minHeight: 60)
+                            .padding(.top, 2)
+                    }
+                    Spacer()
+                }
+                .padding(10)
+                .background(NewOCRMainPalette.fieldBackground.opacity(0.7))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(
+                            result.captionSelected
+                                ? Color(red: 255/255, green: 200/255, blue: 80/255).opacity(0.5)
+                                : NewOCRMainPalette.stroke.opacity(0.5),
+                            lineWidth: result.captionSelected ? 2 : 1
+                        )
+                )
+                .opacity(result.captionSelected ? 1.0 : 0.65)
+                .padding(.top, 6)
+            }
+
+            if !result.errorMessage.isEmpty {
+                Text("⚠ \(result.errorMessage)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                    .padding(.top, 4)
+            }
+        }
+        .padding(12)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+}
+
 private struct FinalizeAISectionGroup: View {
     @EnvironmentObject private var appState: AppState
     let sectionTitle: String
@@ -10659,7 +11646,6 @@ private struct FinalizeAISectionGroup: View {
                     .font(.system(size: MainTypography.smallSize, weight: .semibold))
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
                 Text(isSelected ? "Selected" : "Not selected")
-                HStack(alignment: .top, spacing: 10) {
                     .font(.system(size: MainTypography.smallSize, weight: .semibold))
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
                     .padding(.horizontal, 8)
@@ -10871,10 +11857,6 @@ struct PDFListView: View {
     @EnvironmentObject private var appState: AppState
     @State private var autoScrolledFolderPath = ""
     @State private var autoScrolledTargetID: String?
-    private let sectionActionColumnWidth: CGFloat = 156
-    private let sectionNameColumnWidth: CGFloat = 365
-    private let sectionTitleColumnWidth: CGFloat = 200
-    private let sectionCommandColumnWidth: CGFloat = 310
     private let sectionTableWidth: CGFloat = 1118
 
     private var sectionIDsSignature: String {
@@ -10919,173 +11901,7 @@ struct PDFListView: View {
                         ScrollView {
                             LazyVStack(spacing: 0) {
                                 ForEach(Array(appState.pdfFiles.enumerated()), id: \.element.id) { index, item in
-                                HStack(spacing: 12) {
-                                    HStack(spacing: 6) {
-                                        SectionReadyCheckboxButton(isReady: appState.epubReadyBinding(for: item))
-
-                                        SectionUtilityCircleButton(
-                                            title: "Remove section",
-                                            systemImage: "xmark",
-                                            backgroundColor: Color.red.opacity(0.92),
-                                            foregroundColor: Color.white
-                                        ) {
-                                            appState.removeSectionItem(item)
-                                        }
-
-                                        SectionUtilityCircleButton(
-                                            title: "Add manual section below",
-                                            systemImage: "plus",
-                                            backgroundColor: Color.green.opacity(0.92)
-                                        ) {
-                                            appState.addManualSection(after: item)
-                                        }
-                                    }
-                                    .frame(width: sectionActionColumnWidth)
-
-                                    HStack(spacing: 8) {
-                                        Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
-                                            .font(.system(size: 24, weight: .semibold))
-                                            .foregroundStyle(item.isManualSection ? Color.blue : Color.orange)
-                                            .frame(width: 46, height: 36)
-                                            .background(Color.white.opacity(0.12))
-                                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                                            )
-
-                                        if appState.appleVisionMarkdownExists(for: item) {
-                                            Text("MD")
-                                                .font(.system(size: MainTypography.smallSize, weight: .semibold))
-                                                .foregroundStyle(Color.black)
-                                                .frame(width: 46, height: 32)
-                                                .background(Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.84, alpha: 1)))
-                                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                                                .overlay(
-                                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                                        .stroke(Color.black.opacity(0.18), lineWidth: 1)
-                                                )
-                                        }
-
-                                        if item.isManualSection {
-                                            Text(appState.sectionListDisplayName(for: item))
-                                                .font(.system(size: MainTypography.bodySize, weight: .medium))
-                                                .foregroundStyle(NewOCRMainPalette.primaryText)
-                                                .lineLimit(1)
-                                                .truncationMode(.middle)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                        } else {
-                                            SectionFileNameButton(
-                                                title: appState.sectionListDisplayName(for: item)
-                                            ) {
-                                                NSWorkspace.shared.open(item.url)
-                                            }
-                                        }
-                                    }
-                                    .frame(width: sectionNameColumnWidth, alignment: .leading)
-
-                                    TextField("Title", text: appState.titleBinding(for: item))
-                                        .textFieldStyle(.plain)
-                                        .foregroundStyle(Color.black)
-                                        .font(.system(size: MainTypography.bodySize, weight: .medium))
-                                        .tint(Color.yellow)
-                                        .accentColor(Color.yellow)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 9)
-                                        .background(Color.white.opacity(0.94))
-                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                                .stroke(Color.black.opacity(0.18), lineWidth: 1)
-                                        )
-                                        .frame(width: sectionTitleColumnWidth)
-
-                                    Divider()
-                                        .frame(height: 38)
-
-                                    HStack(spacing: 8) {
-                                        if item.isManualSection {
-                                            Color.clear
-                                                .frame(width: 46, height: 36)
-                                                .accessibilityHidden(true)
-                                        } else {
-                                            SectionIconButton(
-                                                title: "Scan Header",
-                                                systemImage: "text.viewfinder",
-                                                isDisabled: appState.isScanningHeaderFooter(for: item),
-                                                backgroundColor: Color.brown.opacity(0.92),
-                                                foregroundColor: Color.white
-                                            ) {
-                                                appState.scanHeaderFooterSample(for: item)
-                                            }
-                                        }
-
-                                        SectionIconButton(
-                                            title: "Process",
-                                            systemImage: "play.fill",
-                                            isDisabled: (!item.isManualSection && !appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || appState.isScanningHeaderFooter(for: item),
-                                            backgroundColor: Color.blue.opacity(0.92),
-                                            foregroundColor: Color.white
-                                        ) {
-                                            appState.beginOCR(for: item)
-                                        }
-
-                                        SectionIconButton(
-                                            title: "Preview",
-                                            systemImage: "eye",
-                                            isDisabled: !appState.appleVisionMarkdownExists(for: item) || appState.isScanningHeaderFooter(for: item),
-                                            backgroundColor: Color.orange.opacity(0.92),
-                                            foregroundColor: Color.black
-                                        ) {
-                                            appState.previewMarkdown(for: item)
-                                        }
-
-                                        if !item.isManualSection && appState.pureOCRSnapshotExists(for: item) {
-                                            SectionIconButton(
-                                                title: "Compare",
-                                                systemImage: "doc.text.magnifyingglass",
-                                                isDisabled: appState.isScanningHeaderFooter(for: item),
-                                                backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255),
-                                                foregroundColor: Color.black
-                                            ) {
-                                                appState.openOCRCompareReport(for: item)
-                                            }
-                                        }
-
-                                        if appState.appleVisionMarkdownExists(for: item) {
-                                            SectionIconButton(
-                                                title: "Clear OCR",
-                                                systemImage: "xmark.circle.fill",
-                                                isDisabled: appState.isScanningHeaderFooter(for: item),
-                                                backgroundColor: Color.red.opacity(0.80),
-                                                foregroundColor: Color.white
-                                            ) {
-                                                appState.clearOCRForSection(item)
-                                            }
-                                        }
-                                    }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .frame(width: sectionCommandColumnWidth, alignment: .leading)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .fill(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
-                                    )
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                                    )
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .frame(width: sectionTableWidth, alignment: .leading)
-                                .background(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
-
-                                    if index < appState.pdfFiles.count - 1 {
-                                        Divider()
-                                            .overlay(NewOCRMainPalette.stroke)
-                                            .frame(width: sectionTableWidth)
-                                    }
+                                    SectionListRowView(item: item, index: index, totalCount: appState.pdfFiles.count)
                                 }
                             }
                             .frame(width: sectionTableWidth)
@@ -11940,6 +12756,278 @@ private final class DraggablePDFView: PDFView {
     private func rememberScrollOrigin(_ origin: NSPoint) {
         rememberedHorizontalOrigin = origin.x
         rememberedVerticalOrigin = origin.y
+    }
+}
+
+private struct SectionListRowView: View {
+    @EnvironmentObject private var appState: AppState
+    let item: PDFFileItem
+    let index: Int
+    let totalCount: Int
+    @State private var showDropdown = false
+
+    private let actionColumnWidth: CGFloat = 156
+    private let nameColumnWidth: CGFloat = 365
+    private let tableWidth: CGFloat = 1118
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                // Left action buttons
+                HStack(spacing: 6) {
+                    SectionReadyCheckboxButton(isReady: appState.epubReadyBinding(for: item))
+
+                    SectionUtilityCircleButton(
+                        title: "Remove section",
+                        systemImage: "xmark",
+                        backgroundColor: Color.red.opacity(0.92),
+                        foregroundColor: Color.white
+                    ) {
+                        appState.removeSectionItem(item)
+                    }
+
+                    SectionUtilityCircleButton(
+                        title: "Add manual section below",
+                        systemImage: "plus",
+                        backgroundColor: Color.green.opacity(0.92)
+                    ) {
+                        appState.addManualSection(after: item)
+                    }
+                }
+                .frame(width: actionColumnWidth)
+
+                // Section name column
+                HStack(spacing: 8) {
+                    Image(systemName: item.isManualSection ? "text.badge.plus" : "doc.richtext")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(item.isManualSection ? Color.blue : Color.orange)
+                        .frame(width: 46, height: 36)
+                        .background(Color.white.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                        )
+
+                    if appState.appleVisionMarkdownExists(for: item) {
+                        Text("MD")
+                            .font(.system(size: MainTypography.smallSize, weight: .semibold))
+                            .foregroundStyle(Color.black)
+                            .frame(width: 46, height: 32)
+                            .background(Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.84, alpha: 1)))
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                            )
+                    }
+
+                    if item.isManualSection {
+                        Text(appState.sectionListDisplayName(for: item))
+                            .font(.system(size: MainTypography.bodySize, weight: .medium))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        SectionFileNameButton(title: appState.sectionListDisplayName(for: item)) {
+                            NSWorkspace.shared.open(item.url)
+                        }
+                    }
+                }
+                .frame(width: nameColumnWidth, alignment: .leading)
+
+                // Title field (flex, fills remaining space)
+                TextField("Title", text: appState.titleBinding(for: item))
+                    .textFieldStyle(.plain)
+                    .foregroundStyle(Color.black)
+                    .font(.system(size: MainTypography.bodySize, weight: .medium))
+                    .tint(Color.yellow)
+                    .accentColor(Color.yellow)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 9)
+                    .background(Color.white.opacity(0.94))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                    )
+                    .frame(maxWidth: .infinity)
+
+                // Preview standalone button
+                SectionIconButton(
+                    title: "Preview",
+                    systemImage: "eye",
+                    isDisabled: !appState.appleVisionMarkdownExists(for: item) || appState.isScanningHeaderFooter(for: item),
+                    backgroundColor: Color.orange.opacity(0.92),
+                    foregroundColor: Color.black
+                ) {
+                    appState.previewMarkdown(for: item)
+                }
+
+                // More actions dropdown button
+                SectionIconButton(
+                    title: "More Actions",
+                    systemImage: "ellipsis.circle",
+                    isDisabled: false,
+                    backgroundColor: Color(white: 0.28),
+                    foregroundColor: Color.white
+                ) {
+                    showDropdown = true
+                }
+                .popover(isPresented: $showDropdown, arrowEdge: .trailing) {
+                    SectionRowDropdownView(item: item, close: { showDropdown = false })
+                        .environmentObject(appState)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(width: tableWidth, alignment: .leading)
+            .background(index.isMultiple(of: 2) ? NewOCRMainPalette.rowBackground : NewOCRMainPalette.alternateRowBackground)
+
+            if index < totalCount - 1 {
+                Divider()
+                    .overlay(NewOCRMainPalette.stroke)
+                    .frame(width: tableWidth)
+            }
+        }
+    }
+}
+
+private struct SectionRowDropdownView: View {
+    @EnvironmentObject private var appState: AppState
+    let item: PDFFileItem
+    let close: () -> Void
+
+    private var hasOCR: Bool { appState.appleVisionMarkdownExists(for: item) }
+    private var isScanning: Bool { appState.isScanningHeaderFooter(for: item) }
+    private var canAutoDetect: Bool {
+        !item.isManualSection && !appState.epubReadySectionIDs.contains(item.id) && hasOCR
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !item.isManualSection {
+                SectionDropdownRow(
+                    title: "Scan Header",
+                    systemImage: "text.viewfinder",
+                    isDisabled: isScanning,
+                    close: close
+                ) {
+                    appState.scanHeaderFooterSample(for: item)
+                }
+            }
+
+            SectionDropdownRow(
+                title: "Process",
+                systemImage: "play.fill",
+                isDisabled: (!item.isManualSection && !appState.headerFooterScanned(for: item) && appState.titleBinding(for: item).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || isScanning,
+                close: close
+            ) {
+                appState.beginOCR(for: item)
+            }
+
+            if !item.isManualSection && appState.pureOCRSnapshotExists(for: item) {
+                SectionDropdownRow(
+                    title: "Compare",
+                    systemImage: "doc.text.magnifyingglass",
+                    isDisabled: isScanning,
+                    close: close
+                ) {
+                    appState.openOCRCompareReport(for: item)
+                }
+            }
+
+            if hasOCR {
+                SectionDropdownRow(
+                    title: "Clear OCR",
+                    systemImage: "xmark.circle.fill",
+                    isDisabled: isScanning,
+                    isDestructive: true,
+                    close: close
+                ) {
+                    appState.clearOCRForSection(item)
+                }
+            }
+
+            if canAutoDetect {
+                Divider()
+                    .overlay(NewOCRMainPalette.stroke)
+                    .padding(.vertical, 2)
+
+                SectionDropdownRow(
+                    title: "Auto Detect Image by Codex",
+                    systemImage: "photo.badge.magnifyingglass",
+                    close: close
+                ) {
+                    appState.openAutoDetectImageWindow(constrainedTo: item)
+                }
+            }
+        }
+        .padding(8)
+        .frame(minWidth: 262, alignment: .leading)
+        .background(NewOCRMainPalette.panelBackground)
+    }
+}
+
+private struct SectionDropdownRow: View {
+    let title: String
+    let systemImage: String
+    var isDisabled: Bool = false
+    var isDestructive: Bool = false
+    let close: () -> Void
+    let action: () -> Void
+    @State private var isHovered = false
+    @State private var isPressed = false
+
+    private var foregroundColor: Color {
+        if isDisabled { return NewOCRMainPalette.tertiaryText }
+        if isDestructive && (isHovered || isPressed) { return Color.white }
+        if isDestructive { return Color(nsColor: NSColor(calibratedRed: 1.0, green: 0.56, blue: 0.56, alpha: 1)) }
+        return NewOCRMainPalette.primaryText
+    }
+
+    private var highlightColor: Color {
+        if isDisabled { return Color.clear }
+        if isPressed { return isDestructive ? Color(nsColor: NSColor(calibratedRed: 0.92, green: 0.36, blue: 0.36, alpha: 1)) : Color.white.opacity(0.30) }
+        if isHovered { return isDestructive ? Color(nsColor: NSColor(calibratedRed: 0.98, green: 0.48, blue: 0.48, alpha: 1)) : Color.white.opacity(0.22) }
+        return Color.clear
+    }
+
+    var body: some View {
+        Button {
+            guard !isDisabled else { return }
+            action()
+            close()
+        } label: {
+            HStack(spacing: 11) {
+                Image(systemName: systemImage)
+                    .font(.system(size: MainTypography.bodySize, weight: .semibold))
+                    .frame(width: 22)
+                Text(title)
+                    .font(.system(size: MainTypography.bodySize, weight: .semibold))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(highlightColor)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            guard !isDisabled else { return }
+            isHovered = hovering
+            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set(); isPressed = false }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in if !isDisabled { isPressed = true } }
+                .onEnded { _ in isPressed = false }
+        )
     }
 }
 

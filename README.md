@@ -169,6 +169,13 @@ Important actions:
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
 - **Define Layout**: draw project-wide OCR layout-area rules for forcing
   header, blockquote, image, footnote, or ignore behavior across sections.
+- **Auto Detect Image by Codex**: automatically scan non-completed sections for
+  image regions. Uses Apple Vision locally to find pages with large empty
+  regions (likely images), then sends those pages to Codex for precise image
+  coordinate detection and caption extraction. Creates `image` and `image_desc`
+  rules in `layout-areas.json` (scope: Page) and inserts cropped image Markdown
+  into the corresponding `page*.md` files. Enabled only when at least one
+  non-completed section has existing OCR output.
 - **Codex OCR (Image Description)**: use Codex vision to re-OCR image caption
   areas from PDF crops and selectively replace them in existing Markdown files.
 - **Build EPUB**: create EPUB from available section/manual Markdown.
@@ -192,29 +199,24 @@ The section list is the ordered book structure. It can contain:
 Each section row supports:
 
 - a user-controlled **Ready for EPUB** checkbox for personal tracking
-- title editing
-- **Process** to open/run OCR for that section
-- **Preview** to open the existing Markdown preview for that section
-- **Compare** to compare pure Apple Vision OCR against edited Markdown for that
-  section when a pure OCR snapshot exists
-- **Scan Header** for section PDFs
+- title editing in a flex field that fills the row
+- **Preview** (eye icon, orange) — standalone icon button, enabled when Markdown output exists
+- **More Actions** (ellipsis icon) — dropdown with all remaining actions:
+  - **Scan Header** — scan header/footer candidates (PDF sections only)
+  - **Process** — open/run OCR for that section
+  - **Compare** — compare pure Apple Vision OCR against edited Markdown (PDF sections with a snapshot only)
+  - **Clear OCR** — remove OCR Markdown files and reset the Ready for EPUB flag (destructive, shown in red)
+  - **Auto Detect Image by Codex** — run image detection for this section only (PDF sections with OCR output that are not marked Ready for EPUB)
 - **+** to add a manual section after that item
 - **X** to remove a section/manual section after confirmation
-- **Clear OCR** to remove OCR Markdown files and reset the Ready for EPUB flag for that section
 - **Clear All OCR** (main window, next to Scan Header All) to remove OCR for all sections at once with confirmation
 
-The command column uses fixed button positions:
+Layout:
 
-- section PDFs reserve positions for **Scan Header**, **Process**, and **Preview**
-- manual sections hide **Scan Header** but keep its space reserved, so **Process** and
-  **Preview** align with PDF rows
 - **Preview** is enabled only when the section already has Markdown output
-- **Compare** appears as an icon next to **Preview** only for non-manual section
-  PDFs that have already saved a pure OCR snapshot
-- **Clear OCR** appears as a red button when Markdown output exists, allowing the user to
-  remove all OCR Markdown files, images, and related resources, and reset the **Ready for EPUB** flag
-- row action buttons use compact icon+text styling with consistent height and
-  accent-colored borders
+- **More Actions** dropdown is always enabled and adapts its items to the section's current state
+- Manual sections hide **Scan Header** and **Auto Detect Image by Codex** from the dropdown
+- Sections marked **Ready for EPUB** hide **Auto Detect Image by Codex** from the dropdown
 
 Display names for real section PDFs include page count:
 
@@ -1221,6 +1223,87 @@ scale is applied to a preview-only content wrapper inside `preview.html`, on top
 of the project stylesheet; EPUB output must not inherit this preview-only font
 size.
 
+## Auto Detect Image by Codex
+
+**Edit PDF > Auto Detect Image by Codex** automatically finds image regions in
+non-completed sections that already have OCR output, creates layout rules for
+them, and immediately inserts the cropped images into the existing Markdown files.
+
+The same action is available per-section via each section row's **More Actions** dropdown
+(ellipsis button). When launched from a section row it scans only that section; the
+window title shows the section name so it is clear which scope is running.
+
+Enabled only when at least one non-completed section has existing `page*.md` output.
+
+### Workflow
+
+1. Open a project with OCR-processed sections (at least one non-completed section
+   with `page*.md` files).
+2. Open **Edit PDF > Auto Detect Image by Codex** (or a section's **More Actions > Auto Detect Image by Codex**).
+3. Press **Process Local**.
+4. **Phase 1 — Dual local detection**: For each page in every eligible section, two
+   checks run in parallel:
+   - **PDF structure check**: scans the page's resource dictionary for embedded raster
+     image XObjects (`CGPDFDictionaryApplyBlock`). Catches photos, scanned figures, and
+     any image imported as a PNG/JPEG into the PDF. Fast and zero false positives.
+   - **Apple Vision gap check**: renders the page at scale 2.0, runs
+     `VNRecognizeTextRequest`, and looks for large vertical gaps in the middle 70% of
+     page width. Two conditions flag a page: a gap ≥ 20% of page height sandwiched
+     between text above and below (for mid-page images), OR a gap ≥ 30% of page height
+     with text below only (for images at the top of the page where no body text exists
+     above). Catches vector illustrations that have no XObject.
+   A page is flagged if **either** check matches. Each candidate row shows which
+   detection method triggered it.
+5. **Review candidates**: Each flagged page appears as a row with a checkbox. Uncheck
+   any false positives (e.g. chapter-opening pages with decorative spacing). At least
+   one page must remain checked for the next step.
+6. Press **Process by Codex** (enabled only when ≥ 1 candidate is checked and Phase 1
+   is complete). Checked pages are rendered to PNG at `OCR_RENDER_SCALE` and sent to
+   Codex. Codex identifies actual image regions (photos, illustrations, diagrams) and
+   any captions directly adjacent to each image. Results are returned as normalized
+   coordinates.
+7. After Codex finishes, results appear as rows — one per detected image, with an
+   optional caption sub-row below it.
+8. Review the results:
+   - The **image row** is checked by default. Uncheck to skip that detection.
+   - The **caption row** is checked when Codex found a clear caption, unchecked
+     (dimmer) when confidence is lower. The caption text is fully editable — correct
+     it before saving.
+9. Press **Save (N)** to apply checked items.
+
+### What Save Does
+
+For each checked image row:
+
+1. **Rule saved** to `layout-areas.json` — an `image` rule with `section` + `page`
+   (scope: Page), normalized rect, and label (e.g. `Image1`).
+2. **Caption rule saved** (if caption row is also checked) — an `image_desc` rule
+   with `section` + `page`, the caption rect, and the same label.
+3. **Image cropped** from the PDF at `OCR_RENDER_SCALE` and saved to
+   `AppleVision/MD/<section>/Images/page<N>-<Label>.png`.
+4. **Markdown inserted** into `AppleVision/MD/<section>/page<N>.md`:
+   - Best-effort position: finds the last OCR text line above the image's top edge
+     and inserts after the matching paragraph in the MD file.
+   - Fallback: appends at end of file if no match is found.
+   - Format: `![Image1](Images/pageN-Image1.png)` followed by `\n\n*caption*` (if
+     caption selected) and `\n\n<br/>`.
+
+Duplicate rules (same type, section, page, and rect within 0.01 tolerance) are
+silently skipped. Temp PNGs in `AppleVision/auto-detect-temp/` are deleted after
+the run; `detect-results.json` is kept for debugging.
+
+### The Saved Rule
+
+The `image` and `image_desc` rules saved by this feature serve as the permanent
+layout rules for future OCR re-runs. If you re-run OCR on the section, NewOCR
+will use these rules to crop the image and place it at the correct position
+automatically — no Codex call is needed for re-processing.
+
+### Model and Config
+
+Uses `CODEX_EXECUTABLE_PATH` and `CODEX_FINALIZE_MODEL` from `config.txt`, same
+as other Codex features. Render scale uses `OCR_RENDER_SCALE`.
+
 ## Codex OCR (Image Description)
 
 **Edit PDF > Codex OCR (Image Description)** sends cropped PDF image caption
@@ -1457,8 +1540,8 @@ Key notes:
 - Buttons should be clear, friendly, and consistent.
 - The main top bar groups commands into compact menus instead of many separate
   buttons: Project contains New, Open, Revert Original, and Open Config; Edit
-  PDF contains Crop, Add Split, Define Layout, Apply CSS, Codex Review,
-  and Clear Scan Report; Build EPUB and Close remain single top-level commands. View EPUB appears in Project when
+  PDF contains Crop, Add Split, Define Layout, Auto Detect Image by Codex,
+  Apply CSS, Codex Review, and Clear Scan Report; Build EPUB and Close remain single top-level commands. View EPUB appears in Project when
   a built EPUB file exists. Top-bar dropdowns are custom popovers, not native
   macOS menus, so rows can use larger text and visible hover/pressed
   highlighting. Project and Edit PDF open immediately when the pointer enters
