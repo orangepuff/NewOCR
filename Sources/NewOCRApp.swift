@@ -17237,15 +17237,15 @@ struct LayoutAreaEditorWindowView: View {
                                     }
                                     Spacer()
 
-                                    Button {
+                                    Button(action: {
                                         state.autoDetectImageCandidates.removeAll { $0.id == candidate.id }
-                                    } label: {
+                                    }) {
                                         Image(systemName: "xmark.circle.fill")
                                             .font(.system(size: 18, weight: .semibold))
-                                            .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                                            .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
+                                            .padding(4)
                                     }
-                                    .buttonStyle(.plain)
-                                    .contentShape(Rectangle())
+                                    .help("Remove this candidate")
                                 }
 
                                 // Thumbnail (300px wide)
@@ -17289,15 +17289,15 @@ struct LayoutAreaEditorWindowView: View {
                                         .foregroundStyle(NewOCRMainPalette.primaryText)
                                     Spacer()
 
-                                    Button {
+                                    Button(action: {
                                         state.autoDetectImageResults.removeAll { $0.id == result.id }
-                                    } label: {
+                                    }) {
                                         Image(systemName: "xmark.circle.fill")
                                             .font(.system(size: 18, weight: .semibold))
-                                            .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                                            .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
+                                            .padding(4)
                                     }
-                                    .buttonStyle(.plain)
-                                    .contentShape(Rectangle())
+                                    .help("Remove this result")
                                 }
                                 TextField("Label", text: $result.label)
                                     .font(.system(size: 12))
@@ -17346,15 +17346,15 @@ struct LayoutAreaEditorWindowView: View {
                                     .foregroundStyle(NewOCRMainPalette.primaryText)
                                 Spacer()
 
-                                Button {
+                                Button(action: {
                                     state.autoDetectFootnotePages.removeAll { $0.id == page.id }
-                                } label: {
+                                }) {
                                     Image(systemName: "xmark.circle.fill")
                                         .font(.system(size: 18, weight: .semibold))
-                                        .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                                        .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
+                                        .padding(4)
                                 }
-                                .buttonStyle(.plain)
-                                .contentShape(Rectangle())
+                                .help("Remove this page")
                             }
                             .padding(12)
                             .background(NewOCRMainPalette.panelBackground)
@@ -17388,15 +17388,15 @@ struct LayoutAreaEditorWindowView: View {
                                             .foregroundStyle(NewOCRMainPalette.primaryText)
                                         Spacer()
 
-                                        Button {
+                                        Button(action: {
                                             state.autoDetectFootnoteResults.removeAll { $0.id == result.id }
-                                        } label: {
+                                        }) {
                                             Image(systemName: "xmark.circle.fill")
                                                 .font(.system(size: 18, weight: .semibold))
-                                                .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                                                .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
+                                                .padding(4)
                                         }
-                                        .buttonStyle(.plain)
-                                        .contentShape(Rectangle())
+                                        .help("Remove this footnote")
                                     }
                                     TextField("Text", text: $result.text)
                                         .font(.system(size: 11))
@@ -17432,15 +17432,15 @@ struct LayoutAreaEditorWindowView: View {
                                             .foregroundStyle(NewOCRMainPalette.primaryText)
                                         Spacer()
 
-                                        Button {
+                                        Button(action: {
                                             state.autoDetectRefmarkResults.removeAll { $0.id == result.id }
-                                        } label: {
+                                        }) {
                                             Image(systemName: "xmark.circle.fill")
                                                 .font(.system(size: 18, weight: .semibold))
-                                                .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
+                                                .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
+                                                .padding(4)
                                         }
-                                        .buttonStyle(.plain)
-                                        .contentShape(Rectangle())
+                                        .help("Remove this refmark")
                                     }
                                     TextField("Anchor", text: $result.anchorWord)
                                         .font(.system(size: 11))
