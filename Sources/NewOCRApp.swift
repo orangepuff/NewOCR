@@ -10659,6 +10659,7 @@ private struct FinalizeAISectionGroup: View {
                     .font(.system(size: MainTypography.smallSize, weight: .semibold))
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
                 Text(isSelected ? "Selected" : "Not selected")
+                HStack(alignment: .top, spacing: 10) {
                     .font(.system(size: MainTypography.smallSize, weight: .semibold))
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
                     .padding(.horizontal, 8)
