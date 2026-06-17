@@ -3389,6 +3389,134 @@ final class AppState: ObservableObject {
         }
     }
 
+    func runAutoDetectFootnoteScanInLayout(_ layoutState: LayoutAreaEditorState) {
+        guard !layoutState.isAutoDetectFootnoteRunning else { return }
+        let selected = layoutState.autoDetectFootnotePages.filter { $0.isSelected }
+        guard !selected.isEmpty else { return }
+
+        let projectPath = selectedFolderPath
+        let executable = codexExecutablePath
+        let model = codexFinalizeModel
+        let renderScale = ocrRenderScale
+        let projectURL = URL(fileURLWithPath: projectPath)
+        let tempDirURL = projectURL.appendingPathComponent("AppleVision/footnote-detect-temp", isDirectory: true)
+
+        layoutState.isAutoDetectFootnoteRunning = true
+        layoutState.autoDetectFootnoteDone = false
+        layoutState.autoDetectFootnoteResults = []
+        layoutState.autoDetectRefmarkResults = []
+        layoutState.autoDetectFootnoteLog = "Rendering \(selected.count) page(s)...\n"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                var filenameToCandidate: [String: AutoDetectFootnotePageCandidate] = [:]
+                var imageFilenames: [String] = []
+                try FileManager.default.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+
+                for candidate in selected {
+                    let sectionStem = URL(fileURLWithPath: candidate.sectionFileName).deletingPathExtension().lastPathComponent
+                    let filename = "\(sectionStem)-page\(candidate.pageNumber).png"
+                    guard let doc = PDFDocument(url: candidate.pdfURL),
+                          let page = doc.page(at: candidate.pageNumber - 1),
+                          let fullImage = try? self.renderPDFPageToCGImage(page, scale: renderScale) else {
+                        DispatchQueue.main.async { layoutState.autoDetectFootnoteLog += "  ⚠ Could not render page \(candidate.pageNumber)\n" }
+                        continue
+                    }
+                    try self.writePNG(fullImage, to: tempDirURL.appendingPathComponent(filename))
+                    imageFilenames.append(filename)
+                    filenameToCandidate[filename] = candidate
+                    DispatchQueue.main.async { layoutState.autoDetectFootnoteLog += "  Rendered \(filename)\n" }
+                }
+
+                guard !imageFilenames.isEmpty else {
+                    DispatchQueue.main.async { layoutState.isAutoDetectFootnoteRunning = false }
+                    return
+                }
+
+                DispatchQueue.main.async { layoutState.autoDetectFootnoteLog += "\nSending to Codex...\n" }
+
+                let fileList = imageFilenames.map { "- \($0)" }.joined(separator: "\n")
+                let prompt = """
+                You are analyzing rendered book pages to identify footnotes and reference markers.
+                The folder 'AppleVision/footnote-detect-temp/' contains PNG files of scanned book pages.
+
+                For each PNG listed below, identify:
+                1. FOOTNOTES: Text regions that appear to be footnote definitions (typically at the bottom of the page, separated from body text). These are usually smaller text at the page bottom.
+                2. REF MARKS: Inline locations within body text where footnote references appear (look for superscript numbers or symbols embedded in the text).
+
+                PNG files to analyze:
+                \(fileList)
+
+                Coordinate system: use normalized fractions (0.0 to 1.0) where (0,0) is the TOP-LEFT corner and (1,1) is the BOTTOM-RIGHT corner. x increases rightward, y increases downward.
+
+                Write your results to 'AppleVision/footnote-detect-temp/detect-results.json':
+                {
+                  "results": [
+                    {
+                      "filename": "section-003-page2.png",
+                      "footnotes": [{"label": "1", "text": "...", "x1": 0.10, "y1": 0.88, "x2": 0.95, "y2": 0.98}],
+                      "refmarks": [{"label": "1", "anchorWord": "example", "x1": 0.35, "y1": 0.15, "x2": 0.40, "y2": 0.18}]
+                    }
+                  ]
+                }
+
+                Rules:
+                - Include ALL listed pages even when nothing found (use empty arrays)
+                - Match footnote/refmark labels so they correspond to each other
+                - Do not modify or delete any PNG files
+                - Write only the JSON file
+                """
+
+                let result = self.runCodexExec(prompt: prompt, projectPath: projectPath, executablePath: executable, model: model) { text in
+                    DispatchQueue.main.async { layoutState.autoDetectFootnoteLog += text }
+                }
+
+                let resultsURL = tempDirURL.appendingPathComponent("detect-results.json")
+
+                DispatchQueue.main.async {
+                    switch result {
+                    case .failure(let error):
+                        layoutState.isAutoDetectFootnoteRunning = false
+                        layoutState.autoDetectFootnoteLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                    case .success:
+                        guard let data = try? Data(contentsOf: resultsURL),
+                              let decoded = try? JSONDecoder().decode(AutoDetectFootnoteCodexResults.self, from: data) else {
+                            layoutState.isAutoDetectFootnoteRunning = false
+                            layoutState.autoDetectFootnoteLog += "\n\n⚠ Could not read detect-results.json"
+                            return
+                        }
+                        var footnotes: [AutoDetectFootnoteResult] = []
+                        var refmarks: [AutoDetectRefmarkResult] = []
+                        for pageResult in decoded.results {
+                            guard let candidate = filenameToCandidate[pageResult.filename] else { continue }
+                            let mdFileURL = candidate.mdFolderURL.appendingPathComponent("page\(candidate.pageNumber).md")
+                            let mdExists = FileManager.default.fileExists(atPath: mdFileURL.path)
+                            for fn in pageResult.footnotes {
+                                let rect = OCRLayoutAreaRect(left: CGFloat(fn.x1), right: CGFloat(fn.x2), top: CGFloat(1.0 - fn.y1), bottom: CGFloat(1.0 - fn.y2))
+                                footnotes.append(AutoDetectFootnoteResult(sectionFileName: candidate.sectionFileName, pageNumber: candidate.pageNumber, label: fn.label, text: fn.text, pdfURL: candidate.pdfURL, mdFileURL: mdExists ? mdFileURL : nil, footnoteRect: rect))
+                            }
+                            for rm in pageResult.refmarks {
+                                let rect = OCRLayoutAreaRect(left: CGFloat(rm.x1), right: CGFloat(rm.x2), top: CGFloat(1.0 - rm.y1), bottom: CGFloat(1.0 - rm.y2))
+                                refmarks.append(AutoDetectRefmarkResult(sectionFileName: candidate.sectionFileName, pageNumber: candidate.pageNumber, label: rm.label, anchorWord: rm.anchorWord, pdfURL: candidate.pdfURL, mdFileURL: mdExists ? mdFileURL : nil, refmarkRect: rect))
+                            }
+                        }
+                        layoutState.autoDetectFootnoteResults = footnotes
+                        layoutState.autoDetectRefmarkResults = refmarks
+                        layoutState.autoDetectFootnoteDone = true
+                        layoutState.isAutoDetectFootnoteRunning = false
+                        layoutState.autoDetectFootnoteLog += "\n\n--- Done: \(footnotes.count) footnote(s), \(refmarks.count) ref mark(s) ---"
+                        try? FileManager.default.removeItem(at: tempDirURL)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    layoutState.isAutoDetectFootnoteRunning = false
+                    layoutState.autoDetectFootnoteLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     func buildAutoDetectFootnotePages(in layoutState: LayoutAreaEditorState) {
         let targetSections = buildScopeTargetSections(
             scope: layoutState.selectedScope,
@@ -17585,26 +17713,48 @@ struct LayoutAreaEditorWindowView: View {
 
             // Action buttons at bottom
             HStack(spacing: 10) {
-                Spacer()
                 if state.isAutoDetectImageRunningLocal || state.isAutoDetectImageRunningCodex {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text(state.isAutoDetectImageRunningLocal ? "Scanning…" : "Running Codex…")
+                        Text(state.isAutoDetectImageRunningLocal ? "Scanning locally…" : "Running Codex…")
                             .font(.system(size: 12))
                             .foregroundStyle(NewOCRMainPalette.secondaryText)
                     }
+                    Spacer()
                 } else if !state.autoDetectImageLocalDone {
-                    Button("Process Local") {
-                        appState.runAutoDetectLocalScanInLayout(state)
+                    let canLocal = !state.autoDetectImageCandidates.isEmpty
+                    Button(action: { appState.runAutoDetectLocalScanInLayout(state) }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "cpu")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("Process Local")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(canLocal ? Color.white : Color.white.opacity(0.4))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 40)
+                        .background(canLocal ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(state.autoDetectImageCandidates.isEmpty)
+                    .buttonStyle(.plain)
+                    .disabled(!canLocal)
                 } else if !state.autoDetectImageDone {
-                    Button("Process Codex") {
-                        appState.runAutoDetectCodexScanInLayout(state)
+                    let canCodex = state.autoDetectImageCandidates.contains { $0.isSelected }
+                    Button(action: { appState.runAutoDetectCodexScanInLayout(state) }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("Process Codex")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(canCodex ? Color.black : Color.black.opacity(0.35))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 40)
+                        .background(canCodex ? Color(red: 53/255, green: 200/255, blue: 90/255) : Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!state.autoDetectImageCandidates.contains { $0.isSelected })
+                    .buttonStyle(.plain)
+                    .disabled(!canCodex)
                 }
             }
             .padding(.top, 4)
@@ -17762,6 +17912,39 @@ struct LayoutAreaEditorWindowView: View {
                     }
                     .padding(12)
                 }
+            }
+
+            // Action button — only shown in page selection phase
+            if !state.autoDetectFootnoteDone {
+                HStack {
+                    if state.isAutoDetectFootnoteRunning {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Running Codex…")
+                                .font(.system(size: 12))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        }
+                        Spacer()
+                    } else {
+                        let canRun = state.autoDetectFootnotePages.contains { $0.isSelected }
+                        Button(action: { appState.runAutoDetectFootnoteScanInLayout(state) }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 15, weight: .semibold))
+                                Text("Process Codex")
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            .foregroundStyle(canRun ? Color.black : Color.black.opacity(0.35))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 40)
+                            .background(canRun ? Color(red: 53/255, green: 200/255, blue: 90/255) : Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.35))
+                            .clipShape(RoundedRectangle(cornerRadius: 9))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canRun)
+                    }
+                }
+                .padding(.top, 4)
             }
         }
         .padding(10)
