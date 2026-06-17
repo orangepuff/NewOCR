@@ -17263,10 +17263,12 @@ struct LayoutAreaEditorWindowView: View {
                                 Button(action: {
                                     state.autoDetectImageCandidates.removeAll { $0.id == candidate.id }
                                 }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 20))
-                                        .foregroundStyle(Color.red)
-                                        .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundStyle(Color.white)
+                                        .frame(width: 28, height: 28)
+                                        .background(Color.red)
+                                        .clipShape(RoundedRectangle(cornerRadius: 7))
                                 }
                                 .padding(8)
                             }
@@ -17312,10 +17314,12 @@ struct LayoutAreaEditorWindowView: View {
                                 Button(action: {
                                     state.autoDetectImageResults.removeAll { $0.id == result.id }
                                 }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 20))
-                                        .foregroundStyle(Color.red)
-                                        .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundStyle(Color.white)
+                                        .frame(width: 28, height: 28)
+                                        .background(Color.red)
+                                        .clipShape(RoundedRectangle(cornerRadius: 7))
                                 }
                                 .padding(8)
                             }
@@ -17366,10 +17370,12 @@ struct LayoutAreaEditorWindowView: View {
                                 Button(action: {
                                     state.autoDetectFootnotePages.removeAll { $0.id == page.id }
                                 }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 20))
-                                        .foregroundStyle(Color.red)
-                                        .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundStyle(Color.white)
+                                        .frame(width: 28, height: 28)
+                                        .background(Color.red)
+                                        .clipShape(RoundedRectangle(cornerRadius: 7))
                                 }
                                 .padding(8)
                             }
