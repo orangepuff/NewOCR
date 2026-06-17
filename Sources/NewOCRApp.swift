@@ -145,6 +145,7 @@ struct AutoDetectImageResult: Identifiable {
     var captionSelected: Bool
     fileprivate var pageTextObservations: [OCRLine]
     var errorMessage: String = ""
+    var thumbnail: NSImage? = nil
 }
 
 final class AutoDetectImageState: ObservableObject {
@@ -420,6 +421,8 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var autoDetectImageLocalDone: Bool = false
     @Published var autoDetectImageDone: Bool = false
     @Published var autoDetectImageLog: String = ""
+    @Published var autoDetectImageSaveStatus: String = ""
+    @Published var isAutoDetectImageSaving: Bool = false
 
     // Auto Detect Footnote state
     @Published var autoDetectFootnotePages: [AutoDetectFootnotePageCandidate] = []
@@ -428,6 +431,8 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var isAutoDetectFootnoteRunning: Bool = false
     @Published var autoDetectFootnoteDone: Bool = false
     @Published var autoDetectFootnoteLog: String = ""
+    @Published var autoDetectFootnoteSaveStatus: String = ""
+    @Published var isAutoDetectFootnoteSaving: Bool = false
 
     private var pdfPageCounts: [String: Int] = [:]
 
@@ -561,12 +566,16 @@ final class LayoutAreaEditorState: ObservableObject {
         autoDetectImageLocalDone = false
         autoDetectImageDone = false
         autoDetectImageLog = ""
+        autoDetectImageSaveStatus = ""
+        isAutoDetectImageSaving = false
         autoDetectFootnotePages = []
         autoDetectFootnoteResults = []
         autoDetectRefmarkResults = []
         isAutoDetectFootnoteRunning = false
         autoDetectFootnoteDone = false
         autoDetectFootnoteLog = ""
+        autoDetectFootnoteSaveStatus = ""
+        isAutoDetectFootnoteSaving = false
     }
 }
 
@@ -3367,7 +3376,8 @@ final class AppState: ObservableObject {
                                     captionRect: captionRect,
                                     captionText: captionText,
                                     captionSelected: !captionText.isEmpty && captionRect != nil,
-                                    pageTextObservations: candidate.pageTextObservations
+                                    pageTextObservations: candidate.pageTextObservations,
+                                    thumbnail: candidate.thumbnail
                                 ))
                             }
                         }
@@ -17687,7 +17697,7 @@ struct LayoutAreaEditorWindowView: View {
                                     }
 
                                     // Thumbnail
-                                    if let img = appState.layoutAreaPreviewCache["\(result.pdfURL.path):\(result.pageNumber)"] {
+                                    if let img = result.thumbnail {
                                         Image(nsImage: img)
                                             .resizable()
                                             .scaledToFit()
@@ -17809,28 +17819,54 @@ struct LayoutAreaEditorWindowView: View {
                 } else {
                     // Results phase — Save button
                     let saveCount = state.autoDetectImageResults.filter { $0.imageSelected }.count
-                    Button(action: {
-                        let toSave = state.autoDetectImageResults
-                        let result = appState.saveAutoDetectImageResults(toSave)
-                        state.autoDetectImageLog = "Saved \(result.saved) image rule(s)."
-                        if !result.errors.isEmpty {
-                            state.autoDetectImageLog += "\nErrors: \(result.errors.joined(separator: "; "))"
+                    VStack(spacing: 6) {
+                        if !state.autoDetectImageSaveStatus.isEmpty {
+                            Text(state.autoDetectImageSaveStatus)
+                                .font(.system(size: 12))
+                                .foregroundStyle(state.autoDetectImageSaveStatus.contains("Error") || state.autoDetectImageSaveStatus.contains("error")
+                                    ? Color.red : NewOCRMainPalette.secondaryText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                    }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "square.and.arrow.down.fill")
-                                .font(.system(size: 15, weight: .semibold))
-                            Text(saveCount > 0 ? "Save (\(saveCount))" : "Save")
-                                .font(.system(size: 14, weight: .semibold))
+                        if state.isAutoDetectImageSaving {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Saving…").font(.system(size: 12)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 40)
+                        } else {
+                            Button(action: {
+                                let toSave = state.autoDetectImageResults
+                                state.isAutoDetectImageSaving = true
+                                state.autoDetectImageSaveStatus = ""
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let result = appState.saveAutoDetectImageResults(toSave)
+                                    DispatchQueue.main.async {
+                                        state.isAutoDetectImageSaving = false
+                                        if result.errors.isEmpty {
+                                            state.autoDetectImageSaveStatus = "✓ Saved \(result.saved) image rule(s) to layout-areas.json"
+                                        } else {
+                                            state.autoDetectImageSaveStatus = "Saved \(result.saved). Errors: \(result.errors.joined(separator: "; "))"
+                                        }
+                                    }
+                                }
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "square.and.arrow.down.fill")
+                                        .font(.system(size: 15, weight: .semibold))
+                                    Text(saveCount > 0 ? "Save (\(saveCount))" : "Save")
+                                        .font(.system(size: 14, weight: .semibold))
+                                }
+                                .foregroundStyle(saveCount > 0 ? Color.white : Color.white.opacity(0.4))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 40)
+                                .background(saveCount > 0 ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
+                                .clipShape(RoundedRectangle(cornerRadius: 9))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(saveCount == 0)
                         }
-                        .foregroundStyle(saveCount > 0 ? Color.white : Color.white.opacity(0.4))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 40)
-                        .background(saveCount > 0 ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
-                        .clipShape(RoundedRectangle(cornerRadius: 9))
                     }
-                    .buttonStyle(.plain)
-                    .disabled(saveCount == 0)
                 }
             }
             .padding(.top, 4)
@@ -18021,30 +18057,55 @@ struct LayoutAreaEditorWindowView: View {
                     // Save button
                     let saveCount = state.autoDetectFootnoteResults.filter { $0.isSelected }.count
                         + state.autoDetectRefmarkResults.filter { $0.isSelected }.count
-                    Button(action: {
-                        let result = appState.saveAutoDetectFootnoteResults(
-                            state.autoDetectFootnoteResults,
-                            state.autoDetectRefmarkResults
-                        )
-                        state.autoDetectFootnoteLog = "Saved \(result.saved) rule(s)."
-                        if !result.errors.isEmpty {
-                            state.autoDetectFootnoteLog += "\nErrors: \(result.errors.joined(separator: "; "))"
+                    VStack(spacing: 6) {
+                        if !state.autoDetectFootnoteSaveStatus.isEmpty {
+                            Text(state.autoDetectFootnoteSaveStatus)
+                                .font(.system(size: 12))
+                                .foregroundStyle(state.autoDetectFootnoteSaveStatus.contains("Error") || state.autoDetectFootnoteSaveStatus.contains("error")
+                                    ? Color.red : NewOCRMainPalette.secondaryText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                    }) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "square.and.arrow.down.fill")
-                                .font(.system(size: 15, weight: .semibold))
-                            Text(saveCount > 0 ? "Save (\(saveCount))" : "Save")
-                                .font(.system(size: 14, weight: .semibold))
+                        if state.isAutoDetectFootnoteSaving {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Saving…").font(.system(size: 12)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 40)
+                        } else {
+                            Button(action: {
+                                let footnotes = state.autoDetectFootnoteResults
+                                let refmarks = state.autoDetectRefmarkResults
+                                state.isAutoDetectFootnoteSaving = true
+                                state.autoDetectFootnoteSaveStatus = ""
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let result = appState.saveAutoDetectFootnoteResults(footnotes, refmarks)
+                                    DispatchQueue.main.async {
+                                        state.isAutoDetectFootnoteSaving = false
+                                        if result.errors.isEmpty {
+                                            state.autoDetectFootnoteSaveStatus = "✓ Saved \(result.saved) rule(s) to layout-areas.json"
+                                        } else {
+                                            state.autoDetectFootnoteSaveStatus = "Saved \(result.saved). Errors: \(result.errors.joined(separator: "; "))"
+                                        }
+                                    }
+                                }
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "square.and.arrow.down.fill")
+                                        .font(.system(size: 15, weight: .semibold))
+                                    Text(saveCount > 0 ? "Save (\(saveCount))" : "Save")
+                                        .font(.system(size: 14, weight: .semibold))
+                                }
+                                .foregroundStyle(saveCount > 0 ? Color.white : Color.white.opacity(0.4))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 40)
+                                .background(saveCount > 0 ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
+                                .clipShape(RoundedRectangle(cornerRadius: 9))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(saveCount == 0)
                         }
-                        .foregroundStyle(saveCount > 0 ? Color.white : Color.white.opacity(0.4))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 40)
-                        .background(saveCount > 0 ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
-                        .clipShape(RoundedRectangle(cornerRadius: 9))
                     }
-                    .buttonStyle(.plain)
-                    .disabled(saveCount == 0)
                 }
             }
             .padding(.top, 4)

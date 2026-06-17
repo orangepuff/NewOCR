@@ -1254,9 +1254,12 @@ are scanned.
    - Caption / Image Description row (if Codex detected a caption), with its own checkbox
    - Red **×** button to remove the result entirely
 7. Click **Save (N)** — blue full-width button — to save selected rules to `layout-areas.json`.
-   - `image` rule saved for each checked image
+   - Runs in background; shows spinner then a ✓ status line on completion
+   - `image` rule saved to `layout-areas.json` for each checked image
    - `image_desc` rule saved for each checked caption
-   - Temp PNGs deleted; `detect-results.json` kept for debugging
+   - Image cropped from PDF and saved to `AppleVision/MD/<section>/Images/page<N>-<Label>.png`
+   - Markdown reference inserted into `page<N>.md` at the image position
+   - During OCR, the app checks `layout-areas.json` for `image` rules on each page; if found, the image region is cropped and skipped from text OCR, and the saved PNG is used directly
 
 ### Scope Behavior
 
