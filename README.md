@@ -666,6 +666,13 @@ cache is also populated so the same session never re-reads disk). The cache is
 shared between the Define Layout preview and the auto-detect candidate panels.
 Delete the `LayoutThumbs/` folder to force a full regeneration.
 
+Define Layout remembers the last-used selection state per project. When closed and
+reopened, it restores: the previewed section, scope (All/Selected/Section/Page),
+checked section paths, current page number, and selected rule type. Saved paths
+that no longer exist (section removed) are silently dropped. State is stored in
+UserDefaults keyed by project folder path, so different projects keep independent
+preferences.
+
 Define Layout is available only after at least one `section-###.pdf` split file
 exists in the project folder. The **Define Layout** button in the main window is
 disabled until at least one section PDF is created.
@@ -1426,10 +1433,14 @@ are available for selection.
 3. A list of all available pages appears (no local scanning needed).
    - Each page shows section name and page number
    - Click the red **×** button to remove a page entirely from the list
-4. **Select pages**: Check which pages you want Codex to analyze for footnotes
-   and ref marks. Use the implicit Select All / Deselect All if available.
+4. **Select pages**: A sub-menu bar above the list shows **"X of Y selected"** count,
+   **Select All**, and **Unselect All** buttons. All pages are checked by default.
    - All pages are checked by default
-5. Press **Process by Codex** (enabled only when ≥ 1 page is checked).
+5. Press **Process Codex** (enabled only when ≥ 1 page is checked).
+   - Before sending to Codex, the app checks whether any selected page's section already has
+     a saved `footnote` or `refmark` rule in `layout-areas.json`. If conflicts are found,
+     an alert lists the affected section file names and blocks the scan — the user must open
+     **View Rules**, delete those existing rules, and then try again.
    - Renders selected pages to PNG at `OCR_RENDER_SCALE`
    - Sends all pages to Codex in a single batch request
 6. **Codex analysis**: Codex identifies:
@@ -1853,14 +1864,13 @@ These are intentional and should not be changed casually:
   scope, section, page, and rectangle position (with 0.01 tolerance). If a duplicate
   is found, a beautiful warning dialog appears with the yellow warning icon, showing
   the existing rule's details. Users can cancel or save anyway despite the duplicate.
-- **Process Local** in the Auto Detect Image panel checks for conflicting existing `image`
-  rules before starting the scan. A conflict exists when any candidate section/page is
-  already covered by a saved rule with `type == "image"` (whether `scope == "all_sections"`,
-  `scope == "section"` matching the candidate's section, or `scope == "page"` matching
-  section + page). If any conflict is found the scan is blocked and an alert lists the
-  affected section file names. The user must remove those rules via **View Rules** before
-  proceeding. This prevents auto-detect from creating duplicate image rules that would
-  conflict with manually drawn ones.
+- **Process Local** in the Auto Detect Image panel and **Process Codex** in the Auto Detect
+  Footnote panel both check for conflicting existing rules before proceeding.
+  - Auto Detect Image checks for `type == "image"` conflicts (scope: all_sections, section, or page match).
+  - Auto Detect Footnote checks for `type == "footnote"` or `type == "refmark"` conflicts (same scope logic).
+  In both cases, if a conflict is found the action is blocked and an alert lists the affected
+  section file names. The user must remove those rules via **View Rules** before proceeding.
+  This prevents auto-detect from creating duplicate rules that conflict with manually drawn ones.
 - Define Layout coordinates are saved and applied relative to cropped
   `section-###.pdf` page `.cropBox` renders. OCR layout rules must not use
   `_original.pdf` coordinates.

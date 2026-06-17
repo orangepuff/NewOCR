@@ -4240,6 +4240,7 @@ final class AppState: ObservableObject {
         let state = LayoutAreaEditorState(pdfItems: sectionItems, initialPDF: initialItem)
         state.savedRuleCount = currentLayoutAreaRuleCount()
         reloadAllSavedRules(into: state)
+        restoreLayoutEditorState(into: state)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -4264,6 +4265,17 @@ final class AppState: ObservableObject {
         }
         layoutAreaWindows.append(window)
         trackRetainedWindow(window)
+
+        // Save selection state when window closes
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self, weak state] _ in
+            guard let self, let state else { return }
+            self.saveLayoutEditorState(state)
+        }
+
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -4560,6 +4572,56 @@ final class AppState: ObservableObject {
             return 0
         }
         return areas.rules.count
+    }
+
+    // MARK: - Layout Editor Preference Persistence
+
+    private func layoutEditorDefaultsKey(_ suffix: String) -> String {
+        "layoutEditor_\(selectedFolderPath)_\(suffix)"
+    }
+
+    func saveLayoutEditorState(_ state: LayoutAreaEditorState) {
+        let d = UserDefaults.standard
+        d.set(state.selectedPDFPath, forKey: layoutEditorDefaultsKey("selectedPDFPath"))
+        d.set(state.selectedScope, forKey: layoutEditorDefaultsKey("selectedScope"))
+        d.set(state.selectedPage, forKey: layoutEditorDefaultsKey("selectedPage"))
+        d.set(state.selectedType, forKey: layoutEditorDefaultsKey("selectedType"))
+        d.set(Array(state.selectedLayoutSectionPaths), forKey: layoutEditorDefaultsKey("selectedLayoutSectionPaths"))
+    }
+
+    func restoreLayoutEditorState(into state: LayoutAreaEditorState) {
+        let d = UserDefaults.standard
+        let validPaths = Set(state.pdfItems.map(\.url.path))
+
+        // Restore selected PDF path (preview section)
+        if let path = d.string(forKey: layoutEditorDefaultsKey("selectedPDFPath")),
+           validPaths.contains(path) {
+            state.selectPDFPath(path)
+        }
+
+        // Restore scope
+        if let scope = d.string(forKey: layoutEditorDefaultsKey("selectedScope")) {
+            state.selectedScope = scope
+        }
+
+        // Restore page
+        let savedPage = d.integer(forKey: layoutEditorDefaultsKey("selectedPage"))
+        if savedPage > 0 {
+            state.selectedPage = min(max(savedPage, 1), max(state.pageCount, 1))
+        }
+
+        // Restore type
+        if let type = d.string(forKey: layoutEditorDefaultsKey("selectedType")), !type.isEmpty {
+            state.selectedType = type
+        }
+
+        // Restore checked section paths (only those still valid)
+        if let paths = d.stringArray(forKey: layoutEditorDefaultsKey("selectedLayoutSectionPaths")) {
+            let restored = Set(paths).intersection(validPaths)
+            if !restored.isEmpty {
+                state.selectedLayoutSectionPaths = restored
+            }
+        }
     }
 
     func reloadAllSavedRules(into state: LayoutAreaEditorState) {
@@ -17096,6 +17158,7 @@ struct LayoutAreaEditorWindowView: View {
     @State private var previewImageKey: String = ""
     @State private var displayedImageKey: String = ""
     @State private var autoDetectDuplicateConflicts: [String] = []
+    @State private var autoDetectFootnoteDuplicateConflicts: [String] = []
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
         ("header", "Section Title", "book.closed"),
@@ -17179,6 +17242,15 @@ struct LayoutAreaEditorWindowView: View {
         } message: {
             let sections = autoDetectDuplicateConflicts.joined(separator: "\n• ")
             Text("The following section(s) already have saved Image rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
+        }
+        .alert("Existing Footnote Rules Found", isPresented: Binding(
+            get: { !autoDetectFootnoteDuplicateConflicts.isEmpty },
+            set: { if !$0 { autoDetectFootnoteDuplicateConflicts = [] } }
+        )) {
+            Button("OK") { autoDetectFootnoteDuplicateConflicts = [] }
+        } message: {
+            let sections = autoDetectFootnoteDuplicateConflicts.joined(separator: "\n• ")
+            Text("The following section(s) already have saved Footnote or Ref Mark rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
         }
     }
 
@@ -17282,6 +17354,30 @@ struct LayoutAreaEditorWindowView: View {
                 state.selectedScope = "section"
             }
         }
+    }
+
+    // Returns section file names that already have saved footnote/refmark rules covering the selected pages.
+    private func conflictingSectionsForAutoDetectFootnote() -> [String] {
+        let fnRules = state.allSavedRules.filter { $0.type == "footnote" || $0.type == "refmark" }
+        guard !fnRules.isEmpty else { return [] }
+        var seen = Set<String>()
+        var conflicts: [String] = []
+        for page in state.autoDetectFootnotePages where page.isSelected {
+            let section = page.sectionFileName
+            guard !seen.contains(section) else { continue }
+            let hasConflict = fnRules.contains { rule in
+                if rule.scope == "all_sections" { return true }
+                guard rule.section == section else { return false }
+                if rule.scope == "section" { return true }
+                if rule.scope == "page" && rule.page == page.pageNumber { return true }
+                return false
+            }
+            if hasConflict {
+                seen.insert(section)
+                conflicts.append(section)
+            }
+        }
+        return conflicts
     }
 
     // Returns section file names that already have a saved "image" rule covering the candidates.
@@ -18213,6 +18309,47 @@ struct LayoutAreaEditorWindowView: View {
     private var autoDetectFootnotePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
             if !state.autoDetectFootnoteDone {
+                // Sub-menu bar: count + select/unselect all
+                let fnTotal = state.autoDetectFootnotePages.count
+                let fnSelected = state.autoDetectFootnotePages.filter(\.isSelected).count
+                HStack(spacing: 12) {
+                    Text("\(fnSelected) of \(fnTotal) selected")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Spacer()
+                    Button("Select All") {
+                        for i in state.autoDetectFootnotePages.indices {
+                            state.autoDetectFootnotePages[i].isSelected = true
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(fnTotal == 0 || fnSelected == fnTotal ? NewOCRMainPalette.tertiaryText : Color.white)
+                    .disabled(fnTotal == 0 || fnSelected == fnTotal)
+
+                    Rectangle()
+                        .fill(NewOCRMainPalette.stroke)
+                        .frame(width: 1, height: 14)
+
+                    Button("Unselect All") {
+                        for i in state.autoDetectFootnotePages.indices {
+                            state.autoDetectFootnotePages[i].isSelected = false
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(fnSelected == 0 ? NewOCRMainPalette.tertiaryText : Color.white)
+                    .disabled(fnSelected == 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+
                 // Page selection
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
@@ -18366,7 +18503,14 @@ struct LayoutAreaEditorWindowView: View {
                     Spacer()
                 } else if !state.autoDetectFootnoteDone {
                     let canRun = state.autoDetectFootnotePages.contains { $0.isSelected }
-                    Button(action: { appState.runAutoDetectFootnoteScanInLayout(state) }) {
+                    Button(action: {
+                        let conflicts = conflictingSectionsForAutoDetectFootnote()
+                        if conflicts.isEmpty {
+                            appState.runAutoDetectFootnoteScanInLayout(state)
+                        } else {
+                            autoDetectFootnoteDuplicateConflicts = conflicts
+                        }
+                    }) {
                         HStack(spacing: 8) {
                             Image(systemName: "paperplane.fill")
                                 .font(.system(size: 15, weight: .semibold))
