@@ -409,6 +409,7 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var selectionRect: CGRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
     @Published var status: String = ""
     @Published var savedRuleCount: Int = 0
+    @Published var allSavedRules: [OCRLayoutAreaRule] = []
     @Published var loadedRule: OCRLayoutAreaRule?
     @Published var markers: String = ""
     @Published var anchorWord: String = ""
@@ -442,6 +443,7 @@ final class LayoutAreaEditorState: ObservableObject {
             (item.url.path, max(PDFDocument(url: item.url)?.pageCount ?? 1, 1))
         })
         selectedPDFPath = initialPDF.url.path
+        selectedLayoutSectionPaths = [initialPDF.url.path]
         selectedPage = max(initialPage, 1)
         pageCount = pdfPageCounts[initialPDF.url.path] ?? 1
         selectedPage = min(selectedPage, pageCount)
@@ -4233,6 +4235,7 @@ final class AppState: ObservableObject {
     private func openLayoutAreasEditorWindow(sectionItems: [PDFFileItem], initialItem: PDFFileItem) {
         let state = LayoutAreaEditorState(pdfItems: sectionItems, initialPDF: initialItem)
         state.savedRuleCount = currentLayoutAreaRuleCount()
+        reloadAllSavedRules(into: state)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -4469,6 +4472,15 @@ final class AppState: ObservableObject {
             return 0
         }
         return areas.rules.count
+    }
+
+    func reloadAllSavedRules(into state: LayoutAreaEditorState) {
+        guard let url = layoutAreasFileURL(),
+              let areas = try? loadLayoutAreasFileForEditing(from: url) else {
+            state.allSavedRules = []
+            return
+        }
+        state.allSavedRules = areas.rules
     }
 
     private func loadLayoutAreasFileForEditing(from url: URL) throws -> OCRLayoutAreasFile {
@@ -16986,8 +16998,7 @@ struct LayoutAreaEditorWindowView: View {
         .onChange(of: state.selectedPage) { _, newValue in
             state.selectedPage = min(max(newValue, 1), max(state.pageCount, 1))
         }
-        .onChange(of: state.selectedScope) { _, newValue in
-            isSelectedSectionsPopoverPresented = newValue == "selected_sections"
+        .onChange(of: state.selectedScope) { _, _ in
             // Reset auto-detect when scope changes
             if activeAutoDetectMode == "image" {
                 state.resetAutoDetect()
@@ -17000,14 +17011,8 @@ struct LayoutAreaEditorWindowView: View {
         .onChange(of: state.selectedPDFPath) { _, _ in
             layoutZoomScale = 1.0
         }
-        .sheet(isPresented: $isSelectedSectionsPopoverPresented) {
-            LayoutAreaSelectedSectionsModal(state: state) {
-                isSelectedSectionsPopoverPresented = false
-            }
-            .environmentObject(appState)
-        }
         .sheet(isPresented: $isLayoutAreasReportPresented) {
-            LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state)
+            LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state, sectionFileName: state.selectedPDFName)
                 .environmentObject(appState)
         }
         .sheet(item: $pendingDuplicateRule) { duplicate in
@@ -17060,6 +17065,7 @@ struct LayoutAreaEditorWindowView: View {
                 state.status = savedStatusMessage(for: state.selectedType)
             }
             state.savedRuleCount = count
+            appState.reloadAllSavedRules(into: state)
         } catch {
             state.status = "Could not save: \(error.localizedDescription)"
         }
@@ -17067,6 +17073,37 @@ struct LayoutAreaEditorWindowView: View {
 
     private func markersApply(to type: String) -> Bool {
         type == "footnote" || type == "refmark" || type == "image" || type == "image_desc"
+    }
+
+    private func toggleSectionCheck(_ item: PDFFileItem) {
+        let path = item.url.path
+        state.selectPDFPath(path)
+
+        if state.selectedScope == "all_sections" {
+            state.selectedLayoutSectionPaths = [path]
+            state.selectedScope = "section"
+            return
+        }
+
+        if state.selectedLayoutSectionPaths.contains(path) {
+            guard state.selectedLayoutSectionPaths.count > 1 else { return }
+            state.selectedLayoutSectionPaths.remove(path)
+            if state.selectedLayoutSectionPaths.count == 1,
+               state.selectedScope == "selected_sections" {
+                state.selectedScope = "section"
+            }
+            if state.selectedPDFPath == path,
+               let next = state.selectedLayoutSectionPaths.first {
+                state.selectPDFPath(next)
+            }
+        } else {
+            state.selectedLayoutSectionPaths.insert(path)
+            if state.selectedLayoutSectionPaths.count > 1 {
+                state.selectedScope = "selected_sections"
+            } else if state.selectedScope != "page" {
+                state.selectedScope = "section"
+            }
+        }
     }
 
     private var header: some View {
@@ -17096,7 +17133,7 @@ struct LayoutAreaEditorWindowView: View {
 
             Spacer()
 
-            Text("\(state.savedRuleCount) saved")
+            Text("\(state.allSavedRules.filter { $0.scope == "all_sections" || $0.section == state.selectedPDFName }.count) saved")
                 .font(.system(size: 18, weight: .semibold).monospacedDigit())
                 .foregroundStyle(NewOCRMainPalette.primaryText)
                 .lineLimit(1)
@@ -17110,17 +17147,6 @@ struct LayoutAreaEditorWindowView: View {
                 size: 44
             ) {
                 isLayoutAreasReportPresented = true
-            }
-            .disabled(state.loadedRule != nil)
-
-            OCRIconButton(
-                title: "Advanced JSON",
-                systemImage: "curlybraces",
-                backgroundColor: state.loadedRule != nil ? Color(red: 255/255, green: 182/255, blue: 216/255).opacity(0.5) : Color(red: 255/255, green: 182/255, blue: 216/255),
-                foregroundColor: .black,
-                size: 44
-            ) {
-                appState.openLayoutAreasJSONEditor()
             }
             .disabled(state.loadedRule != nil)
 
@@ -17147,7 +17173,6 @@ struct LayoutAreaEditorWindowView: View {
                 } else {
                     activeAutoDetectMode = "image"
                     state.selectedType = "image"
-                    state.selectedScope = "section"
                     state.resetAutoDetect()
                     isLoadingAutoDetect = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -17169,7 +17194,6 @@ struct LayoutAreaEditorWindowView: View {
                 } else {
                     activeAutoDetectMode = "footnote"
                     state.selectedType = "footnote"
-                    state.selectedScope = "section"
                     state.resetAutoDetect()
                     isLoadingAutoDetect = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -17218,13 +17242,20 @@ struct LayoutAreaEditorWindowView: View {
 
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 8) {
+                    LayoutAreaAllSectionsRow(
+                        isChecked: state.selectedScope == "all_sections"
+                    ) {
+                        state.selectedScope = "all_sections"
+                        state.selectedLayoutSectionPaths = []
+                    }
                     ForEach(state.pdfItems) { item in
                         LayoutAreaSectionRow(
                             item: item,
-                            isSelected: item.url.path == state.selectedPDFPath,
+                            isChecked: state.selectedLayoutSectionPaths.contains(item.url.path),
+                            isCurrentPreview: item.url.path == state.selectedPDFPath && state.selectedScope != "all_sections",
                             pageCount: state.pageCount(for: item)
                         ) {
-                            state.selectPDFPath(item.url.path)
+                            toggleSectionCheck(item)
                         }
                     }
                 }
@@ -17371,6 +17402,9 @@ struct LayoutAreaEditorWindowView: View {
                     }
                     let pageOnlyTypes: Set<String> = ["image", "image_desc", "blockquote", "footnote", "refmark"]
                     if pageOnlyTypes.contains(type.id) {
+                        if state.selectedScope == "all_sections" {
+                            state.selectedLayoutSectionPaths = Set([state.selectedPDFPath].filter { !$0.isEmpty })
+                        }
                         state.selectedScope = "page"
                     }
                 }
@@ -17478,10 +17512,15 @@ struct LayoutAreaEditorWindowView: View {
         LayoutAreaScopePicker(
             selection: $state.selectedScope,
             selectedCount: state.selectedLayoutSectionItems.count
-        ) {
-            isSelectedSectionsPopoverPresented = true
+        ) { newScope in
+            switch newScope {
+            case "selected_sections":
+                state.selectedLayoutSectionPaths = Set(state.pdfItems.map(\.url.path))
+            default:
+                state.selectedLayoutSectionPaths = Set([state.selectedPDFPath].filter { !$0.isEmpty })
+            }
         }
-        .frame(minWidth: 390, idealWidth: 430, maxWidth: 460)
+        .frame(minWidth: 310, idealWidth: 350, maxWidth: 390)
     }
 
     private var preview: some View {
@@ -18124,8 +18163,7 @@ struct LayoutAreaEditorWindowView: View {
     private func saveCurrentArea() {
         guard let url = state.selectedPDFURL else { return }
         if state.selectedScope == "selected_sections" && state.selectedLayoutSectionItems.isEmpty {
-            state.status = "Choose at least one selected section."
-            isSelectedSectionsPopoverPresented = true
+            state.status = "Choose at least one section."
             return
         }
 
@@ -18217,6 +18255,7 @@ struct LayoutAreaEditorWindowView: View {
                 state.status = savedStatusMessage(for: state.selectedType)
             }
             state.savedRuleCount = count
+            appState.reloadAllSavedRules(into: state)
         } catch {
             state.status = "Could not save: \(error.localizedDescription)"
         }
@@ -18248,6 +18287,7 @@ struct LayoutAreaEditorWindowView: View {
         do {
             try appState.clearLayoutAreaRules()
             state.savedRuleCount = 0
+            state.allSavedRules = []
             state.status = "Cleared layout rules."
         } catch {
             state.status = "Could not clear rules: \(error.localizedDescription)"
@@ -18380,34 +18420,40 @@ private struct LayoutAreaTypeButton: View {
 private struct LayoutAreaScopePicker: View {
     @Binding var selection: String
     let selectedCount: Int
-    let openSelectedSections: () -> Void
+    let onTransitionFromAll: (_ newScope: String) -> Void
     private let options = [
-        ("all_sections", "All"),
         ("selected_sections", "Selected"),
         ("section", "Section"),
         ("page", "Page")
     ]
 
+    private var isAllSections: Bool { selection == "all_sections" }
+
     var body: some View {
         HStack(spacing: 4) {
             ForEach(options, id: \.0) { option in
                 Button {
-                    selection = option.0
-                    if option.0 == "selected_sections" {
-                        openSelectedSections()
+                    if isAllSections {
+                        onTransitionFromAll(option.0)
                     }
+                    selection = option.0
                 } label: {
                     Text(label(for: option))
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(selection == option.0 ? Color.white : NewOCRMainPalette.primaryText)
+                        .foregroundStyle(
+                            isAllSections ? NewOCRMainPalette.tertiaryText :
+                            selection == option.0 ? Color.white :
+                            NewOCRMainPalette.primaryText
+                        )
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
                         .frame(maxWidth: .infinity, minHeight: 34)
                         .padding(.horizontal, 12)
-                        .background(segmentBackground(for: option.0))
+                        .background(isAllSections ? NewOCRMainPalette.rowBackground.opacity(0.35) : segmentBackground(for: option.0))
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .disabled(isAllSections)
             }
         }
         .padding(4)
@@ -18601,7 +18647,8 @@ private struct LayoutAreaSelectedSectionRow: View {
 
 private struct LayoutAreaSectionRow: View {
     let item: PDFFileItem
-    let isSelected: Bool
+    let isChecked: Bool
+    let isCurrentPreview: Bool
     let pageCount: Int
     let action: () -> Void
     @State private var isHovered = false
@@ -18609,10 +18656,15 @@ private struct LayoutAreaSectionRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
+                Image(systemName: isChecked ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(isChecked ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.tertiaryText)
+                    .frame(width: 24)
+
                 Image(systemName: "doc.richtext")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(.orange)
-                    .frame(width: 28)
+                    .frame(width: 26)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(item.url.deletingPathExtension().lastPathComponent)
@@ -18627,12 +18679,6 @@ private struct LayoutAreaSectionRow: View {
                 }
 
                 Spacer(minLength: 0)
-
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
-                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
@@ -18641,27 +18687,78 @@ private struct LayoutAreaSectionRow: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isSelected ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.stroke, lineWidth: isSelected ? 2 : 1)
+                    .stroke(
+                        isCurrentPreview ? Color(red: 30/255, green: 139/255, blue: 238/255) :
+                        isChecked ? Color(red: 30/255, green: 139/255, blue: 238/255).opacity(0.45) :
+                        NewOCRMainPalette.stroke,
+                        lineWidth: isCurrentPreview ? 2 : 1
+                    )
             )
         }
         .buttonStyle(.plain)
         .onHover { hovering in
             isHovered = hovering
-            if hovering {
-                NSCursor.pointingHand.set()
-            } else {
-                NSCursor.arrow.set()
-            }
+            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
         }
     }
 
     private var rowBackground: Color {
-        if isSelected {
-            return Color(red: 30/255, green: 139/255, blue: 238/255).opacity(0.30)
+        if isCurrentPreview { return Color(red: 30/255, green: 139/255, blue: 238/255).opacity(0.28) }
+        if isChecked { return Color(red: 30/255, green: 139/255, blue: 238/255).opacity(0.10) }
+        if isHovered { return NewOCRMainPalette.rowBackground }
+        return NewOCRMainPalette.panelBackground
+    }
+}
+
+private struct LayoutAreaAllSectionsRow: View {
+    let isChecked: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: isChecked ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(isChecked ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.tertiaryText)
+                    .frame(width: 24)
+
+                Image(systemName: "doc.on.doc.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color(red: 30/255, green: 139/255, blue: 238/255))
+                    .frame(width: 26)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("All Sections")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Text("Apply to every section")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+            .background(rowBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isChecked ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.stroke, lineWidth: isChecked ? 2 : 1)
+            )
         }
-        if isHovered {
-            return NewOCRMainPalette.rowBackground
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
         }
+    }
+
+    private var rowBackground: Color {
+        if isChecked { return Color(red: 30/255, green: 139/255, blue: 238/255).opacity(0.28) }
+        if isHovered { return NewOCRMainPalette.rowBackground }
         return NewOCRMainPalette.panelBackground
     }
 }

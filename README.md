@@ -591,9 +591,10 @@ AppleVision/layout-areas.json
 
 ### Layout Area Rules Report
 
-The **View Rules** button in the Define Layout header opens a formatted report of all saved
-layout area rules. The report is styled as a beautiful dark panel, consistent with other
-NewOCR confirmations, and displays each rule with:
+The **View Rules** button in the Define Layout header opens a formatted report of saved
+layout area rules **for the currently selected section** (rules scoped to that specific
+section or to all sections). The report is styled as a beautiful dark panel, consistent
+with other NewOCR confirmations, and displays each rule with:
 
 - **Type icon and label** (Section Title, Quote, Image, Image Description, Footnote, Ignore)
 - **Scope information** (All Sections, specific section, or page number)
@@ -661,9 +662,7 @@ created from the cropped working PDF. It must not preview, save coordinates
 from, or apply OCR layout rules against `_original.pdf`.
 
 This is a main-window action because the same rules can apply across all
-sections. The JSON file is still available from the editor's **Advanced** button
-for debugging or manual adjustment. Advanced JSON opens in a separate retained
-dark editor window and must not close or dismiss the Define Layout window.
+sections.
 
 Supported rule types:
 
@@ -868,7 +867,7 @@ UI notes:
   its text can inherit dark colors and become unreadable. Use the custom
   SwiftUI segmented control style with explicit light text and a clear selected
   background.
-- Advanced JSON, Clear Rules, Save Area, and Close are top-header
+- View Rules, Clear Rules, Save Area, and Close are top-header
   `OCRIconButton` commands, matching Crop/Split-style windows. Do not move
   primary commands to a bottom footer where an expanding preview can push them
   off-screen. Put the saved-rule count in this top header immediately before
@@ -881,11 +880,20 @@ UI notes:
 - Page navigation in Define Layout uses a large custom slider with a
   thicker track and a `Page n / total` readout. Action status text appears in
   the top header (as a third line below the Define Layout title), not in this row.
-- Define Layout scope options are **All**, **Selected**, **Section**, and
-  **Page**. Selected opens a dark modal sheet listing section filenames with
-  preview thumbnails, checkboxes, Select All, Unselect All, OK, and Close buttons.
-  The **OK** button confirms the selected sections and closes the modal; **Close**
-  also closes the modal. Users click **OK** to confirm their section selection.
+- Define Layout scope options are **Selected**, **Section**, and **Page** (shown
+  as tabs on the right). The **All Sections** scope is set by checking the
+  "All Sections" row at the top of the left section list — this means the rule
+  applies to every section (including future ones). Each row in the left panel
+  has a checkbox. Checking multiple individual sections auto-sets scope to
+  **Selected**; checking one section auto-sets to **Section**. **Page** can be
+  chosen manually when at least one section is checked. When "All Sections" is
+  checked, the Selected/Section/Page tabs are disabled and no individual section
+  row shows as highlighted. Clicking **Selected**, **Section**, or **Page** tabs
+  while "All Sections" is checked transitions out of all_sections scope —
+  "Selected" checks all individual sections, "Section"/"Page" checks only the
+  current preview section. Clicking a section row always updates the PDF preview
+  to that section, in addition to toggling its checkbox. The last remaining
+  checked section cannot be unchecked.
 - When Define Layout opens fresh (no rule loaded), the default type is **Quote**
   and the default scope is **Page** (since Quote is a page-only type). Page-only
   types (Quote, Image, Image Description, Footnote, Ref Mark) always start with
@@ -1267,6 +1275,10 @@ are scanned.
 - **Selected Sections**: Scans only checked sections (if "Selected" scope is chosen)
 - **This Section**: Scans only the currently selected section
 - **This Page**: Scans only the currently displayed page
+
+Clicking the **Auto Image** or **Auto Footnote** buttons does not change the
+current section selection or scope. The existing scope/selection is preserved
+and used for scanning.
 
 Changing scope while in Auto Image mode will reset the candidates and re-scan
 based on the new scope.
@@ -1900,13 +1912,12 @@ These are intentional and should not be changed casually:
   popup style as crop and layout refresh confirmations. The report removes the need
   to understand raw JSON structure. Each rule has a blue pencil icon to load it for
   editing.
-- When a rule is loaded for editing, the **View Rules**, **Clear Rules**, and
-  **Advanced JSON** buttons become disabled (grayed out) to prevent conflicting actions
-  mid-edit. The user must save the current rule changes (**Update Rule**) or discard
-  them (**Close**) before viewing the rules report, clearing all rules, or editing raw
-  JSON. This prevents confusing state where multiple rules might be loaded
-  simultaneously or where a user might accidentally clear/modify all rules while
-  editing a specific one.
+- When a rule is loaded for editing, the **View Rules** and **Clear Rules** buttons
+  become disabled (grayed out) to prevent conflicting actions mid-edit. The user must
+  save the current rule changes (**Update Rule**) or discard them (**Close**) before
+  viewing the rules report or clearing all rules. This prevents confusing state where
+  multiple rules might be loaded simultaneously or where a user might accidentally clear
+  all rules while editing a specific one.
 - The Save Area button no longer has a keyboard shortcut (Enter key); it must be
   clicked directly to avoid accidental saves while editing rule parameters.
 - Empty paragraph slots from the paragraph editor should survive Preview and
