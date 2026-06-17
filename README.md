@@ -1236,25 +1236,27 @@ are scanned.
 1. Open **Define Layout** and set your scope (All Sections, Selected Sections,
    This Section, or This Page).
 2. Click the **Auto Image** button in the header.
-3. Press **Process Local** (Phase 1).
+3. Press **Process Local** (Phase 1) — blue full-width button at the bottom of the panel.
    - Scans pages with Apple Vision and PDF structure checks in parallel
    - Flags pages with large empty regions (likely images) or embedded XObjects
-   - Shows candidate pages with checkboxes
+   - Shows candidate pages with thumbnails and checkboxes
 4. Review candidates:
    - Uncheck false positives (pages that are actually text, not images)
    - Click the red **×** button to remove a candidate entirely from the list
    - At least one row must remain checked
-5. Press **Process Codex** (Phase 2, enabled when ≥ 1 candidate is checked).
+5. Press **Process Codex** (Phase 2) — green full-width button, enabled when ≥ 1 candidate is checked.
    - Sends checked pages to Codex for precise image region detection
    - Codex identifies actual images and captions
-6. Review results:
-   - Each detected image appears as a row with checkbox and editable label
-   - Edit labels if needed before saving
-   - Click the red **×** button to remove an image result from the save list
-   - All rows are checked by default
-7. Click **Save (N)** to save rules to `layout-areas.json`.
-   - Rules are saved as `image` and `image_desc` rules with page scope
-   - Temp PNGs are deleted; `detect-results.json` kept for debugging
+6. Review results — each detected image shows:
+   - Checkbox to include/exclude from save
+   - Page thumbnail so you can visually confirm the image
+   - Editable label field (e.g. Image1)
+   - Caption / Image Description row (if Codex detected a caption), with its own checkbox
+   - Red **×** button to remove the result entirely
+7. Click **Save (N)** — blue full-width button — to save selected rules to `layout-areas.json`.
+   - `image` rule saved for each checked image
+   - `image_desc` rule saved for each checked caption
+   - Temp PNGs deleted; `detect-results.json` kept for debugging
 
 ### Scope Behavior
 

@@ -4334,7 +4334,7 @@ final class AppState: ObservableObject {
         return urls.contains { sectionPDFIndex($0) != nil }
     }
 
-    private var layoutAreaPreviewCache: [String: NSImage] = [:]
+    var layoutAreaPreviewCache: [String: NSImage] = [:]
 
     func layoutAreaPreviewImage(pdfURL: URL, pageNumber: Int) -> NSImage? {
         let key = "\(pdfURL.path):\(pageNumber)"
@@ -17667,23 +17667,74 @@ struct LayoutAreaEditorWindowView: View {
                         ForEach($state.autoDetectImageResults) { $result in
                             ZStack(alignment: .topTrailing) {
                                 VStack(alignment: .leading, spacing: 10) {
+                                    // Header row: checkbox + title
                                     HStack(spacing: 12) {
                                         Toggle("", isOn: $result.imageSelected)
                                             .labelsHidden()
                                             .toggleStyle(.checkbox)
                                             .scaleEffect(1.5)
                                             .padding(.top, 2)
-                                        Text("\(result.sectionFileName) Page \(result.pageNumber)")
-                                            .font(.system(size: 13, weight: .semibold))
-                                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("\(result.sectionFileName) Page \(result.pageNumber)")
+                                                .font(.system(size: 13, weight: .semibold))
+                                                .foregroundStyle(NewOCRMainPalette.primaryText)
+                                            Text("Image")
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                        }
                                         Spacer()
                                         Color.clear.frame(width: 32, height: 20)
                                     }
-                                    TextField("Label", text: $result.label)
-                                        .font(.system(size: 12))
-                                        .padding(8)
-                                        .background(NewOCRMainPalette.fieldBackground)
+
+                                    // Thumbnail
+                                    if let img = appState.layoutAreaPreviewCache["\(result.pdfURL.path):\(result.pageNumber)"] {
+                                        Image(nsImage: img)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(height: 220)
+                                            .frame(maxWidth: .infinity)
+                                            .background(Color.black.opacity(0.05))
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    }
+
+                                    // Label field
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "tag")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                        TextField("Image label", text: $result.label)
+                                            .font(.system(size: 12))
+                                    }
+                                    .padding(8)
+                                    .background(NewOCRMainPalette.fieldBackground)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                                    // Caption row (if detected)
+                                    if !result.captionText.isEmpty {
+                                        HStack(alignment: .top, spacing: 10) {
+                                            Toggle("", isOn: $result.captionSelected)
+                                                .labelsHidden()
+                                                .toggleStyle(.checkbox)
+                                                .scaleEffect(1.3)
+                                                .padding(.top, 2)
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text("Caption / Image Description")
+                                                    .font(.system(size: 11, weight: .semibold))
+                                                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                                Text(result.captionText)
+                                                    .font(.system(size: 12))
+                                                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                            }
+                                        }
+                                        .padding(10)
+                                        .background(NewOCRMainPalette.fieldBackground.opacity(0.6))
                                         .clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 6)
+                                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                                        )
+                                    }
                                 }
                                 .padding(12)
                                 .background(NewOCRMainPalette.panelBackground)
@@ -17755,6 +17806,31 @@ struct LayoutAreaEditorWindowView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(!canCodex)
+                } else {
+                    // Results phase — Save button
+                    let saveCount = state.autoDetectImageResults.filter { $0.imageSelected }.count
+                    Button(action: {
+                        let toSave = state.autoDetectImageResults
+                        let result = appState.saveAutoDetectImageResults(toSave)
+                        state.autoDetectImageLog = "Saved \(result.saved) image rule(s)."
+                        if !result.errors.isEmpty {
+                            state.autoDetectImageLog += "\nErrors: \(result.errors.joined(separator: "; "))"
+                        }
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "square.and.arrow.down.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text(saveCount > 0 ? "Save (\(saveCount))" : "Save")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(saveCount > 0 ? Color.white : Color.white.opacity(0.4))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 40)
+                        .background(saveCount > 0 ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(saveCount == 0)
                 }
             }
             .padding(.top, 4)
@@ -17914,38 +17990,64 @@ struct LayoutAreaEditorWindowView: View {
                 }
             }
 
-            // Action button — only shown in page selection phase
-            if !state.autoDetectFootnoteDone {
-                HStack {
-                    if state.isAutoDetectFootnoteRunning {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("Running Codex…")
-                                .font(.system(size: 12))
-                                .foregroundStyle(NewOCRMainPalette.secondaryText)
-                        }
-                        Spacer()
-                    } else {
-                        let canRun = state.autoDetectFootnotePages.contains { $0.isSelected }
-                        Button(action: { appState.runAutoDetectFootnoteScanInLayout(state) }) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "paperplane.fill")
-                                    .font(.system(size: 15, weight: .semibold))
-                                Text("Process Codex")
-                                    .font(.system(size: 14, weight: .semibold))
-                            }
-                            .foregroundStyle(canRun ? Color.black : Color.black.opacity(0.35))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 40)
-                            .background(canRun ? Color(red: 53/255, green: 200/255, blue: 90/255) : Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.35))
-                            .clipShape(RoundedRectangle(cornerRadius: 9))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!canRun)
+            // Action buttons
+            HStack {
+                if state.isAutoDetectFootnoteRunning {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Running Codex…")
+                            .font(.system(size: 12))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
                     }
+                    Spacer()
+                } else if !state.autoDetectFootnoteDone {
+                    let canRun = state.autoDetectFootnotePages.contains { $0.isSelected }
+                    Button(action: { appState.runAutoDetectFootnoteScanInLayout(state) }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("Process Codex")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(canRun ? Color.black : Color.black.opacity(0.35))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 40)
+                        .background(canRun ? Color(red: 53/255, green: 200/255, blue: 90/255) : Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canRun)
+                } else {
+                    // Save button
+                    let saveCount = state.autoDetectFootnoteResults.filter { $0.isSelected }.count
+                        + state.autoDetectRefmarkResults.filter { $0.isSelected }.count
+                    Button(action: {
+                        let result = appState.saveAutoDetectFootnoteResults(
+                            state.autoDetectFootnoteResults,
+                            state.autoDetectRefmarkResults
+                        )
+                        state.autoDetectFootnoteLog = "Saved \(result.saved) rule(s)."
+                        if !result.errors.isEmpty {
+                            state.autoDetectFootnoteLog += "\nErrors: \(result.errors.joined(separator: "; "))"
+                        }
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "square.and.arrow.down.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text(saveCount > 0 ? "Save (\(saveCount))" : "Save")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(saveCount > 0 ? Color.white : Color.white.opacity(0.4))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 40)
+                        .background(saveCount > 0 ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(saveCount == 0)
                 }
-                .padding(.top, 4)
             }
+            .padding(.top, 4)
         }
         .padding(10)
         .frame(minWidth: 0, minHeight: 460)
