@@ -35,3 +35,15 @@ CODEX_FINALIZE_MODEL=gpt-5.4-mini
 
 # New projects made from the New button are created here.
 NEW_PROJECTS_FOLDER=~/Downloads
+
+# Render scale used when rasterising PDF pages for Auto Detect Codex scans
+# (Header, Quote, Footnote, Image). Codex only needs to see layout regions so a
+# lower scale renders and uploads much faster than OCR_RENDER_SCALE.
+# Range: 1.0–8.0. Default: 2.0 (≈ 144 DPI — fast and sufficient for layout detection).
+AUTO_DETECT_RENDER_SCALE=2.0
+
+# Thumbnail size (points) shown in Auto Detect candidate lists (Header, Quote, etc.).
+# Width and height are applied to all auto-detect panels so thumbnails are consistent.
+# Minimum: width 40, height 52. Default: 80 x 104.
+AUTO_DETECT_THUMB_WIDTH=350
+AUTO_DETECT_THUMB_HEIGHT=350

@@ -219,6 +219,54 @@ struct AutoDetectRefmarkResult: Identifiable {
     var errorMessage: String = ""
 }
 
+// MARK: - Auto Detect Quote structs
+
+private struct AutoDetectQuoteCodexResults: Codable {
+    let results: [AutoDetectQuoteCodexPageResult]
+}
+private struct AutoDetectQuoteCodexPageResult: Codable {
+    let filename: String
+    let quotes: [AutoDetectQuoteItem]
+}
+private struct AutoDetectQuoteItem: Codable {
+    let text: String
+    let x1: Double; let y1: Double; let x2: Double; let y2: Double
+}
+
+struct AutoDetectQuoteResult: Identifiable {
+    let id = UUID()
+    let sectionFileName: String
+    let pageNumber: Int
+    var text: String
+    let pdfURL: URL
+    var quoteRect: OCRLayoutAreaRect
+    var isSelected: Bool = true
+}
+
+// MARK: - Auto Detect Header structs
+
+private struct AutoDetectHeaderCodexResults: Codable {
+    let results: [AutoDetectHeaderCodexPageResult]
+}
+private struct AutoDetectHeaderCodexPageResult: Codable {
+    let filename: String
+    let headers: [AutoDetectHeaderItem]
+}
+private struct AutoDetectHeaderItem: Codable {
+    let text: String
+    let x1: Double; let y1: Double; let x2: Double; let y2: Double
+}
+
+struct AutoDetectHeaderResult: Identifiable {
+    let id = UUID()
+    let sectionFileName: String
+    let pageNumber: Int
+    var text: String
+    let pdfURL: URL
+    var headerRect: OCRLayoutAreaRect
+    var isSelected: Bool = true
+}
+
 final class AutoDetectFootnoteState: ObservableObject {
     @Published var pageCandidates: [AutoDetectFootnotePageCandidate] = []
     @Published var footnoteResults: [AutoDetectFootnoteResult] = []
@@ -435,6 +483,25 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var autoDetectFootnoteSaveStatus: String = ""
     @Published var isAutoDetectFootnoteSaving: Bool = false
 
+    // Auto Detect Quote state
+    @Published var autoDetectQuotePages: [AutoDetectFootnotePageCandidate] = []
+    @Published var autoDetectQuoteResults: [AutoDetectQuoteResult] = []
+    @Published var isAutoDetectQuoteRunning: Bool = false
+    @Published var autoDetectQuoteDone: Bool = false
+    @Published var autoDetectQuoteLog: String = ""
+    @Published var autoDetectQuoteSaveStatus: String = ""
+    @Published var isAutoDetectQuoteSaving: Bool = false
+
+    // Auto Detect Header state
+    @Published var autoDetectHeaderPages: [AutoDetectFootnotePageCandidate] = []
+    @Published var autoDetectHeaderResults: [AutoDetectHeaderResult] = []
+    @Published var isAutoDetectHeaderRunning: Bool = false
+    @Published var autoDetectHeaderDone: Bool = false
+    @Published var autoDetectHeaderLog: String = ""
+    @Published var autoDetectHeaderSaveStatus: String = ""
+    @Published var isAutoDetectHeaderSaving: Bool = false
+    @Published var autoDetectHeaderSaved: Bool = false
+
     private var pdfPageCounts: [String: Int] = [:]
 
     init(pdfItems: [PDFFileItem], initialPDF: PDFFileItem, initialPage: Int = 1) {
@@ -578,6 +645,21 @@ final class LayoutAreaEditorState: ObservableObject {
         autoDetectFootnoteLog = ""
         autoDetectFootnoteSaveStatus = ""
         isAutoDetectFootnoteSaving = false
+        autoDetectQuotePages = []
+        autoDetectQuoteResults = []
+        isAutoDetectQuoteRunning = false
+        autoDetectQuoteDone = false
+        autoDetectQuoteLog = ""
+        autoDetectQuoteSaveStatus = ""
+        isAutoDetectQuoteSaving = false
+        autoDetectHeaderPages = []
+        autoDetectHeaderResults = []
+        isAutoDetectHeaderRunning = false
+        autoDetectHeaderDone = false
+        autoDetectHeaderLog = ""
+        autoDetectHeaderSaveStatus = ""
+        isAutoDetectHeaderSaving = false
+        autoDetectHeaderSaved = false
     }
 }
 
@@ -856,6 +938,9 @@ final class AppState: ObservableObject {
     @Published var newProjectsFolderPath: String = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Downloads", isDirectory: true)
         .path
+    @Published var autoDetectThumbWidth: CGFloat = 80
+    @Published var autoDetectThumbHeight: CGFloat = 104
+    @Published var autoDetectRenderScale: CGFloat = 2.0
 
     @Published private(set) var pdfFiles: [PDFFileItem] = []
 
@@ -2375,7 +2460,7 @@ final class AppState: ObservableObject {
         let projectPath = selectedFolderPath
         let executable = codexExecutablePath
         let model = codexFinalizeModel
-        let renderScale = ocrRenderScale
+        let renderScale = autoDetectRenderScale
         let projectURL = URL(fileURLWithPath: projectPath, isDirectory: true)
         let tempDirURL = projectURL.appendingPathComponent("AppleVision/auto-detect-temp", isDirectory: true)
 
@@ -2860,7 +2945,7 @@ final class AppState: ObservableObject {
         let projectPath = selectedFolderPath
         let executable = codexExecutablePath
         let model = codexFinalizeModel
-        let renderScale = ocrRenderScale
+        let renderScale = autoDetectRenderScale
 
         state.isRunning = true
         state.isDone = false
@@ -3257,7 +3342,7 @@ final class AppState: ObservableObject {
         let projectPath = selectedFolderPath
         let executable = codexExecutablePath
         let model = codexFinalizeModel
-        let renderScale = ocrRenderScale
+        let renderScale = autoDetectRenderScale
         let projectURL = URL(fileURLWithPath: projectPath, isDirectory: true)
         let tempDirURL = projectURL.appendingPathComponent("AppleVision/auto-detect-temp", isDirectory: true)
 
@@ -3413,7 +3498,7 @@ final class AppState: ObservableObject {
         let projectPath = selectedFolderPath
         let executable = codexExecutablePath
         let model = codexFinalizeModel
-        let renderScale = ocrRenderScale
+        let renderScale = autoDetectRenderScale
         let projectURL = URL(fileURLWithPath: projectPath)
         let tempDirURL = projectURL.appendingPathComponent("AppleVision/footnote-detect-temp", isDirectory: true)
 
@@ -3580,6 +3665,390 @@ final class AppState: ObservableObject {
         }
 
         layoutState.autoDetectFootnotePages = pages
+    }
+
+    // MARK: - Auto Detect Quote (in Layout)
+
+    func buildAutoDetectQuotePages(in layoutState: LayoutAreaEditorState) {
+        let targetSections = buildScopeTargetSections(
+            scope: layoutState.selectedScope,
+            currentSection: layoutState.selectedPDFItem,
+            selectedSections: layoutState.selectedLayoutSectionItems
+        )
+        var pages: [AutoDetectFootnotePageCandidate] = []
+        let projectURL = URL(fileURLWithPath: selectedFolderPath)
+        let mdBaseURL = projectURL.appendingPathComponent("AppleVision/MD", isDirectory: true)
+        for item in targetSections {
+            let sectionStem = item.url.deletingPathExtension().lastPathComponent
+            let mdFolder = mdBaseURL.appendingPathComponent(sectionStem, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: mdFolder.path) else { continue }
+            let pageFilter: ((Int) -> Bool) = layoutState.selectedScope == "page"
+                ? { $0 == layoutState.selectedPage } : { _ in true }
+            do {
+                let pageFiles = try FileManager.default.contentsOfDirectory(at: mdFolder, includingPropertiesForKeys: nil)
+                    .filter { $0.lastPathComponent.hasPrefix("page") && $0.pathExtension == "md" }
+                    .sorted {
+                        let n1 = Int($0.lastPathComponent.replacingOccurrences(of: "page", with: "").replacingOccurrences(of: ".md", with: "")) ?? 0
+                        let n2 = Int($1.lastPathComponent.replacingOccurrences(of: "page", with: "").replacingOccurrences(of: ".md", with: "")) ?? 0
+                        return n1 < n2
+                    }
+                for pageFile in pageFiles {
+                    if let pageNum = Int(pageFile.lastPathComponent.replacingOccurrences(of: "page", with: "").replacingOccurrences(of: ".md", with: "")),
+                       pageFilter(pageNum) {
+                        pages.append(AutoDetectFootnotePageCandidate(
+                            sectionFileName: item.fileName, pageNumber: pageNum,
+                            pdfURL: item.url, mdFolderURL: mdFolder))
+                    }
+                }
+            } catch { continue }
+        }
+        layoutState.autoDetectQuotePages = pages
+    }
+
+    func runAutoDetectQuoteScanInLayout(_ layoutState: LayoutAreaEditorState) {
+        guard !layoutState.isAutoDetectQuoteRunning else { return }
+        let selected = layoutState.autoDetectQuotePages.filter { $0.isSelected }
+        guard !selected.isEmpty else { return }
+
+        let projectPath = selectedFolderPath
+        let executable = codexExecutablePath
+        let model = codexFinalizeModel
+        let renderScale = autoDetectRenderScale
+        let projectURL = URL(fileURLWithPath: projectPath)
+        let tempDirURL = projectURL.appendingPathComponent("AppleVision/quote-detect-temp", isDirectory: true)
+
+        layoutState.isAutoDetectQuoteRunning = true
+        layoutState.autoDetectQuoteDone = false
+        layoutState.autoDetectQuoteResults = []
+        layoutState.autoDetectQuoteLog = "Rendering \(selected.count) page(s)...\n"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                var filenameToCandidate: [String: AutoDetectFootnotePageCandidate] = [:]
+                var imageFilenames: [String] = []
+                try FileManager.default.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+
+                for candidate in selected {
+                    let sectionStem = URL(fileURLWithPath: candidate.sectionFileName).deletingPathExtension().lastPathComponent
+                    let filename = "\(sectionStem)-page\(candidate.pageNumber).png"
+                    guard let doc = PDFDocument(url: candidate.pdfURL),
+                          let page = doc.page(at: candidate.pageNumber - 1),
+                          let fullImage = try? self.renderPDFPageToCGImage(page, scale: renderScale) else {
+                        DispatchQueue.main.async { layoutState.autoDetectQuoteLog += "  ⚠ Could not render page \(candidate.pageNumber)\n" }
+                        continue
+                    }
+                    try self.writePNG(fullImage, to: tempDirURL.appendingPathComponent(filename))
+                    imageFilenames.append(filename)
+                    filenameToCandidate[filename] = candidate
+                    DispatchQueue.main.async { layoutState.autoDetectQuoteLog += "  Rendered \(filename)\n" }
+                }
+
+                guard !imageFilenames.isEmpty else {
+                    DispatchQueue.main.async { layoutState.isAutoDetectQuoteRunning = false }
+                    return
+                }
+
+                DispatchQueue.main.async { layoutState.autoDetectQuoteLog += "\nSending to Codex...\n" }
+
+                let fileList = imageFilenames.map { "- \($0)" }.joined(separator: "\n")
+                let prompt = """
+                You are analyzing rendered book pages to identify blockquote regions.
+                The folder 'AppleVision/quote-detect-temp/' contains PNG files of scanned book pages.
+
+                For each PNG listed below, identify text regions that appear to be block quotations — \
+                indented passages, pull quotes, or excerpts visually set apart from normal body text \
+                (by indentation, different font size, or surrounding whitespace).
+
+                PNG files to analyze:
+                \(fileList)
+
+                Coordinate system: normalized fractions (0.0–1.0), (0,0) = TOP-LEFT, (1,1) = BOTTOM-RIGHT, y increases downward.
+
+                Write your results to 'AppleVision/quote-detect-temp/detect-results.json':
+                {
+                  "results": [
+                    {
+                      "filename": "section-003-page2.png",
+                      "quotes": [{"text": "complete full text of the entire quote exactly as it appears on the page", "x1": 0.12, "y1": 0.35, "x2": 0.88, "y2": 0.52}]
+                    }
+                  ]
+                }
+
+                Rules:
+                - Include ALL listed pages even when nothing found (use empty arrays for quotes)
+                - The "text" field must contain the COMPLETE full text of the quote, not a summary or preview
+                - If a page has multiple distinct blockquote regions, include each as a separate entry in the quotes array
+                - Do not modify or delete any PNG files
+                - Write only the JSON file
+                """
+
+                let result = self.runCodexExec(prompt: prompt, projectPath: projectPath, executablePath: executable, model: model) { text in
+                    DispatchQueue.main.async { layoutState.autoDetectQuoteLog += text }
+                }
+
+                let resultsURL = tempDirURL.appendingPathComponent("detect-results.json")
+
+                DispatchQueue.main.async {
+                    switch result {
+                    case .failure(let error):
+                        layoutState.isAutoDetectQuoteRunning = false
+                        layoutState.autoDetectQuoteLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                    case .success:
+                        guard let data = try? Data(contentsOf: resultsURL),
+                              let decoded = try? JSONDecoder().decode(AutoDetectQuoteCodexResults.self, from: data) else {
+                            layoutState.isAutoDetectQuoteRunning = false
+                            layoutState.autoDetectQuoteLog += "\n\n⚠ Could not read detect-results.json"
+                            return
+                        }
+                        var quotes: [AutoDetectQuoteResult] = []
+                        for pageResult in decoded.results {
+                            guard let candidate = filenameToCandidate[pageResult.filename] else { continue }
+                            for q in pageResult.quotes {
+                                let rect = OCRLayoutAreaRect(left: CGFloat(q.x1), right: CGFloat(q.x2), top: CGFloat(1.0 - q.y1), bottom: CGFloat(1.0 - q.y2))
+                                quotes.append(AutoDetectQuoteResult(sectionFileName: candidate.sectionFileName, pageNumber: candidate.pageNumber, text: q.text, pdfURL: candidate.pdfURL, quoteRect: rect))
+                            }
+                        }
+                        layoutState.autoDetectQuoteResults = quotes
+                        layoutState.autoDetectQuoteDone = true
+                        layoutState.isAutoDetectQuoteRunning = false
+                        layoutState.autoDetectQuoteLog += "\n\n--- Done: \(quotes.count) quote region(s) ---"
+                        try? FileManager.default.removeItem(at: tempDirURL)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    layoutState.isAutoDetectQuoteRunning = false
+                    layoutState.autoDetectQuoteLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func saveAutoDetectQuoteResults(_ quotes: [AutoDetectQuoteResult]) -> (saved: Int, errors: [String]) {
+        var savedCount = 0
+        var errors: [String] = []
+        let projectURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
+        let layoutFileURL = projectURL.appendingPathComponent("AppleVision/layout-areas.json")
+        var areas: OCRLayoutAreasFile
+        if FileManager.default.fileExists(atPath: layoutFileURL.path),
+           let data = try? Data(contentsOf: layoutFileURL),
+           let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
+            areas = decoded
+        } else {
+            areas = OCRLayoutAreasFile(rules: [])
+            let avURL = projectURL.appendingPathComponent("AppleVision", isDirectory: true)
+            try? FileManager.default.createDirectory(at: avURL, withIntermediateDirectories: true)
+        }
+        for quote in quotes where quote.isSelected {
+            let isDup = areas.rules.contains { r in
+                r.type == "blockquote" && r.section == quote.sectionFileName && r.page == quote.pageNumber &&
+                abs(r.rect.left - quote.quoteRect.left) <= 0.01 && abs(r.rect.top - quote.quoteRect.top) <= 0.01
+            }
+            if !isDup {
+                areas.rules.append(OCRLayoutAreaRule(type: "blockquote", scope: nil, section: quote.sectionFileName, page: quote.pageNumber, rect: quote.quoteRect, markers: nil, anchorWord: nil))
+                savedCount += 1
+            }
+        }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(areas)
+            try data.write(to: layoutFileURL, options: .atomic)
+        } catch {
+            errors.append("Failed to save layout-areas.json: \(error.localizedDescription)")
+        }
+        return (savedCount, errors)
+    }
+
+    // MARK: - Auto Detect Header (in Layout)
+
+    func buildAutoDetectHeaderPages(in layoutState: LayoutAreaEditorState) {
+        let targetSections = buildScopeTargetSections(
+            scope: layoutState.selectedScope,
+            currentSection: layoutState.selectedPDFItem,
+            selectedSections: layoutState.selectedLayoutSectionItems
+        )
+        var pages: [AutoDetectFootnotePageCandidate] = []
+        let projectURL = URL(fileURLWithPath: selectedFolderPath)
+        let mdBaseURL = projectURL.appendingPathComponent("AppleVision/MD", isDirectory: true)
+        for item in targetSections {
+            let sectionStem = item.url.deletingPathExtension().lastPathComponent
+            let mdFolder = mdBaseURL.appendingPathComponent(sectionStem, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: mdFolder.path) else { continue }
+            // Header rules only apply to page 1 — always use page 1 regardless of scope
+            let page1MD = mdFolder.appendingPathComponent("page1.md")
+            guard FileManager.default.fileExists(atPath: page1MD.path) else { continue }
+            pages.append(AutoDetectFootnotePageCandidate(
+                sectionFileName: item.fileName, pageNumber: 1,
+                pdfURL: item.url, mdFolderURL: mdFolder))
+        }
+        layoutState.autoDetectHeaderPages = pages
+    }
+
+    func runAutoDetectHeaderScanInLayout(_ layoutState: LayoutAreaEditorState) {
+        guard !layoutState.isAutoDetectHeaderRunning else { return }
+        let selected = layoutState.autoDetectHeaderPages.filter { $0.isSelected }
+        guard !selected.isEmpty else { return }
+
+        let projectPath = selectedFolderPath
+        let executable = codexExecutablePath
+        let model = codexFinalizeModel
+        let renderScale = autoDetectRenderScale
+        let projectURL = URL(fileURLWithPath: projectPath)
+        let tempDirURL = projectURL.appendingPathComponent("AppleVision/header-detect-temp", isDirectory: true)
+
+        layoutState.isAutoDetectHeaderRunning = true
+        layoutState.autoDetectHeaderDone = false
+        layoutState.autoDetectHeaderResults = []
+        layoutState.autoDetectHeaderLog = "Rendering \(selected.count) page(s)...\n"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                var filenameToCandidate: [String: AutoDetectFootnotePageCandidate] = [:]
+                var imageFilenames: [String] = []
+                try FileManager.default.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+
+                for candidate in selected {
+                    let sectionStem = URL(fileURLWithPath: candidate.sectionFileName).deletingPathExtension().lastPathComponent
+                    let filename = "\(sectionStem)-page1.png"
+                    guard let doc = PDFDocument(url: candidate.pdfURL),
+                          let page = doc.page(at: 0),
+                          let fullImage = try? self.renderPDFPageToCGImage(page, scale: renderScale) else {
+                        DispatchQueue.main.async { layoutState.autoDetectHeaderLog += "  ⚠ Could not render \(candidate.sectionFileName) page 1\n" }
+                        continue
+                    }
+                    try self.writePNG(fullImage, to: tempDirURL.appendingPathComponent(filename))
+                    imageFilenames.append(filename)
+                    filenameToCandidate[filename] = candidate
+                    DispatchQueue.main.async { layoutState.autoDetectHeaderLog += "  Rendered \(filename)\n" }
+                }
+
+                guard !imageFilenames.isEmpty else {
+                    DispatchQueue.main.async { layoutState.isAutoDetectHeaderRunning = false }
+                    return
+                }
+
+                DispatchQueue.main.async { layoutState.autoDetectHeaderLog += "\nSending to Codex...\n" }
+
+                let fileList = imageFilenames.map { "- \($0)" }.joined(separator: "\n")
+                let prompt = """
+                You are analyzing the first page of book sections to identify section title / chapter heading regions.
+                The folder 'AppleVision/header-detect-temp/' contains PNG files of scanned first pages.
+
+                For each PNG listed below, identify the primary section title or chapter heading — \
+                the large display text that names this chapter or section (usually near the top of the page, \
+                larger or bolder than body text).
+
+                PNG files to analyze:
+                \(fileList)
+
+                Coordinate system: normalized fractions (0.0–1.0), (0,0) = TOP-LEFT, (1,1) = BOTTOM-RIGHT, y increases downward.
+
+                Write your results to 'AppleVision/header-detect-temp/detect-results.json':
+                {
+                  "results": [
+                    {
+                      "filename": "section-003-page1.png",
+                      "headers": [{"text": "Chapter Title Text", "x1": 0.10, "y1": 0.08, "x2": 0.90, "y2": 0.18}]
+                    }
+                  ]
+                }
+
+                Rules:
+                - Include ALL listed pages even when nothing found (use empty arrays for headers)
+                - Detect at most one primary heading per page
+                - Do not modify or delete any PNG files
+                - Write only the JSON file
+                """
+
+                let result = self.runCodexExec(prompt: prompt, projectPath: projectPath, executablePath: executable, model: model) { text in
+                    DispatchQueue.main.async { layoutState.autoDetectHeaderLog += text }
+                }
+
+                let resultsURL = tempDirURL.appendingPathComponent("detect-results.json")
+
+                DispatchQueue.main.async {
+                    switch result {
+                    case .failure(let error):
+                        layoutState.isAutoDetectHeaderRunning = false
+                        layoutState.autoDetectHeaderLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                        layoutState.autoDetectHeaderDone = true
+                    case .success:
+                        var headers: [AutoDetectHeaderResult] = []
+                        func parseHeaderJSON(_ data: Data) -> AutoDetectHeaderCodexResults? {
+                            if let d = try? JSONDecoder().decode(AutoDetectHeaderCodexResults.self, from: data) { return d }
+                            guard let str = String(data: data, encoding: .utf8) else { return nil }
+                            var lines = str.components(separatedBy: .newlines)
+                            if lines.first?.trimmingCharacters(in: .whitespaces).hasPrefix("```") == true { lines.removeFirst() }
+                            if lines.last?.trimmingCharacters(in: .whitespaces) == "```" { lines.removeLast() }
+                            guard let stripped = lines.joined(separator: "\n").data(using: .utf8) else { return nil }
+                            return try? JSONDecoder().decode(AutoDetectHeaderCodexResults.self, from: stripped)
+                        }
+                        if let data = try? Data(contentsOf: resultsURL),
+                           let decoded = parseHeaderJSON(data) {
+                            for pageResult in decoded.results {
+                                guard let candidate = filenameToCandidate[pageResult.filename] else { continue }
+                                for h in pageResult.headers {
+                                    let rect = OCRLayoutAreaRect(left: CGFloat(h.x1), right: CGFloat(h.x2), top: CGFloat(1.0 - h.y1), bottom: CGFloat(1.0 - h.y2))
+                                    headers.append(AutoDetectHeaderResult(sectionFileName: candidate.sectionFileName, pageNumber: 1, text: h.text, pdfURL: candidate.pdfURL, headerRect: rect))
+                                }
+                            }
+                        } else {
+                            layoutState.autoDetectHeaderLog += "\n\n⚠ Could not read or parse detect-results.json"
+                        }
+                        layoutState.autoDetectHeaderResults = headers
+                        layoutState.autoDetectHeaderDone = true
+                        layoutState.isAutoDetectHeaderRunning = false
+                        layoutState.autoDetectHeaderLog += "\n\n--- Done: \(headers.count) header(s) ---"
+                        try? FileManager.default.removeItem(at: tempDirURL)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    layoutState.isAutoDetectHeaderRunning = false
+                    layoutState.autoDetectHeaderLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func saveAutoDetectHeaderResults(_ headers: [AutoDetectHeaderResult]) -> (saved: Int, duplicates: Int, errors: [String]) {
+        var savedCount = 0
+        var dupCount = 0
+        var errors: [String] = []
+        let projectURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
+        let layoutFileURL = projectURL.appendingPathComponent("AppleVision/layout-areas.json")
+        var areas: OCRLayoutAreasFile
+        if FileManager.default.fileExists(atPath: layoutFileURL.path),
+           let data = try? Data(contentsOf: layoutFileURL),
+           let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
+            areas = decoded
+        } else {
+            areas = OCRLayoutAreasFile(rules: [])
+            let avURL = projectURL.appendingPathComponent("AppleVision", isDirectory: true)
+            try? FileManager.default.createDirectory(at: avURL, withIntermediateDirectories: true)
+        }
+        for header in headers where header.isSelected {
+            let isDup = areas.rules.contains { r in
+                r.type == "header" && r.section == header.sectionFileName &&
+                abs(r.rect.left - header.headerRect.left) <= 0.01 && abs(r.rect.top - header.headerRect.top) <= 0.01
+            }
+            if isDup {
+                dupCount += 1
+            } else {
+                areas.rules.append(OCRLayoutAreaRule(type: "header", scope: nil, section: header.sectionFileName, page: 1, rect: header.headerRect, markers: nil, anchorWord: nil))
+                savedCount += 1
+            }
+        }
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(areas)
+            try data.write(to: layoutFileURL, options: .atomic)
+        } catch {
+            errors.append("Failed to save layout-areas.json: \(error.localizedDescription)")
+        }
+        return (savedCount, dupCount, errors)
     }
 
     private func codexFinalizeReport(from output: String) -> String {
@@ -4387,6 +4856,24 @@ final class AppState: ObservableObject {
         try? jpeg.write(to: fileURL)
     }
 
+    func openLayoutAreaThumb(pdfURL: URL, pageNumber: Int) {
+        // Prefer the on-disk cache file so Preview.app opens the full image.
+        if let diskURL = layoutThumbFileURL(pdfURL: pdfURL, pageNumber: pageNumber),
+           FileManager.default.fileExists(atPath: diskURL.path) {
+            NSWorkspace.shared.open(diskURL)
+            return
+        }
+        // Ensure the image is rendered and cached, then save to a temp file.
+        guard let image = layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: pageNumber),
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else { return }
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(pdfURL.deletingPathExtension().lastPathComponent)-page\(pageNumber).jpg")
+        try? jpeg.write(to: tmp)
+        NSWorkspace.shared.open(tmp)
+    }
+
     func layoutAreaPreviewImage(pdfURL: URL, pageNumber: Int) -> NSImage? {
         let key = "\(pdfURL.path):\(pageNumber)"
         if let cached = layoutAreaPreviewCache[key] { return cached }
@@ -4566,7 +5053,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func currentLayoutAreaRuleCount() -> Int {
+    func currentLayoutAreaRuleCount() -> Int {
         guard let url = layoutAreasFileURL(),
               let areas = try? loadLayoutAreasFileForEditing(from: url) else {
             return 0
@@ -4615,12 +5102,13 @@ final class AppState: ObservableObject {
             state.selectedType = type
         }
 
-        // Restore checked section paths (only those still valid)
+        // Restore checked section paths (only those still valid).
+        // Always apply even when restored is empty so that "all_sections" scope
+        // correctly shows no individual section as checked.
         if let paths = d.stringArray(forKey: layoutEditorDefaultsKey("selectedLayoutSectionPaths")) {
-            let restored = Set(paths).intersection(validPaths)
-            if !restored.isEmpty {
-                state.selectedLayoutSectionPaths = restored
-            }
+            state.selectedLayoutSectionPaths = Set(paths).intersection(validPaths)
+        } else if state.selectedScope == "all_sections" {
+            state.selectedLayoutSectionPaths = []
         }
     }
 
@@ -7219,19 +7707,6 @@ final class AppState: ObservableObject {
                     self.bulkOCRCompletedCount = completed
                     self.isBulkOCRFinished = true
                     self.loadPDFFiles()
-                    if totalFlagged > 0 {
-                        var reviewSections: [(name: String, report: OCRReviewReport)] = []
-                        for item in sectionItems {
-                            let mdFolder = self.appleVisionOutputFolderURL(for: item.url)
-                                .appendingPathComponent(item.url.deletingPathExtension().lastPathComponent, isDirectory: true)
-                            if let report = self.loadOCRReviewReport(from: mdFolder), report.flaggedCount > 0 {
-                                reviewSections.append((name: item.url.deletingPathExtension().lastPathComponent, report: report))
-                            }
-                        }
-                        if !reviewSections.isEmpty {
-                            self.openOCRReviewReport(sections: reviewSections)
-                        }
-                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -7469,8 +7944,9 @@ final class AppState: ObservableObject {
                 }
             }
             let builtPageText = buildMarkdownPage(from: cleanedLines, imageRegions: imageRegions, layoutRules: pageLayoutRules)
-            let pageText = pageIndex == 0
-                ? applyMarkdownTitle(cleanDocumentTitle, to: builtPageText, replaceExistingHeading: layoutAreaRules(pageLayoutRules, type: "header").isEmpty)
+            let hasHeaderRule = !layoutAreaRules(pageLayoutRules, type: "header").isEmpty
+            let pageText = (pageIndex == 0 && !hasHeaderRule)
+                ? applyMarkdownTitle(cleanDocumentTitle, to: builtPageText, replaceExistingHeading: true)
                 : builtPageText
 
             pageMarkdownItems.append(
@@ -8425,6 +8901,22 @@ final class AppState: ObservableObject {
                 return $0.top > $1.top
             }
             return $0.left < $1.left
+        }
+
+        // Remove body text lines whose content duplicates a detected header line.
+        // Codex's header rect may not be pixel-perfect, so the same heading text can
+        // appear once as .header and again as a .text line right below it.
+        let headerTexts = Set(blocks.compactMap { block -> String? in
+            if case .header(let l) = block { return l.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            return nil
+        })
+        if !headerTexts.isEmpty {
+            blocks = blocks.filter { block in
+                if case .text(let l) = block {
+                    return !headerTexts.contains(l.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+                }
+                return true
+            }
         }
 
         var rendered: [String] = []
@@ -9642,6 +10134,9 @@ final class AppState: ObservableObject {
         codexFinalizeModel = values["CODEX_FINALIZE_MODEL"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty ?? defaultCodexFinalizeModel
+        autoDetectThumbWidth = CGFloat(parseDouble(values["AUTO_DETECT_THUMB_WIDTH"], defaultValue: 80, minimum: 40))
+        autoDetectThumbHeight = CGFloat(parseDouble(values["AUTO_DETECT_THUMB_HEIGHT"], defaultValue: 104, minimum: 52))
+        autoDetectRenderScale = CGFloat(min(parseDouble(values["AUTO_DETECT_RENDER_SCALE"], defaultValue: 2.0, minimum: 1.0), 8.0))
     }
 
     private func readKeyValueConfig(from url: URL) -> [String: String] {
@@ -9758,7 +10253,7 @@ private enum OCRTypography {
 
 private enum MainTypography {
     static let headingSize: CGFloat = 22
-    static let bodySize: CGFloat = 17
+    static let bodySize: CGFloat = 14
     static let buttonSize: CGFloat = 17
     static let smallSize: CGFloat = 15
     static let badgeSize: CGFloat = 16
@@ -11196,7 +11691,7 @@ private struct LayoutAreasReportView: View {
                                     typeColor: typeColors[rule.type] ?? .gray,
                                     typeIcon: typeIcons[rule.type] ?? "rectangle.dashed",
                                     typeLabel: typeLabels[rule.type] ?? rule.type,
-                                    showLoadButton: sectionFileName == nil,
+                                    showLoadButton: state != nil,
                                     onLoad: {
                                         state?.loadRule(rule)
                                         isPresented = false
@@ -11466,7 +11961,7 @@ private struct LayoutAreaRuleRow: View {
                 .frame(width: 44, height: 44)
                 .background(Color.blue.opacity(isLoadHovered ? 0.9 : 0.8))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .help("Load rule")
+                .help("Edit rule")
                 .onHover { hovering in
                     isLoadHovered = hovering
                 }
@@ -17151,7 +17646,7 @@ struct LayoutAreaEditorWindowView: View {
     @State private var isLayoutAreasReportPresented = false
     @State private var pendingDuplicateRule: OCRLayoutAreaRule?
     @State private var layoutZoomScale: CGFloat = 1.0
-    @State private var activeAutoDetectMode: String? = nil  // nil, "image", or "footnote"
+    @State private var activeAutoDetectMode: String? = nil  // nil, "image", "footnote", "quote", or "header"
     @State private var isLoadingAutoDetect: Bool = false
     @State private var previewImage: NSImage? = nil
     @State private var isPreviewLoading: Bool = false
@@ -17159,6 +17654,8 @@ struct LayoutAreaEditorWindowView: View {
     @State private var displayedImageKey: String = ""
     @State private var autoDetectDuplicateConflicts: [String] = []
     @State private var autoDetectFootnoteDuplicateConflicts: [String] = []
+    @State private var autoDetectQuoteDuplicateConflicts: [String] = []
+    @State private var autoDetectHeaderDuplicateConflicts: [String] = []
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
         ("header", "Section Title", "book.closed"),
@@ -17207,6 +17704,12 @@ struct LayoutAreaEditorWindowView: View {
             } else if activeAutoDetectMode == "footnote" {
                 state.resetAutoDetect()
                 appState.buildAutoDetectFootnotePages(in: state)
+            } else if activeAutoDetectMode == "quote" {
+                state.resetAutoDetect()
+                appState.buildAutoDetectQuotePages(in: state)
+            } else if activeAutoDetectMode == "header" {
+                state.resetAutoDetect()
+                appState.buildAutoDetectHeaderPages(in: state)
             }
         }
         .onChange(of: state.selectedPDFPath) { _, _ in
@@ -17219,7 +17722,7 @@ struct LayoutAreaEditorWindowView: View {
             loadPreviewImageAsync()
         }
         .sheet(isPresented: $isLayoutAreasReportPresented) {
-            LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state, sectionFileName: state.selectedPDFName)
+            LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state, sectionFileName: state.selectedScope == "all_sections" ? nil : state.selectedPDFName)
                 .environmentObject(appState)
         }
         .sheet(item: $pendingDuplicateRule) { duplicate in
@@ -17251,6 +17754,24 @@ struct LayoutAreaEditorWindowView: View {
         } message: {
             let sections = autoDetectFootnoteDuplicateConflicts.joined(separator: "\n• ")
             Text("The following section(s) already have saved Footnote or Ref Mark rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
+        }
+        .alert("Existing Quote Rules Found", isPresented: Binding(
+            get: { !autoDetectQuoteDuplicateConflicts.isEmpty },
+            set: { if !$0 { autoDetectQuoteDuplicateConflicts = [] } }
+        )) {
+            Button("OK") { autoDetectQuoteDuplicateConflicts = [] }
+        } message: {
+            let sections = autoDetectQuoteDuplicateConflicts.joined(separator: "\n• ")
+            Text("The following section(s) already have saved Quote (blockquote) rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
+        }
+        .alert("Existing Header Rules Found", isPresented: Binding(
+            get: { !autoDetectHeaderDuplicateConflicts.isEmpty },
+            set: { if !$0 { autoDetectHeaderDuplicateConflicts = [] } }
+        )) {
+            Button("OK") { autoDetectHeaderDuplicateConflicts = [] }
+        } message: {
+            let sections = autoDetectHeaderDuplicateConflicts.joined(separator: "\n• ")
+            Text("The following section(s) already have saved Section Title (header) rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
         }
     }
 
@@ -17380,6 +17901,38 @@ struct LayoutAreaEditorWindowView: View {
         return conflicts
     }
 
+    private func conflictingSectionsForAutoDetectQuote() -> [String] {
+        let rules = state.allSavedRules.filter { $0.type == "blockquote" }
+        guard !rules.isEmpty else { return [] }
+        var seen = Set<String>(); var conflicts: [String] = []
+        for page in state.autoDetectQuotePages where page.isSelected {
+            let section = page.sectionFileName
+            guard !seen.contains(section) else { continue }
+            if rules.contains(where: { r in
+                if r.scope == "all_sections" { return true }
+                guard r.section == section else { return false }
+                return r.scope == "section" || (r.scope == "page" && r.page == page.pageNumber)
+            }) { seen.insert(section); conflicts.append(section) }
+        }
+        return conflicts
+    }
+
+    private func conflictingSectionsForAutoDetectHeader() -> [String] {
+        let rules = state.allSavedRules.filter { $0.type == "header" }
+        guard !rules.isEmpty else { return [] }
+        var seen = Set<String>(); var conflicts: [String] = []
+        for page in state.autoDetectHeaderPages where page.isSelected {
+            let section = page.sectionFileName
+            guard !seen.contains(section) else { continue }
+            if rules.contains(where: { r in
+                if r.scope == "all_sections" { return true }
+                guard r.section == section else { return false }
+                return r.scope == "section" || (r.scope == "page" && r.page == 1)
+            }) { seen.insert(section); conflicts.append(section) }
+        }
+        return conflicts
+    }
+
     // Returns section file names that already have a saved "image" rule covering the candidates.
     private func conflictingSectionsForAutoDetect() -> [String] {
         let imageRules = state.allSavedRules.filter { $0.type == "image" }
@@ -17431,7 +17984,7 @@ struct LayoutAreaEditorWindowView: View {
 
             Spacer()
 
-            Text("\(state.allSavedRules.filter { $0.scope == "all_sections" || $0.section == state.selectedPDFName }.count) saved")
+            Text("\(state.selectedScope == "all_sections" ? state.allSavedRules.count : state.allSavedRules.filter { $0.scope == "all_sections" || $0.section == state.selectedPDFName }.count) saved")
                 .font(.system(size: 18, weight: .semibold).monospacedDigit())
                 .foregroundStyle(NewOCRMainPalette.primaryText)
                 .lineLimit(1)
@@ -17496,6 +18049,48 @@ struct LayoutAreaEditorWindowView: View {
                     isLoadingAutoDetect = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         appState.buildAutoDetectFootnotePages(in: state)
+                        isLoadingAutoDetect = false
+                    }
+                }
+            }
+
+            OCRIconButton(
+                title: "Auto Quote",
+                systemImage: "quote.bubble",
+                backgroundColor: activeAutoDetectMode == "quote" ? Color(red: 120/255, green: 90/255, blue: 180/255) : Color(red: 120/255, green: 90/255, blue: 180/255).opacity(0.6),
+                foregroundColor: .white,
+                size: 44
+            ) {
+                if activeAutoDetectMode == "quote" {
+                    activeAutoDetectMode = nil
+                } else {
+                    activeAutoDetectMode = "quote"
+                    state.selectedType = "blockquote"
+                    state.resetAutoDetect()
+                    isLoadingAutoDetect = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        appState.buildAutoDetectQuotePages(in: state)
+                        isLoadingAutoDetect = false
+                    }
+                }
+            }
+
+            OCRIconButton(
+                title: "Auto Header",
+                systemImage: "text.badge.star",
+                backgroundColor: activeAutoDetectMode == "header" ? Color(red: 180/255, green: 110/255, blue: 60/255) : Color(red: 180/255, green: 110/255, blue: 60/255).opacity(0.6),
+                foregroundColor: .white,
+                size: 44
+            ) {
+                if activeAutoDetectMode == "header" {
+                    activeAutoDetectMode = nil
+                } else {
+                    activeAutoDetectMode = "header"
+                    state.selectedType = "header"
+                    state.resetAutoDetect()
+                    isLoadingAutoDetect = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        appState.buildAutoDetectHeaderPages(in: state)
                         isLoadingAutoDetect = false
                     }
                 }
@@ -17819,6 +18414,8 @@ struct LayoutAreaEditorWindowView: View {
             }
         }
         .frame(minWidth: 310, idealWidth: 350, maxWidth: 390)
+        .disabled(state.loadedRule != nil)
+        .opacity(state.loadedRule != nil ? 0.4 : 1.0)
     }
 
     private var preview: some View {
@@ -17828,7 +18425,7 @@ struct LayoutAreaEditorWindowView: View {
                 VStack(spacing: 20) {
                     ProgressView()
                         .controlSize(.large)
-                    Text("Loading \(activeAutoDetectMode == "image" ? "image" : "footnote") candidates...")
+                    Text("Loading \(activeAutoDetectMode == "image" ? "image" : activeAutoDetectMode == "quote" ? "quote" : activeAutoDetectMode == "header" ? "header" : "footnote") candidates...")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(NewOCRMainPalette.secondaryText)
                 }
@@ -17845,6 +18442,10 @@ struct LayoutAreaEditorWindowView: View {
                     autoDetectImagePanel
                 } else if mode == "footnote" {
                     autoDetectFootnotePanel
+                } else if mode == "quote" {
+                    autoDetectQuotePanel
+                } else if mode == "header" {
+                    autoDetectHeaderPanel
                 } else {
                     ContentUnavailableView("Unknown Mode", systemImage: "exclamationmark.triangle")
                 }
@@ -18591,6 +19192,386 @@ struct LayoutAreaEditorWindowView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
         )
+    }
+
+    // MARK: - Auto Detect Quote Panel
+
+    private var autoDetectQuotePanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !state.autoDetectQuoteDone {
+                let qTotal = state.autoDetectQuotePages.count
+                let qSelected = state.autoDetectQuotePages.filter(\.isSelected).count
+                HStack(spacing: 12) {
+                    Text("\(qSelected) of \(qTotal) selected")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Spacer()
+                    Button("Select All") {
+                        for i in state.autoDetectQuotePages.indices { state.autoDetectQuotePages[i].isSelected = true }
+                    }
+                    .buttonStyle(.plain).font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(qTotal == 0 || qSelected == qTotal ? NewOCRMainPalette.tertiaryText : Color.white)
+                    .disabled(qTotal == 0 || qSelected == qTotal)
+                    Rectangle().fill(NewOCRMainPalette.stroke).frame(width: 1, height: 14)
+                    Button("Unselect All") {
+                        for i in state.autoDetectQuotePages.indices { state.autoDetectQuotePages[i].isSelected = false }
+                    }
+                    .buttonStyle(.plain).font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(qSelected == 0 ? NewOCRMainPalette.tertiaryText : Color.white)
+                    .disabled(qSelected == 0)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach($state.autoDetectQuotePages) { $page in
+                            let thumb = appState.layoutAreaPreviewImage(pdfURL: page.pdfURL, pageNumber: page.pageNumber)
+                            ZStack(alignment: .topTrailing) {
+                                HStack(spacing: 12) {
+                                    Toggle("", isOn: $page.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.5)
+                                    ScrollView(.vertical, showsIndicators: true) {
+                                        Group {
+                                            if let thumb {
+                                                Image(nsImage: thumb).resizable().scaledToFit()
+                                                    .frame(width: appState.autoDetectThumbWidth)
+                                            } else {
+                                                NewOCRMainPalette.fieldBackground
+                                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                            }
+                                        }
+                                    }
+                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                                    .onTapGesture { appState.openLayoutAreaThumb(pdfURL: page.pdfURL, pageNumber: page.pageNumber) }
+                                    .pointingHandCursor()
+                                    Text("\(page.sectionFileName) Page \(page.pageNumber)")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                                    Spacer()
+                                    Color.clear.frame(width: 32, height: 20)
+                                }
+                                .padding(12)
+                                .background(NewOCRMainPalette.panelBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                                Button(action: { state.autoDetectQuotePages.removeAll { $0.id == page.id } }) {
+                                    Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(Color.white)
+                                        .frame(width: 28, height: 28).background(Color.red).clipShape(RoundedRectangle(cornerRadius: 7))
+                                }.padding(8)
+                            }
+                        }
+                    }.padding(12)
+                }
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !state.autoDetectQuoteResults.isEmpty {
+                            Text("Quotes (\(state.autoDetectQuoteResults.count))")
+                                .font(.system(size: 12, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                            ForEach($state.autoDetectQuoteResults) { $result in
+                                ZStack(alignment: .topTrailing) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack(spacing: 12) {
+                                            Toggle("", isOn: $result.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.5).padding(.top, 2)
+                                            Text("\(result.sectionFileName) Page \(result.pageNumber)")
+                                                .font(.system(size: 12, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                                            Spacer()
+                                            Color.clear.frame(width: 32, height: 20)
+                                        }
+                                        TextEditor(text: $result.text)
+                                            .font(.system(size: 15)).padding(8)
+                                            .frame(minHeight: 80)
+                                            .scrollContentBackground(.hidden)
+                                            .background(NewOCRMainPalette.fieldBackground)
+                                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    }
+                                    .padding(12).background(NewOCRMainPalette.panelBackground)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                                    Button(action: { state.autoDetectQuoteResults.removeAll { $0.id == result.id } }) {
+                                        Image(systemName: "xmark.circle.fill").font(.system(size: 20)).foregroundStyle(Color.red)
+                                            .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
+                                    }.padding(8)
+                                }
+                            }
+                        } else {
+                            Text("No quote regions detected.")
+                                .font(.system(size: 13)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                                .frame(maxWidth: .infinity, alignment: .center).padding(.top, 20)
+                        }
+                    }.padding(12)
+                }
+            }
+
+            HStack {
+                if state.isAutoDetectQuoteRunning {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Running Codex…").font(.system(size: 12)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                    Spacer()
+                } else if !state.autoDetectQuoteDone {
+                    let canRun = state.autoDetectQuotePages.contains { $0.isSelected }
+                    Button(action: {
+                        let conflicts = conflictingSectionsForAutoDetectQuote()
+                        if conflicts.isEmpty { appState.runAutoDetectQuoteScanInLayout(state) }
+                        else { autoDetectQuoteDuplicateConflicts = conflicts }
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "paperplane.fill").font(.system(size: 15, weight: .semibold))
+                            Text("Process Codex").font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(canRun ? Color.black : Color.black.opacity(0.35))
+                        .frame(maxWidth: .infinity).frame(height: 40)
+                        .background(canRun ? Color(red: 53/255, green: 200/255, blue: 90/255) : Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain).disabled(!canRun)
+                } else {
+                    let saveCount = state.autoDetectQuoteResults.filter { $0.isSelected }.count
+                    VStack(spacing: 6) {
+                        if !state.autoDetectQuoteSaveStatus.isEmpty {
+                            Text(state.autoDetectQuoteSaveStatus).font(.system(size: 12))
+                                .foregroundStyle(state.autoDetectQuoteSaveStatus.contains("Error") ? Color.red : NewOCRMainPalette.secondaryText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if state.isAutoDetectQuoteSaving {
+                            HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Saving…").font(.system(size: 12)).foregroundStyle(NewOCRMainPalette.secondaryText) }
+                                .frame(maxWidth: .infinity).frame(height: 40)
+                        } else {
+                            Button(action: {
+                                let toSave = state.autoDetectQuoteResults
+                                state.isAutoDetectQuoteSaving = true; state.autoDetectQuoteSaveStatus = ""
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let result = appState.saveAutoDetectQuoteResults(toSave)
+                                    DispatchQueue.main.async {
+                                        state.isAutoDetectQuoteSaving = false
+                                        state.autoDetectQuoteSaveStatus = result.errors.isEmpty ? "✓ Saved \(result.saved) rule(s) to layout-areas.json" : "Saved \(result.saved). Errors: \(result.errors.joined(separator: "; "))"
+                                        appState.reloadAllSavedRules(into: state)
+                                    }
+                                }
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "square.and.arrow.down.fill").font(.system(size: 15, weight: .semibold))
+                                    Text(saveCount > 0 ? "Save (\(saveCount))" : "Save").font(.system(size: 14, weight: .semibold))
+                                }
+                                .foregroundStyle(saveCount > 0 ? Color.white : Color.white.opacity(0.4))
+                                .frame(maxWidth: .infinity).frame(height: 40)
+                                .background(saveCount > 0 ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
+                                .clipShape(RoundedRectangle(cornerRadius: 9))
+                            }
+                            .buttonStyle(.plain).disabled(saveCount == 0)
+                        }
+                    }
+                }
+            }.padding(.top, 4)
+        }
+        .padding(10)
+        .frame(minWidth: 0, minHeight: 460).frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(NewOCRMainPalette.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+    }
+
+    // MARK: - Auto Detect Header Panel
+
+    private var autoDetectHeaderPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !state.autoDetectHeaderDone {
+                let hTotal = state.autoDetectHeaderPages.count
+                let hSelected = state.autoDetectHeaderPages.filter(\.isSelected).count
+                HStack(spacing: 12) {
+                    Text("\(hSelected) of \(hTotal) selected")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Spacer()
+                    Button("Select All") {
+                        for i in state.autoDetectHeaderPages.indices { state.autoDetectHeaderPages[i].isSelected = true }
+                    }
+                    .buttonStyle(.plain).font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(hTotal == 0 || hSelected == hTotal ? NewOCRMainPalette.tertiaryText : Color.white)
+                    .disabled(hTotal == 0 || hSelected == hTotal)
+                    Rectangle().fill(NewOCRMainPalette.stroke).frame(width: 1, height: 14)
+                    Button("Unselect All") {
+                        for i in state.autoDetectHeaderPages.indices { state.autoDetectHeaderPages[i].isSelected = false }
+                    }
+                    .buttonStyle(.plain).font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(hSelected == 0 ? NewOCRMainPalette.tertiaryText : Color.white)
+                    .disabled(hSelected == 0)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach($state.autoDetectHeaderPages) { $page in
+                            ZStack(alignment: .topTrailing) {
+                                HStack(spacing: 12) {
+                                    Toggle("", isOn: $page.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.5)
+                                    let thumb = appState.layoutAreaPreviewImage(pdfURL: page.pdfURL, pageNumber: 1)
+                                    ScrollView(.vertical, showsIndicators: true) {
+                                        Group {
+                                            if let thumb {
+                                                Image(nsImage: thumb).resizable().scaledToFit()
+                                                    .frame(width: appState.autoDetectThumbWidth)
+                                            } else {
+                                                NewOCRMainPalette.fieldBackground
+                                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                            }
+                                        }
+                                    }
+                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                                    .onTapGesture { appState.openLayoutAreaThumb(pdfURL: page.pdfURL, pageNumber: 1) }
+                                    .pointingHandCursor()
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(page.sectionFileName).font(.system(size: 13, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                                        Text("Page 1 (first page only)").font(.system(size: 11)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                                    }
+                                    Spacer()
+                                    Color.clear.frame(width: 32, height: 20)
+                                }
+                                .padding(12)
+                                .background(NewOCRMainPalette.panelBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                                Button(action: { state.autoDetectHeaderPages.removeAll { $0.id == page.id } }) {
+                                    Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(Color.white)
+                                        .frame(width: 28, height: 28).background(Color.red).clipShape(RoundedRectangle(cornerRadius: 7))
+                                }.padding(8)
+                            }
+                        }
+                    }.padding(12)
+                }
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !state.autoDetectHeaderResults.isEmpty {
+                            Text("Headers (\(state.autoDetectHeaderResults.count))")
+                                .font(.system(size: 12, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                            ForEach($state.autoDetectHeaderResults) { $result in
+                                ZStack(alignment: .topTrailing) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack(spacing: 12) {
+                                            Toggle("", isOn: $result.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.5).padding(.top, 2)
+                                                .onChange(of: result.isSelected) { _, _ in state.autoDetectHeaderSaved = false }
+                                            Text("\(result.sectionFileName) Page 1")
+                                                .font(.system(size: 12, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                                            Spacer()
+                                            Color.clear.frame(width: 32, height: 20)
+                                        }
+                                        TextField("Detected heading text", text: $result.text)
+                                            .font(.system(size: 11)).padding(8)
+                                            .background(NewOCRMainPalette.fieldBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                                            .onChange(of: result.text) { _, _ in state.autoDetectHeaderSaved = false }
+                                    }
+                                    .padding(12).background(NewOCRMainPalette.panelBackground)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                                    Button(action: {
+                                        state.autoDetectHeaderResults.removeAll { $0.id == result.id }
+                                        state.autoDetectHeaderSaved = false
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill").font(.system(size: 20)).foregroundStyle(Color.red)
+                                            .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
+                                    }.padding(8)
+                                }
+                            }
+                        } else {
+                            Text("No header regions detected.")
+                                .font(.system(size: 13)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                                .frame(maxWidth: .infinity, alignment: .center).padding(.top, 20)
+                        }
+                    }.padding(12)
+                }
+            }
+
+            HStack {
+                if state.isAutoDetectHeaderRunning {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Running Codex…").font(.system(size: 12)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                    Spacer()
+                } else if !state.autoDetectHeaderDone {
+                    let canRun = state.autoDetectHeaderPages.contains { $0.isSelected }
+                    Button(action: {
+                        let conflicts = conflictingSectionsForAutoDetectHeader()
+                        if conflicts.isEmpty { appState.runAutoDetectHeaderScanInLayout(state) }
+                        else { autoDetectHeaderDuplicateConflicts = conflicts }
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "paperplane.fill").font(.system(size: 15, weight: .semibold))
+                            Text("Process Codex").font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(canRun ? Color.black : Color.black.opacity(0.35))
+                        .frame(maxWidth: .infinity).frame(height: 40)
+                        .background(canRun ? Color(red: 53/255, green: 200/255, blue: 90/255) : Color(red: 53/255, green: 200/255, blue: 90/255).opacity(0.35))
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain).disabled(!canRun)
+                } else {
+                    let saveCount = state.autoDetectHeaderResults.filter { $0.isSelected }.count
+                    VStack(spacing: 6) {
+                        if !state.autoDetectHeaderSaveStatus.isEmpty {
+                            Text(state.autoDetectHeaderSaveStatus).font(.system(size: 12))
+                                .foregroundStyle(state.autoDetectHeaderSaveStatus.contains("Error") ? Color.red : NewOCRMainPalette.secondaryText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if state.isAutoDetectHeaderSaving {
+                            HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Saving…").font(.system(size: 12)).foregroundStyle(NewOCRMainPalette.secondaryText) }
+                                .frame(maxWidth: .infinity).frame(height: 40)
+                        } else {
+                            let canSave = saveCount > 0 && !state.autoDetectHeaderSaved
+                            Button(action: {
+                                let toSave = state.autoDetectHeaderResults
+                                state.isAutoDetectHeaderSaving = true; state.autoDetectHeaderSaveStatus = ""
+                                DispatchQueue.global(qos: .userInitiated).async {
+                                    let result = appState.saveAutoDetectHeaderResults(toSave)
+                                    DispatchQueue.main.async {
+                                        state.isAutoDetectHeaderSaving = false
+                                        appState.reloadAllSavedRules(into: state)
+                                        state.savedRuleCount = appState.currentLayoutAreaRuleCount()
+                                        if !result.errors.isEmpty {
+                                            state.autoDetectHeaderSaveStatus = "Saved \(result.saved). Errors: \(result.errors.joined(separator: "; "))"
+                                        } else if result.duplicates > 0 {
+                                            state.autoDetectHeaderSaveStatus = "✓ Saved \(result.saved) rule(s). \(result.duplicates) duplicate(s) skipped — uncheck or adjust those rows and save again."
+                                        } else {
+                                            state.autoDetectHeaderSaveStatus = "✓ Saved \(result.saved) rule(s) to layout-areas.json"
+                                            state.autoDetectHeaderSaved = true
+                                        }
+                                    }
+                                }
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: state.autoDetectHeaderSaved ? "checkmark" : "square.and.arrow.down.fill").font(.system(size: 15, weight: .semibold))
+                                    Text(state.autoDetectHeaderSaved ? "Saved" : (saveCount > 0 ? "Save (\(saveCount))" : "Save")).font(.system(size: 14, weight: .semibold))
+                                }
+                                .foregroundStyle(canSave ? Color.white : Color.white.opacity(0.4))
+                                .frame(maxWidth: .infinity).frame(height: 40)
+                                .background(canSave ? Color(red: 0.25, green: 0.55, blue: 1.0) : Color(red: 0.25, green: 0.55, blue: 1.0).opacity(0.35))
+                                .clipShape(RoundedRectangle(cornerRadius: 9))
+                            }
+                            .buttonStyle(.plain).disabled(!canSave)
+                        }
+                    }
+                }
+            }.padding(.top, 4)
+        }
+        .padding(10)
+        .frame(minWidth: 0, minHeight: 460).frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(NewOCRMainPalette.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
     }
 
     private func saveCurrentArea() {

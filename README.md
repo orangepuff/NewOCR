@@ -549,6 +549,7 @@ Expected behavior:
 - after OCR, automatically collect low-confidence lines (Vision confidence < 75%) and save
   `AppleVision/MD/<section>/ocr-review.json` per section
 - show finished successfully when done, with a count of low-confidence lines flagged across all sections
+- do **not** auto-open the OCR Review report window after OCR All finishes — rendering thousands of flagged lines from 15+ sections at once causes a UI hang. The user can open the review report per section individually.
 
 ### Scan Header All
 
@@ -615,6 +616,15 @@ with other NewOCR confirmations, and displays each rule with:
 - The **Save Area** button changes to **Update Rule** with an orange pencil icon
 - After editing, click **Update Rule** to save changes or **Close** to discard
 - Once saved or discarded, the **View Rules** button becomes enabled again
+
+**Auto-load on page/section navigation**: When the user slides to a different page or switches
+section, the editor automatically looks up any saved rule matching the current type + scope +
+section + page and loads it into the area box. When an existing rule is auto-loaded:
+- The rule's rectangle is shown in the preview area
+- The **Save Area** / **Update Rule** button is replaced by a purple **New Rule** button
+- Clicking **New Rule** clears the auto-loaded rule and resets the selection to the default
+  rectangle, bringing back the **Save Area** button so a fresh rule can be drawn and saved
+- This pattern also applies when switching rule type (Header → Quote → Image etc.)
 
 **Duplicate Rule Detection**: When clicking Save Area or Update Rule, NewOCR checks if a rule with the
 same type, scope, section, page, and rectangle position already exists. If a duplicate is found:
@@ -898,7 +908,15 @@ UI notes:
   `OCRIconButton` commands, matching Crop/Split-style windows. Do not move
   primary commands to a bottom footer where an expanding preview can push them
   off-screen. Put the saved-rule count in this top header immediately before
-  the command buttons, using large readable header text.
+  the command buttons, using large readable header text. The count and the
+  **View Rules** popup both reflect the **selected scope on the left panel**:
+  - When **All Sections** is selected: show total count of all saved rules;
+    View Rules shows all rules (no section filter).
+  - When a specific section is selected: show only rules that apply to that
+    section (`scope: "all_sections"` or `section == currentPDFName`);
+    View Rules shows the same filtered list.
+  This keeps the header count and View Rules popup always consistent with
+  what the user has selected on the left.
 - The layout-type commands, Section Title, Quote, Image, Footnote, and Ignore,
   are icon-only buttons. Show their text labels in floating `NSPopover`
   tooltips on hover, matching the other NewOCR icon controls. Section Title is
@@ -915,12 +933,17 @@ UI notes:
   **Selected**; checking one section auto-sets to **Section**. **Page** can be
   chosen manually when at least one section is checked. When "All Sections" is
   checked, the Selected/Section/Page tabs are disabled and no individual section
-  row shows as highlighted. Clicking **Selected**, **Section**, or **Page** tabs
-  while "All Sections" is checked transitions out of all_sections scope —
-  "Selected" checks all individual sections, "Section"/"Page" checks only the
-  current preview section. Clicking a section row always updates the PDF preview
-  to that section, in addition to toggling its checkbox. The last remaining
-  checked section cannot be unchecked.
+  row shows as highlighted. Clicking "All Sections" always unchecks all
+  individual section rows (by clearing `selectedLayoutSectionPaths`). This
+  is correctly restored on re-open: when the saved scope is "all_sections" the
+  restored paths are set to empty even if the saved path list was empty
+  (previously the `!restored.isEmpty` guard prevented this, leaving the initial
+  PDF path checked alongside "All Sections"). Clicking **Selected**, **Section**,
+  or **Page** tabs while "All Sections" is checked transitions out of
+  all_sections scope — "Selected" checks all individual sections,
+  "Section"/"Page" checks only the current preview section. Clicking a section
+  row always updates the PDF preview to that section, in addition to toggling its
+  checkbox. The last remaining checked section cannot be unchecked.
 - When Define Layout opens fresh (no rule loaded), the default type is **Quote**
   and the default scope is **Page** (since Quote is a page-only type). Page-only
   types (Quote, Image, Image Description, Footnote, Ref Mark) always start with
@@ -1476,6 +1499,89 @@ For each checked ref mark:
 
 Future OCR runs will use these rules to format footnotes and ref marks automatically.
 
+## Auto Detect Quote by Codex
+
+Auto-detect quote is integrated into **Define Layout** to identify blockquote regions before OCR.
+
+Click the **Auto Quote** button (purple, quote bubble icon) in the Define Layout header to activate quote detection. The scope (All/Selected/Section/Page) controls which sections/pages appear in the candidate list.
+
+### Workflow
+
+1. Open **Define Layout** and set your scope.
+2. Click the **Auto Quote** button in the header (also sets the type selector to "blockquote").
+3. A list of all available pages appears based on scope.
+   - Each row shows a portrait thumbnail of the page (size set by `AUTO_DETECT_THUMB_WIDTH` × `AUTO_DETECT_THUMB_HEIGHT` in `config.txt`), plus section name and page number
+   - Click the thumbnail to open the page image in the default macOS viewer for review
+   - Click the red **×** button to remove a page from the list
+4. **Select pages**: A sub-menu bar above the list shows **"X of Y selected"** count, **Select All**, and **Unselect All** buttons. All pages are checked by default.
+5. Press **Process Codex** (enabled only when ≥ 1 page is checked).
+   - Before sending to Codex, checks whether any selected page's section already has a saved `blockquote` rule in `layout-areas.json`. If conflicts exist, an alert blocks the scan — remove those rules first from **View Rules**.
+   - Renders selected pages to PNG and sends a batch request to Codex
+6. **Codex analysis**: Codex identifies blockquote/indented text regions on each page.
+7. Review results: each detected region shows section, page, and editable preview text.
+   - Toggle rows to include/exclude from save
+   - Click **×** to remove a result entirely
+8. Click **Save (N)** to write `blockquote` rules to `layout-areas.json`.
+
+### Scope Behavior
+
+Same as Auto Detect Footnote — scope controls which pages appear in the candidate list.
+Changing scope while in Auto Quote mode resets and rebuilds the page list.
+
+### What Save Does
+
+For each checked quote result, a `blockquote` rule is saved to `layout-areas.json` with section, page, and rect.
+
+---
+
+## Auto Detect Header by Codex
+
+Auto-detect header is integrated into **Define Layout** to identify section headings on the first page of each section.
+
+Click the **Auto Header** button (orange, text.badge.star icon) in the Define Layout header to activate header detection.
+
+### Key Difference From Other Auto Detect Modes
+
+**Header detection always uses page 1 only**, regardless of the selected scope or current page. The candidate list always shows only the first page of each target section. This matches the rule that header rules only apply to page 1 of a section.
+
+### Workflow
+
+1. Open **Define Layout** and set your scope (controls which sections are targeted).
+2. Click the **Auto Header** button (also sets the type selector to "header").
+3. A list of sections appears — each row shows a page-1 thumbnail, the section name, and "Page 1 (first page only)". Thumbnails are served from the same layout-area disk/memory cache used by Define Layout. A placeholder is shown if the thumbnail is not yet cached. Clicking a thumbnail opens the cached JPEG file with the system default image app (Preview). If no disk cache exists yet, the image is rendered and saved to a temporary file before opening.
+   - Click **×** to remove a section from the list
+4. **Select pages**: Sub-menu bar shows **"X of Y selected"**, **Select All**, **Unselect All**.
+5. Press **Process Codex** (enabled only when ≥ 1 row is checked).
+   - Before sending, checks for existing `header` rules. If conflicts exist, an alert blocks the scan.
+   - Codex is instructed to detect at most one primary heading per page.
+6. Review results: each detected heading shows section name and editable heading text.
+   - Toggle/remove as needed.
+7. Click **Save (N)** to write `header` rules to `layout-areas.json`.
+   - **Duplicate detection**: if a result row matches an existing rule (same section, same rect), it is skipped and a message shows how many were skipped. The Save button stays enabled so the user can uncheck the duplicate rows or adjust the text and try again.
+   - **Clean save**: if all selected rows were written without duplicates, the Save button changes to a disabled "Saved" state with a checkmark. The header rule count updates immediately.
+   - Toggling a checkbox, editing heading text, or removing a row re-enables the Save button so changes can be saved.
+
+### What Save Does
+
+For each checked header result, a `header` rule is saved to `layout-areas.json` with the section, `page: 1`, and rect. Header rules always target page 1 regardless of what the Codex response reports.
+
+### How OCR Uses Header Rules
+
+When OCR runs on page 1 of a section that has a `header` rule:
+
+1. **Header rect is applied**: OCR lines that overlap the header region are classified as heading lines.
+2. **Rendered as `## Heading Text`** in the Markdown output (h2 level).
+3. **No duplicate title**: `applyMarkdownTitle` (which normally prepends the document title as `##`) is skipped entirely when a `header` rule exists — the OCR-detected heading already provides the heading.
+4. **Body text dedup**: If the same heading text appears again as a regular body text line (e.g., because the Codex rect was slightly off and the line was detected twice), the duplicate body-text line is silently removed. Comparison is case-insensitive, exact-match after trimming whitespace.
+
+### Robustness Notes
+
+- If Codex returns 0 headers for a page, the results panel still appears (with an empty list) — the user can dismiss and try again.
+- If Codex wraps the JSON in a markdown code block (` ```json … ``` `), the app strips the fences before parsing.
+- If the JSON file is unreadable after Codex finishes, an error message is appended to the log and the results panel is shown with 0 results.
+
+---
+
 ## Apply CSS
 
 Apply CSS updates:
@@ -1594,6 +1700,9 @@ CODEX_FINALIZE_PROMPT_FILE=codex-finalize-prompt.txt
 CODEX_FINALIZE_MAX_SECTIONS=5
 CODEX_FINALIZE_MODEL=gpt-5.4-mini
 NEW_PROJECTS_FOLDER=~/Downloads
+AUTO_DETECT_RENDER_SCALE=2.0
+AUTO_DETECT_THUMB_WIDTH=80
+AUTO_DETECT_THUMB_HEIGHT=104
 ```
 
 Width values may be numeric or `FULL` for full-screen opening.
@@ -1615,6 +1724,16 @@ Key notes:
   run log.
 - `CODEX_FINALIZE_PROMPT_FILE` — legacy key, no longer used by the current
   Codex OCR feature. Kept for compatibility; may be removed in a future version.
+- `AUTO_DETECT_RENDER_SCALE` — render scale used when rasterising PDF pages for all
+  Auto Detect Codex scans (Header, Quote, Footnote, Image). Codex only needs to
+  identify layout regions, not read individual characters, so 2.0 (≈ 144 DPI) is
+  sufficient and renders/uploads much faster than `OCR_RENDER_SCALE`. At `OCR_RENDER_SCALE=8.0`,
+  a single A4 page becomes a ~4760 × 6736 px PNG — at `AUTO_DETECT_RENDER_SCALE=2.0`
+  the same page is ~1190 × 1684 px, roughly 16× smaller file. Range: 1.0–8.0. Default: 2.0.
+- `AUTO_DETECT_THUMB_WIDTH` / `AUTO_DETECT_THUMB_HEIGHT` — thumbnail size (points)
+  shown in all Auto Detect candidate lists (Header, Quote, and any future panels).
+  Both panels share the same values so thumbnails are always the same size.
+  Minimum: width 40, height 52. Default: 80 × 104.
 
 ## Current UI Principles
 
