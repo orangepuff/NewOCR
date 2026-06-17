@@ -1225,93 +1225,56 @@ size.
 
 ## Auto Detect Image by Codex
 
-**Edit PDF > Auto Detect Image by Codex** automatically finds image regions in
-non-completed sections that already have OCR output, creates layout rules for
-them, and immediately inserts the cropped images into the existing Markdown files.
+Auto-detect image is integrated into **Define Layout** to prepare rules before OCR.
 
-The same action is available per-section via each section row's **More Actions** dropdown
-(ellipsis button). When launched from a section row it scans only that section; the
-window title shows the section name so it is clear which scope is running.
-
-Enabled only when at least one non-completed section has existing `page*.md` output.
+Click the **Auto Image** button in the Define Layout header to activate image
+detection. The scope (All/Selected/Section/Page) controls which sections/pages
+are scanned.
 
 ### Workflow
 
-1. Open a project with OCR-processed sections (at least one non-completed section
-   with `page*.md` files).
-2. Open **Edit PDF > Auto Detect Image by Codex** (or a section's **More Actions > Auto Detect Image by Codex**).
-3. Press **Process Local**.
-4. **Phase 1 — Dual local detection**: For each page in every eligible section, two
-   checks run in parallel:
-   - **PDF structure check**: scans the page's resource dictionary for embedded raster
-     image XObjects (`CGPDFDictionaryApplyBlock`). Catches photos, scanned figures, and
-     any image imported as a PNG/JPEG into the PDF. Fast and zero false positives.
-   - **Apple Vision gap check**: renders the page at scale 2.0, runs
-     `VNRecognizeTextRequest`, and looks for large vertical gaps in the middle 70% of
-     page width. Two conditions flag a page: a gap ≥ 20% of page height sandwiched
-     between text above and below (for mid-page images), OR a gap ≥ 30% of page height
-     with text below only (for images at the top of the page where no body text exists
-     above). Catches vector illustrations that have no XObject.
-   A page is flagged if **either** check matches. Each candidate row shows which
-   detection method triggered it.
-5. **Review candidates**: Each flagged page appears as a card row containing:
-   - A **page thumbnail** (200×283 px, rendered at 2× for retina) so you can visually
-     confirm whether the page actually contains an image.
-   - A **checkbox** to include or exclude the page from the Codex run. Clicking the
-     row body also toggles the checkbox. Unchecked rows are dimmed (55% opacity).
-   - The section filename, page number badge, and a note explaining which detection
-     method triggered the flag (`"Embedded image detected in PDF structure"`,
-     `"Large empty region detected"`, or both).
-   - A **× remove button** (trailing edge, turns red on hover) to permanently delete
-     the row from the list — useful for confirmed false positives that you never want
-     to see again during this session.
-   At least one row must remain checked to enable the next step.
-6. Press **Process by Codex** (enabled only when ≥ 1 candidate is checked and Phase 1
-   is complete). Checked pages are rendered to PNG at `OCR_RENDER_SCALE` and sent to
-   Codex. Codex identifies actual image regions (photos, illustrations, diagrams) and
-   any captions directly adjacent to each image. Results are returned as normalized
-   coordinates.
-7. After Codex finishes, results appear as rows — one per detected image, with an
-   optional caption sub-row below it.
-8. Review the results:
-   - The **image row** is checked by default. Uncheck to skip that detection.
-   - The **caption row** is checked when Codex found a clear caption, unchecked
-     (dimmer) when confidence is lower. The caption text is fully editable — correct
-     it before saving.
-9. Press **Save (N)** to apply checked items.
+1. Open **Define Layout** and set your scope (All Sections, Selected Sections,
+   This Section, or This Page).
+2. Click the **Auto Image** button in the header.
+3. Press **Process Local** (Phase 1).
+   - Scans pages with Apple Vision and PDF structure checks in parallel
+   - Flags pages with large empty regions (likely images) or embedded XObjects
+   - Shows candidate pages with checkboxes
+4. Review candidates:
+   - Uncheck false positives (pages that are actually text, not images)
+   - Click the red **×** button to remove a candidate entirely from the list
+   - At least one row must remain checked
+5. Press **Process Codex** (Phase 2, enabled when ≥ 1 candidate is checked).
+   - Sends checked pages to Codex for precise image region detection
+   - Codex identifies actual images and captions
+6. Review results:
+   - Each detected image appears as a row with checkbox and editable label
+   - Edit labels if needed before saving
+   - Click the red **×** button to remove an image result from the save list
+   - All rows are checked by default
+7. Click **Save (N)** to save rules to `layout-areas.json`.
+   - Rules are saved as `image` and `image_desc` rules with page scope
+   - Temp PNGs are deleted; `detect-results.json` kept for debugging
+
+### Scope Behavior
+
+- **All Sections**: Scans all non-completed sections with OCR output
+- **Selected Sections**: Scans only checked sections (if "Selected" scope is chosen)
+- **This Section**: Scans only the currently selected section
+- **This Page**: Scans only the currently displayed page
+
+Changing scope while in Auto Image mode will reset the candidates and re-scan
+based on the new scope.
 
 ### What Save Does
 
-For each checked image row:
+For each checked image:
+1. **`image` rule saved** to `layout-areas.json` with section, page, rect, and label
+2. **`image_desc` rule saved** (if caption detected and checked) with matching label
+3. **Image cropped** from PDF and saved to `AppleVision/MD/<section>/Images/`
+4. **Markdown inserted** into `page*.md` at best-effort position above image
 
-1. **Rule saved** to `layout-areas.json` — an `image` rule with `section` + `page`
-   (scope: Page), normalized rect, and label (e.g. `Image1`).
-2. **Caption rule saved** (if caption row is also checked) — an `image_desc` rule
-   with `section` + `page`, the caption rect, and the same label.
-3. **Image cropped** from the PDF at `OCR_RENDER_SCALE` and saved to
-   `AppleVision/MD/<section>/Images/page<N>-<Label>.png`.
-4. **Markdown inserted** into `AppleVision/MD/<section>/page<N>.md`:
-   - Best-effort position: finds the last OCR text line above the image's top edge
-     and inserts after the matching paragraph in the MD file.
-   - Fallback: appends at end of file if no match is found.
-   - Format: `![Image1](Images/pageN-Image1.png)` followed by `\n\n*caption*` (if
-     caption selected) and `\n\n<br/>`.
-
-Duplicate rules (same type, section, page, and rect within 0.01 tolerance) are
-silently skipped. Temp PNGs in `AppleVision/auto-detect-temp/` are deleted after
-the run; `detect-results.json` is kept for debugging.
-
-### The Saved Rule
-
-The `image` and `image_desc` rules saved by this feature serve as the permanent
-layout rules for future OCR re-runs. If you re-run OCR on the section, NewOCR
-will use these rules to crop the image and place it at the correct position
-automatically — no Codex call is needed for re-processing.
-
-### Model and Config
-
-Uses `CODEX_EXECUTABLE_PATH` and `CODEX_FINALIZE_MODEL` from `config.txt`, same
-as other Codex features. Render scale uses `OCR_RENDER_SCALE`.
+Future OCR runs will use these rules to crop images automatically.
 
 ## Codex OCR (Image Description)
 
@@ -1402,6 +1365,61 @@ CODEX_FINALIZE_MODEL=gpt-5.4-mini
   (`isDone = true`). Close and reopen the window to run again.
 - PNG crops are saved at scale 4.0 (≈ 288 DPI) regardless of
   `OCR_RENDER_SCALE`; this balances image quality vs. file size for vision OCR.
+
+## Auto Detect Footnote & Refmark by Codex
+
+Auto-detect footnote is integrated into **Define Layout** to prepare rules before OCR.
+
+Click the **Auto Footnote** button in the Define Layout header to activate footnote
+detection. The scope (All/Selected/Section/Page) controls which sections/pages
+are available for selection.
+
+### Workflow
+
+1. Open **Define Layout** and set your scope (All Sections, Selected Sections,
+   This Section, or This Page).
+2. Click the **Auto Footnote** button in the header.
+3. A list of all available pages appears (no local scanning needed).
+   - Each page shows section name and page number
+   - Click the red **×** button to remove a page entirely from the list
+4. **Select pages**: Check which pages you want Codex to analyze for footnotes
+   and ref marks. Use the implicit Select All / Deselect All if available.
+   - All pages are checked by default
+5. Press **Process by Codex** (enabled only when ≥ 1 page is checked).
+   - Renders selected pages to PNG at `OCR_RENDER_SCALE`
+   - Sends all pages to Codex in a single batch request
+6. **Codex analysis**: Codex identifies:
+   - **Footnotes**: Text regions at page bottom with detected label and text
+   - **Ref marks**: Inline reference locations with detected label and anchor word
+7. Review results:
+   - **Footnotes** section: each row shows section, page, label, and text
+     - Footnote text is fully editable
+     - Click the red **×** button to remove a footnote result from the save list
+   - **Ref Marks** section: each row shows section, page, label, and anchor word
+     - Anchor word is fully editable (must match exact OCR text)
+     - Click the red **×** button to remove a ref mark result from the save list
+8. Check/uncheck rows to select which rules to save (all checked by default)
+9. Click **Save (N)** to save rules to `layout-areas.json`.
+
+### Scope Behavior
+
+- **All Sections**: Shows all pages across all non-completed sections with OCR output
+- **Selected Sections**: Shows pages only from checked sections
+- **This Section**: Shows pages only from current section
+- **This Page**: Shows only the current page
+
+Changing scope while in Auto Footnote mode will reset the page list and rebuild
+based on the new scope.
+
+### What Save Does
+
+For each checked footnote:
+1. **`footnote` rule saved** to `layout-areas.json` with section, page, rect, label
+
+For each checked ref mark:
+1. **`refmark` rule saved** to `layout-areas.json` with section, page, rect, label, and anchor word
+
+Future OCR runs will use these rules to format footnotes and ref marks automatically.
 
 ## Apply CSS
 
