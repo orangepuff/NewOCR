@@ -646,6 +646,26 @@ A `[−] 120% [+]` zoom pill sits in the page-slider row to the right of the sli
 - Zoom resets to 100% automatically when switching to a different section
 - Drawing the selection rectangle and moving/resizing handles work at any zoom level
 
+The Define Layout PDF preview crossfades smoothly when switching between sections.
+The previous section's page stays visible while the new page loads in the background;
+once ready, the image transitions with a short `.easeInOut` opacity fade (0.18 s) and any
+layout shift from differing page dimensions is also animated. A small loading spinner appears
+in the top-right corner of the preview while loading is in progress.
+
+When **Define Layout** is opened, NewOCR checks whether page thumbnails have been
+cached for all section pages. If any are missing, a modal progress panel appears
+on the main window ("Preparing Layout Thumbnails") while all pages are rendered
+in the background at scale 2.0 and saved as JPEG files to:
+
+```text
+AppleVision/LayoutThumbs/<section-stem>-page<N>.jpg
+```
+
+On subsequent opens the thumbnails are loaded from disk instantly (in-memory
+cache is also populated so the same session never re-reads disk). The cache is
+shared between the Define Layout preview and the auto-detect candidate panels.
+Delete the `LayoutThumbs/` folder to force a full regeneration.
+
 Define Layout is available only after at least one `section-###.pdf` split file
 exists in the project folder. The **Define Layout** button in the main window is
 disabled until at least one section PDF is created.
@@ -1245,10 +1265,17 @@ are scanned.
    This Section, or This Page).
 2. Click the **Auto Image** button in the header.
 3. Press **Process Local** (Phase 1) — blue full-width button at the bottom of the panel.
+   - Before scanning, the app checks whether any candidate section already has a saved `image` rule
+     in `layout-areas.json` (scope: all_sections, section, or matching page). If conflicts are found,
+     an alert lists the affected section file names and blocks the scan — the user must open
+     **View Rules**, delete those existing image rules, and then try again.
    - Scans pages with Apple Vision and PDF structure checks in parallel
    - Flags pages with large empty regions (likely images) or embedded XObjects
    - Shows candidate pages with thumbnails and checkboxes
-4. Review candidates:
+4. Review candidates — a sub-menu bar above the candidate list shows:
+   - **"X of Y selected"** count (updates live as checkboxes change)
+   - **Select All** button (disabled when all are already selected)
+   - **Unselect All** button (disabled when none are selected)
    - Uncheck false positives (pages that are actually text, not images)
    - Click the red **×** button to remove a candidate entirely from the list
    - At least one row must remain checked
@@ -1826,6 +1853,14 @@ These are intentional and should not be changed casually:
   scope, section, page, and rectangle position (with 0.01 tolerance). If a duplicate
   is found, a beautiful warning dialog appears with the yellow warning icon, showing
   the existing rule's details. Users can cancel or save anyway despite the duplicate.
+- **Process Local** in the Auto Detect Image panel checks for conflicting existing `image`
+  rules before starting the scan. A conflict exists when any candidate section/page is
+  already covered by a saved rule with `type == "image"` (whether `scope == "all_sections"`,
+  `scope == "section"` matching the candidate's section, or `scope == "page"` matching
+  section + page). If any conflict is found the scan is blocked and an alert lists the
+  affected section file names. The user must remove those rules via **View Rules** before
+  proceeding. This prevents auto-detect from creating duplicate image rules that would
+  conflict with manually drawn ones.
 - Define Layout coordinates are saved and applied relative to cropped
   `section-###.pdf` page `.cropBox` renders. OCR layout rules must not use
   `_original.pdf` coordinates.

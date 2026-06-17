@@ -822,6 +822,10 @@ final class AppState: ObservableObject {
     @Published var cssApplyAlertTitle: String = "CSS"
     @Published var cssApplyAlertMessage: String = ""
     @Published var isLayoutRefreshConfirmationPresented: Bool = false
+    @Published var isPreparingLayoutThumbnails: Bool = false
+    @Published var layoutThumbnailProgress: String = ""
+    @Published var layoutThumbnailProgressCurrent: Int = 0
+    @Published var layoutThumbnailProgressTotal: Int = 0
     @Published var isCropResetConfirmationPresented: Bool = false
     @Published var isClearOCRConfirmationPresented: Bool = false
     @Published var pendingClearOCRItem: PDFFileItem?
@@ -4180,7 +4184,7 @@ final class AppState: ObservableObject {
                 return
             }
 
-            openLayoutAreasEditorWindow(sectionItems: selectableItems, initialItem: initialItem)
+            prepareLayoutThumbnailsAndOpen(sectionItems: selectableItems, initialItem: initialItem)
         } catch {
             showAlert(title: "Could Not Open Layout Areas", message: error.localizedDescription)
         }
@@ -4220,7 +4224,7 @@ final class AppState: ObservableObject {
                 showAlert(title: "No PDF Sections", message: "Add or split a PDF before defining layout areas.")
                 return
             }
-            openLayoutAreasEditorWindow(sectionItems: refreshedSectionItems, initialItem: initialItem)
+            prepareLayoutThumbnailsAndOpen(sectionItems: refreshedSectionItems, initialItem: initialItem)
         } catch {
             showAlert(title: "Could Not Refresh OCR Data", message: error.localizedDescription)
         }
@@ -4349,17 +4353,101 @@ final class AppState: ObservableObject {
 
     var layoutAreaPreviewCache: [String: NSImage] = [:]
 
+    private func layoutThumbCacheDir() -> URL? {
+        guard !selectedFolderPath.isEmpty else { return nil }
+        return URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("AppleVision/LayoutThumbs", isDirectory: true)
+    }
+
+    private func layoutThumbFileURL(pdfURL: URL, pageNumber: Int) -> URL? {
+        guard let dir = layoutThumbCacheDir() else { return nil }
+        let stem = pdfURL.deletingPathExtension().lastPathComponent
+        return dir.appendingPathComponent("\(stem)-page\(pageNumber).jpg")
+    }
+
+    private func saveLayoutThumbToDisk(_ image: NSImage, pdfURL: URL, pageNumber: Int) {
+        guard let dir = layoutThumbCacheDir(),
+              let fileURL = layoutThumbFileURL(pdfURL: pdfURL, pageNumber: pageNumber) else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else { return }
+        try? jpeg.write(to: fileURL)
+    }
+
     func layoutAreaPreviewImage(pdfURL: URL, pageNumber: Int) -> NSImage? {
         let key = "\(pdfURL.path):\(pageNumber)"
         if let cached = layoutAreaPreviewCache[key] { return cached }
+        // Check disk cache
+        if let diskURL = layoutThumbFileURL(pdfURL: pdfURL, pageNumber: pageNumber),
+           FileManager.default.fileExists(atPath: diskURL.path),
+           let data = try? Data(contentsOf: diskURL),
+           let image = NSImage(data: data) {
+            layoutAreaPreviewCache[key] = image
+            return image
+        }
+        // Render and cache
         guard let document = PDFDocument(url: pdfURL),
               let page = document.page(at: max(pageNumber - 1, 0)),
-              let image = try? renderPDFPageToCGImage(page, scale: 2.0) else {
-            return nil
-        }
-        let nsImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+              let cgImage = try? renderPDFPageToCGImage(page, scale: 2.0) else { return nil }
+        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         layoutAreaPreviewCache[key] = nsImage
+        saveLayoutThumbToDisk(nsImage, pdfURL: pdfURL, pageNumber: pageNumber)
         return nsImage
+    }
+
+    func prepareLayoutThumbnailsAndOpen(sectionItems: [PDFFileItem], initialItem: PDFFileItem) {
+        // Collect all section+page combos that have no disk cache yet
+        var missing: [(URL, Int)] = []
+        for item in sectionItems {
+            let pageCount = max(PDFDocument(url: item.url)?.pageCount ?? 1, 1)
+            for p in 1...pageCount {
+                if let url = layoutThumbFileURL(pdfURL: item.url, pageNumber: p),
+                   !FileManager.default.fileExists(atPath: url.path) {
+                    missing.append((item.url, p))
+                }
+            }
+        }
+
+        guard !missing.isEmpty else {
+            openLayoutAreasEditorWindow(sectionItems: sectionItems, initialItem: initialItem)
+            return
+        }
+
+        isPreparingLayoutThumbnails = true
+        layoutThumbnailProgressCurrent = 0
+        layoutThumbnailProgressTotal = missing.count
+        layoutThumbnailProgress = "Preparing page thumbnails…"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Group by PDF to avoid reopening the same document repeatedly
+            var byPDF: [URL: [Int]] = [:]
+            for (url, page) in missing { byPDF[url, default: []].append(page) }
+
+            var done = 0
+            for (pdfURL, pages) in byPDF {
+                guard let doc = PDFDocument(url: pdfURL) else { continue }
+                let stem = pdfURL.deletingPathExtension().lastPathComponent
+                for pageNumber in pages.sorted() {
+                    guard let page = doc.page(at: max(pageNumber - 1, 0)),
+                          let cgImage = try? self.renderPDFPageToCGImage(page, scale: 2.0) else { continue }
+                    let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                    let key = "\(pdfURL.path):\(pageNumber)"
+                    self.saveLayoutThumbToDisk(nsImage, pdfURL: pdfURL, pageNumber: pageNumber)
+                    done += 1
+                    let d = done, t = missing.count
+                    DispatchQueue.main.async {
+                        self.layoutAreaPreviewCache[key] = nsImage
+                        self.layoutThumbnailProgressCurrent = d
+                        self.layoutThumbnailProgress = "Preparing \(stem) page \(pageNumber)… (\(d)/\(t))"
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                self.isPreparingLayoutThumbnails = false
+                self.openLayoutAreasEditorWindow(sectionItems: sectionItems, initialItem: initialItem)
+            }
+        }
     }
 
     func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil, anchorWord: String? = nil) throws -> Int {
@@ -10440,6 +10528,51 @@ struct StepOneLoadPDFView: View {
         .sheet(isPresented: $appState.isBulkOCRProgressPresented) {
             BulkOCRProgressView()
                 .environmentObject(appState)
+        }
+        .overlay {
+            if appState.isPreparingLayoutThumbnails {
+                Color.black.opacity(0.50)
+                    .ignoresSafeArea()
+                VStack(spacing: 22) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.white.opacity(0.94))
+                            .frame(width: 58, height: 58)
+                        Image(systemName: "rectangle.dashed")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(Color.black)
+                    }
+                    Text("Preparing Layout Thumbnails")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(appState.layoutThumbnailProgress)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                    if appState.layoutThumbnailProgressTotal > 0 {
+                        VStack(spacing: 6) {
+                            ProgressView(value: Double(appState.layoutThumbnailProgressCurrent),
+                                         total: Double(appState.layoutThumbnailProgressTotal))
+                                .progressViewStyle(.linear)
+                                .frame(width: 280)
+                                .tint(Color(red: 30/255, green: 139/255, blue: 238/255))
+                            Text("\(appState.layoutThumbnailProgressCurrent) / \(appState.layoutThumbnailProgressTotal) pages")
+                                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        }
+                    }
+                }
+                .padding(32)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.30), radius: 24, x: 0, y: 8)
+                .frame(maxWidth: 380)
+            }
         }
         .overlay {
             if appState.isEPUBBuiltAlertPresented || appState.isLayoutRefreshConfirmationPresented || appState.isCropResetConfirmationPresented || appState.isClearOCRConfirmationPresented || appState.isClearAllOCRConfirmationPresented {
@@ -16958,6 +17091,11 @@ struct LayoutAreaEditorWindowView: View {
     @State private var layoutZoomScale: CGFloat = 1.0
     @State private var activeAutoDetectMode: String? = nil  // nil, "image", or "footnote"
     @State private var isLoadingAutoDetect: Bool = false
+    @State private var previewImage: NSImage? = nil
+    @State private var isPreviewLoading: Bool = false
+    @State private var previewImageKey: String = ""
+    @State private var displayedImageKey: String = ""
+    @State private var autoDetectDuplicateConflicts: [String] = []
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
         ("header", "Section Title", "book.closed"),
@@ -17009,7 +17147,13 @@ struct LayoutAreaEditorWindowView: View {
             }
         }
         .onChange(of: state.selectedPDFPath) { _, _ in
-            layoutZoomScale = 1.0
+            loadPreviewImageAsync()
+        }
+        .onChange(of: state.selectedPage) { _, _ in
+            loadPreviewImageAsync()
+        }
+        .onAppear {
+            loadPreviewImageAsync()
         }
         .sheet(isPresented: $isLayoutAreasReportPresented) {
             LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state, sectionFileName: state.selectedPDFName)
@@ -17026,6 +17170,15 @@ struct LayoutAreaEditorWindowView: View {
                     performSave()
                 }
             )
+        }
+        .alert("Existing Image Rules Found", isPresented: Binding(
+            get: { !autoDetectDuplicateConflicts.isEmpty },
+            set: { if !$0 { autoDetectDuplicateConflicts = [] } }
+        )) {
+            Button("OK") { autoDetectDuplicateConflicts = [] }
+        } message: {
+            let sections = autoDetectDuplicateConflicts.joined(separator: "\n• ")
+            Text("The following section(s) already have saved Image rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
         }
     }
 
@@ -17075,6 +17228,31 @@ struct LayoutAreaEditorWindowView: View {
         type == "footnote" || type == "refmark" || type == "image" || type == "image_desc"
     }
 
+    private func loadPreviewImageAsync() {
+        guard let url = state.selectedPDFURL else {
+            previewImage = nil
+            isPreviewLoading = false
+            return
+        }
+        let page = state.selectedPage
+        let key = "\(url.path):\(page)"
+        guard key != previewImageKey else { return }
+        previewImageKey = key
+        // Don't clear previewImage — keep old image visible to avoid layout jump
+        isPreviewLoading = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let image = appState.layoutAreaPreviewImage(pdfURL: url, pageNumber: page)
+            DispatchQueue.main.async {
+                guard self.previewImageKey == key else { return }
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    self.previewImage = image
+                    self.displayedImageKey = key
+                    self.isPreviewLoading = false
+                }
+            }
+        }
+    }
+
     private func toggleSectionCheck(_ item: PDFFileItem) {
         let path = item.url.path
         state.selectPDFPath(path)
@@ -17104,6 +17282,30 @@ struct LayoutAreaEditorWindowView: View {
                 state.selectedScope = "section"
             }
         }
+    }
+
+    // Returns section file names that already have a saved "image" rule covering the candidates.
+    private func conflictingSectionsForAutoDetect() -> [String] {
+        let imageRules = state.allSavedRules.filter { $0.type == "image" }
+        guard !imageRules.isEmpty else { return [] }
+        var seen = Set<String>()
+        var conflicts: [String] = []
+        for candidate in state.autoDetectImageCandidates {
+            let section = candidate.sectionFileName
+            guard !seen.contains(section) else { continue }
+            let hasConflict = imageRules.contains { rule in
+                if rule.scope == "all_sections" { return true }
+                guard rule.section == section else { return false }
+                if rule.scope == "section" { return true }
+                if rule.scope == "page" && rule.page == candidate.pageNumber { return true }
+                return false
+            }
+            if hasConflict {
+                seen.insert(section)
+                conflicts.append(section)
+            }
+        }
+        return conflicts
     }
 
     private var header: some View {
@@ -17552,8 +17754,7 @@ struct LayoutAreaEditorWindowView: View {
                 }
             } else {
                 // Manual drawing mode
-                if let url = state.selectedPDFURL,
-                   let image = appState.layoutAreaPreviewImage(pdfURL: url, pageNumber: state.selectedPage) {
+                if let image = previewImage {
                     GeometryReader { proxy in
                         let baseFit = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size, zoomScale: 1.0)
                         let imageW = baseFit.width * layoutZoomScale
@@ -17575,6 +17776,8 @@ struct LayoutAreaEditorWindowView: View {
                                     .frame(width: imageFrame.width, height: imageFrame.height)
                                     .position(x: imageFrame.midX, y: imageFrame.midY)
                                     .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 2)
+                                    .id(displayedImageKey)
+                                    .transition(.opacity)
 
                                 LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
                             }
@@ -17600,6 +17803,16 @@ struct LayoutAreaEditorWindowView: View {
                                 .background(NewOCRMainPalette.panelBackground.opacity(0.92))
                                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                                 .padding(10)
+                        }
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if isPreviewLoading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .padding(8)
+                                .background(NewOCRMainPalette.panelBackground.opacity(0.85))
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                .padding(8)
                         }
                     }
                 } else {
@@ -17629,6 +17842,47 @@ struct LayoutAreaEditorWindowView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
 
+                // Sub-menu bar: count + select/unselect all
+                let candidateTotal = state.autoDetectImageCandidates.count
+                let candidateSelected = state.autoDetectImageCandidates.filter(\.isSelected).count
+                HStack(spacing: 12) {
+                    Text("\(candidateSelected) of \(candidateTotal) selected")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    Spacer()
+                    Button("Select All") {
+                        for i in state.autoDetectImageCandidates.indices {
+                            state.autoDetectImageCandidates[i].isSelected = true
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(candidateTotal == 0 || candidateSelected == candidateTotal ? NewOCRMainPalette.tertiaryText : Color.white)
+                    .disabled(candidateTotal == 0 || candidateSelected == candidateTotal)
+
+                    Rectangle()
+                        .fill(NewOCRMainPalette.stroke)
+                        .frame(width: 1, height: 14)
+
+                    Button("Unselect All") {
+                        for i in state.autoDetectImageCandidates.indices {
+                            state.autoDetectImageCandidates[i].isSelected = false
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(candidateSelected == 0 ? NewOCRMainPalette.tertiaryText : Color.white)
+                    .disabled(candidateSelected == 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(NewOCRMainPalette.panelBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach($state.autoDetectImageCandidates) { $candidate in
@@ -17654,7 +17908,7 @@ struct LayoutAreaEditorWindowView: View {
                                         Color.clear.frame(width: 32, height: 32)
                                     }
 
-                                    // Thumbnail pre-rendered at build time — no work done here
+                                    // Thumbnail
                                     if let image = candidate.thumbnail {
                                         Image(nsImage: image)
                                             .resizable()
@@ -17663,6 +17917,20 @@ struct LayoutAreaEditorWindowView: View {
                                             .frame(maxWidth: .infinity)
                                             .background(Color.black.opacity(0.05))
                                             .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    } else {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 6)
+                                                .fill(NewOCRMainPalette.fieldBackground)
+                                            VStack(spacing: 8) {
+                                                ProgressView().controlSize(.regular)
+                                                Text("Loading…")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                            }
+                                        }
+                                        .frame(height: 160)
+                                        .frame(maxWidth: .infinity)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
                                     }
                                 }
                                 .padding(12)
@@ -17744,6 +18012,20 @@ struct LayoutAreaEditorWindowView: View {
                                             .frame(maxWidth: .infinity)
                                             .background(Color.black.opacity(0.05))
                                             .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    } else {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 6)
+                                                .fill(NewOCRMainPalette.fieldBackground)
+                                            VStack(spacing: 8) {
+                                                ProgressView().controlSize(.regular)
+                                                Text("Loading…")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                            }
+                                        }
+                                        .frame(height: 140)
+                                        .frame(maxWidth: .infinity)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
                                     }
 
                                     // Label field
@@ -17823,7 +18105,14 @@ struct LayoutAreaEditorWindowView: View {
                     Spacer()
                 } else if !state.autoDetectImageLocalDone {
                     let canLocal = !state.autoDetectImageCandidates.isEmpty
-                    Button(action: { appState.runAutoDetectLocalScanInLayout(state) }) {
+                    Button(action: {
+                        let conflicts = conflictingSectionsForAutoDetect()
+                        if conflicts.isEmpty {
+                            appState.runAutoDetectLocalScanInLayout(state)
+                        } else {
+                            autoDetectDuplicateConflicts = conflicts
+                        }
+                    }) {
                         HStack(spacing: 8) {
                             Image(systemName: "cpu")
                                 .font(.system(size: 15, weight: .semibold))
