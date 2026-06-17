@@ -3176,6 +3176,219 @@ final class AppState: ObservableObject {
         }
     }
 
+    func runAutoDetectLocalScanInLayout(_ layoutState: LayoutAreaEditorState) {
+        guard !layoutState.isAutoDetectImageRunningLocal && !layoutState.isAutoDetectImageRunningCodex else { return }
+        let candidates = layoutState.autoDetectImageCandidates
+        guard !candidates.isEmpty else { return }
+
+        layoutState.isAutoDetectImageRunningLocal = true
+        layoutState.autoDetectImageLocalDone = false
+        layoutState.autoDetectImageLog = "Scanning \(candidates.count) page(s) with Apple Vision...\n"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var scanned: [AutoDetectLocalCandidate] = []
+            for var candidate in candidates {
+                guard let doc = PDFDocument(url: candidate.pdfURL),
+                      let page = doc.page(at: candidate.pageNumber - 1) else { continue }
+                let hasXObject = self.pageHasImageXObject(page)
+                guard let cgImage = try? self.renderPDFPageToCGImage(page, scale: 2.0) else { continue }
+                let lines = (try? self.recognizeTextWithAppleVision(in: cgImage)) ?? []
+                let hasGap = self.pageHasLargeEmptyRegion(textLines: lines)
+                guard hasXObject || hasGap else { continue }
+                if hasXObject && hasGap {
+                    candidate.detectionNote = "Embedded image + large empty region detected"
+                } else if hasXObject {
+                    candidate.detectionNote = "Embedded image detected in PDF structure"
+                } else {
+                    candidate.detectionNote = "Large empty region detected — likely contains an image"
+                }
+                candidate.pageTextObservations = lines
+                scanned.append(candidate)
+                DispatchQueue.main.async {
+                    layoutState.autoDetectImageLog += "  \(candidate.sectionFileName) page \(candidate.pageNumber): flagged\n"
+                }
+            }
+            DispatchQueue.main.async {
+                layoutState.autoDetectImageCandidates = scanned
+                layoutState.isAutoDetectImageRunningLocal = false
+                layoutState.autoDetectImageLocalDone = true
+                if scanned.isEmpty {
+                    layoutState.autoDetectImageLog += "\nNo image regions detected."
+                } else {
+                    layoutState.autoDetectImageLog += "\n\(scanned.count) page(s) flagged — uncheck false positives, then press Process Codex."
+                }
+                // Re-render thumbnails for filtered list
+                DispatchQueue.global(qos: .utility).async {
+                    var withThumbs = scanned
+                    for i in withThumbs.indices {
+                        let c = withThumbs[i]
+                        if let doc2 = PDFDocument(url: c.pdfURL),
+                           let pg = doc2.page(at: max(c.pageNumber - 1, 0)),
+                           let img = try? self.renderPDFPageToCGImage(pg, scale: 2.0) {
+                            withThumbs[i].thumbnail = NSImage(cgImage: img, size: NSSize(width: img.width, height: img.height))
+                        }
+                    }
+                    DispatchQueue.main.async { layoutState.autoDetectImageCandidates = withThumbs }
+                }
+            }
+        }
+    }
+
+    func runAutoDetectCodexScanInLayout(_ layoutState: LayoutAreaEditorState) {
+        guard !layoutState.isAutoDetectImageRunningCodex else { return }
+        let selected = layoutState.autoDetectImageCandidates.filter { $0.isSelected }
+        guard !selected.isEmpty else { return }
+
+        let projectPath = selectedFolderPath
+        let executable = codexExecutablePath
+        let model = codexFinalizeModel
+        let renderScale = ocrRenderScale
+        let projectURL = URL(fileURLWithPath: projectPath, isDirectory: true)
+        let tempDirURL = projectURL.appendingPathComponent("AppleVision/auto-detect-temp", isDirectory: true)
+
+        layoutState.isAutoDetectImageRunningCodex = true
+        layoutState.autoDetectImageDone = false
+        layoutState.autoDetectImageResults = []
+        layoutState.autoDetectImageLog += "\nRendering \(selected.count) page(s) for Codex...\n"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try FileManager.default.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+                var filenameToCandidate: [String: AutoDetectLocalCandidate] = [:]
+                var imageFilenames: [String] = []
+
+                for candidate in selected {
+                    let sectionStem = URL(fileURLWithPath: candidate.sectionFileName).deletingPathExtension().lastPathComponent
+                    let filename = "\(sectionStem)-page\(candidate.pageNumber).png"
+                    guard let doc = PDFDocument(url: candidate.pdfURL),
+                          let page = doc.page(at: candidate.pageNumber - 1),
+                          let fullImage = try? self.renderPDFPageToCGImage(page, scale: renderScale) else {
+                        DispatchQueue.main.async { layoutState.autoDetectImageLog += "  ⚠ Could not render \(candidate.sectionFileName) page \(candidate.pageNumber)\n" }
+                        continue
+                    }
+                    try self.writePNG(fullImage, to: tempDirURL.appendingPathComponent(filename))
+                    imageFilenames.append(filename)
+                    filenameToCandidate[filename] = candidate
+                    DispatchQueue.main.async { layoutState.autoDetectImageLog += "  Rendered \(filename)\n" }
+                }
+
+                guard !imageFilenames.isEmpty else {
+                    DispatchQueue.main.async {
+                        layoutState.isAutoDetectImageRunningCodex = false
+                    }
+                    return
+                }
+
+                DispatchQueue.main.async { layoutState.autoDetectImageLog += "\nSending to Codex...\n" }
+
+                let fileList = imageFilenames.map { "- \($0)" }.joined(separator: "\n")
+                let prompt = """
+                You are analyzing rendered book pages to identify embedded images.
+                The folder 'AppleVision/auto-detect-temp/' contains PNG files of scanned book pages.
+
+                For each PNG listed below, identify all embedded images — photos, illustrations, diagrams, charts, decorative artwork, or any non-text graphical region that occupies a meaningful area of the page. Do NOT flag body text, headers, footers, page numbers, or blank whitespace as images.
+
+                For each image found, also check if there is a caption or figure label text DIRECTLY adjacent to the image (immediately above or below it, visually distinct from the main body text). If a clear caption exists, transcribe it fully and exactly, preserving the original language.
+
+                PNG files to analyze:
+                \(fileList)
+
+                Coordinate system: use normalized fractions (0.0 to 1.0) where (0,0) is the TOP-LEFT corner of the page image and (1,1) is the BOTTOM-RIGHT corner. x increases rightward, y increases downward.
+
+                Write your results to 'AppleVision/auto-detect-temp/detect-results.json':
+                {
+                  "results": [
+                    {
+                      "filename": "section-003-page2.png",
+                      "images": [
+                        {
+                          "label": "Image1",
+                          "x1": 0.15, "y1": 0.28, "x2": 0.85, "y2": 0.55,
+                          "captionText": "ภาพที่ 1 ...",
+                          "captionX1": 0.20, "captionY1": 0.56, "captionX2": 0.80, "captionY2": 0.62
+                        }
+                      ]
+                    }
+                  ]
+                }
+
+                Rules:
+                - Include ALL listed pages in results, even when no images are found (use empty images array)
+                - Omit captionText and caption coordinates when no caption is present
+                - Label images sequentially per page: Image1, Image2, etc.
+                - Do not modify or delete any PNG files
+                - Write only the JSON file, no explanations or other output
+                """
+
+                let result = self.runCodexExec(prompt: prompt, projectPath: projectPath, executablePath: executable, model: model) { text in
+                    DispatchQueue.main.async { layoutState.autoDetectImageLog += text }
+                }
+
+                let resultsURL = tempDirURL.appendingPathComponent("detect-results.json")
+
+                DispatchQueue.main.async {
+                    switch result {
+                    case .failure(let error):
+                        layoutState.isAutoDetectImageRunningCodex = false
+                        layoutState.autoDetectImageLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                    case .success:
+                        guard let data = try? Data(contentsOf: resultsURL),
+                              let decoded = try? JSONDecoder().decode(AutoDetectCodexResults.self, from: data) else {
+                            layoutState.isAutoDetectImageRunningCodex = false
+                            layoutState.autoDetectImageLog += "\n\n⚠ Could not read detect-results.json"
+                            return
+                        }
+                        var detectedResults: [AutoDetectImageResult] = []
+                        for pageResult in decoded.results {
+                            guard let candidate = filenameToCandidate[pageResult.filename] else { continue }
+                            let mdFileURL = candidate.mdFolderURL.appendingPathComponent("page\(candidate.pageNumber).md")
+                            let mdExists = FileManager.default.fileExists(atPath: mdFileURL.path)
+                            for img in pageResult.images {
+                                let imageRect = OCRLayoutAreaRect(
+                                    left: CGFloat(img.x1), right: CGFloat(img.x2),
+                                    top: CGFloat(1.0 - img.y1), bottom: CGFloat(1.0 - img.y2)
+                                )
+                                var captionRect: OCRLayoutAreaRect? = nil
+                                if let cx1 = img.captionX1, let cy1 = img.captionY1,
+                                   let cx2 = img.captionX2, let cy2 = img.captionY2 {
+                                    captionRect = OCRLayoutAreaRect(
+                                        left: CGFloat(cx1), right: CGFloat(cx2),
+                                        top: CGFloat(1.0 - cy1), bottom: CGFloat(1.0 - cy2)
+                                    )
+                                }
+                                let captionText = img.captionText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                                detectedResults.append(AutoDetectImageResult(
+                                    sectionFileName: candidate.sectionFileName,
+                                    pageNumber: candidate.pageNumber,
+                                    label: img.label,
+                                    pdfURL: candidate.pdfURL,
+                                    mdFileURL: mdExists ? mdFileURL : nil,
+                                    imageRect: imageRect,
+                                    captionRect: captionRect,
+                                    captionText: captionText,
+                                    captionSelected: !captionText.isEmpty && captionRect != nil,
+                                    pageTextObservations: candidate.pageTextObservations
+                                ))
+                            }
+                        }
+                        for filename in imageFilenames {
+                            try? FileManager.default.removeItem(at: tempDirURL.appendingPathComponent(filename))
+                        }
+                        layoutState.autoDetectImageResults = detectedResults
+                        layoutState.autoDetectImageDone = true
+                        layoutState.isAutoDetectImageRunningCodex = false
+                        layoutState.autoDetectImageLog += "\n\n--- Done: \(detectedResults.count) image(s) detected ---"
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    layoutState.isAutoDetectImageRunningCodex = false
+                    layoutState.autoDetectImageLog += "\n\n--- Error ---\n\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     func buildAutoDetectFootnotePages(in layoutState: LayoutAreaEditorState) {
         let targetSections = buildScopeTargetSections(
             scope: layoutState.selectedScope,
@@ -17300,7 +17513,25 @@ struct LayoutAreaEditorWindowView: View {
                     .padding(12)
                 }
             } else if !state.autoDetectImageDone {
-                // Phase 2: Codex processing (buttons removed to save space)
+                // Phase 2: Codex running — show log
+                if !state.autoDetectImageLog.isEmpty {
+                    ScrollView {
+                        Text(state.autoDetectImageLog)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(maxHeight: .infinity)
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                if state.isAutoDetectImageRunningCodex {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Running Codex…").font(.system(size: 12)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                }
             } else {
                 // Results
                 ScrollView {
@@ -17351,6 +17582,32 @@ struct LayoutAreaEditorWindowView: View {
                     .padding(12)
                 }
             }
+
+            // Action buttons at bottom
+            HStack(spacing: 10) {
+                Spacer()
+                if state.isAutoDetectImageRunningLocal || state.isAutoDetectImageRunningCodex {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(state.isAutoDetectImageRunningLocal ? "Scanning…" : "Running Codex…")
+                            .font(.system(size: 12))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                } else if !state.autoDetectImageLocalDone {
+                    Button("Process Local") {
+                        appState.runAutoDetectLocalScanInLayout(state)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.autoDetectImageCandidates.isEmpty)
+                } else if !state.autoDetectImageDone {
+                    Button("Process Codex") {
+                        appState.runAutoDetectCodexScanInLayout(state)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!state.autoDetectImageCandidates.contains { $0.isSelected })
+                }
+            }
+            .padding(.top, 4)
         }
         .padding(10)
         .frame(minWidth: 0, minHeight: 460)
