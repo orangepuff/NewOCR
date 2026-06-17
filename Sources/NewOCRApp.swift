@@ -17219,53 +17219,57 @@ struct LayoutAreaEditorWindowView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach($state.autoDetectImageCandidates) { $candidate in
-                            VStack(alignment: .leading, spacing: 10) {
-                                HStack(alignment: .top, spacing: 12) {
-                                    Toggle("", isOn: $candidate.isSelected)
-                                        .labelsHidden()
-                                        .toggleStyle(.checkbox)
-                                        .scaleEffect(1.5)
-                                        .padding(.top, 4)
+                            ZStack(alignment: .topTrailing) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    HStack(alignment: .top, spacing: 12) {
+                                        Toggle("", isOn: $candidate.isSelected)
+                                            .labelsHidden()
+                                            .toggleStyle(.checkbox)
+                                            .scaleEffect(1.5)
+                                            .padding(.top, 4)
 
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("\(candidate.sectionFileName) Page \(candidate.pageNumber)")
-                                            .font(.system(size: 13, weight: .semibold))
-                                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                                        Text(candidate.detectionNote)
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text("\(candidate.sectionFileName) Page \(candidate.pageNumber)")
+                                                .font(.system(size: 13, weight: .semibold))
+                                                .foregroundStyle(NewOCRMainPalette.primaryText)
+                                            Text(candidate.detectionNote)
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                                        }
+                                        Spacer()
+                                        // space for the X button
+                                        Color.clear.frame(width: 32, height: 32)
                                     }
-                                    Spacer()
 
-                                    Button(action: {
-                                        state.autoDetectImageCandidates.removeAll { $0.id == candidate.id }
-                                    }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 18, weight: .semibold))
-                                            .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
-                                            .padding(4)
+                                    // Thumbnail (300px wide)
+                                    if let image = appState.layoutAreaPreviewImage(pdfURL: candidate.pdfURL, pageNumber: candidate.pageNumber) {
+                                        Image(nsImage: image)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(height: 300)
+                                            .frame(maxWidth: .infinity)
+                                            .background(Color.black.opacity(0.05))
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
                                     }
-                                    .help("Remove this candidate")
                                 }
+                                .padding(12)
+                                .background(NewOCRMainPalette.panelBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                                )
 
-                                // Thumbnail (300px wide)
-                                if let image = appState.layoutAreaPreviewImage(pdfURL: candidate.pdfURL, pageNumber: candidate.pageNumber) {
-                                    Image(nsImage: image)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(height: 300)
-                                        .frame(maxWidth: .infinity)
-                                        .background(Color.black.opacity(0.05))
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                Button(action: {
+                                    state.autoDetectImageCandidates.removeAll { $0.id == candidate.id }
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 20))
+                                        .foregroundStyle(Color.red)
+                                        .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
                                 }
+                                .padding(8)
                             }
-                            .padding(12)
-                            .background(NewOCRMainPalette.panelBackground)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                            )
                         }
                     }
                     .padding(12)
@@ -17277,41 +17281,44 @@ struct LayoutAreaEditorWindowView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach($state.autoDetectImageResults) { $result in
-                            VStack(alignment: .leading, spacing: 10) {
-                                HStack(spacing: 12) {
-                                    Toggle("", isOn: $result.imageSelected)
-                                        .labelsHidden()
-                                        .toggleStyle(.checkbox)
-                                        .scaleEffect(1.5)
-                                        .padding(.top, 2)
-                                    Text("\(result.sectionFileName) Page \(result.pageNumber)")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(NewOCRMainPalette.primaryText)
-                                    Spacer()
-
-                                    Button(action: {
-                                        state.autoDetectImageResults.removeAll { $0.id == result.id }
-                                    }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 18, weight: .semibold))
-                                            .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
-                                            .padding(4)
+                            ZStack(alignment: .topTrailing) {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    HStack(spacing: 12) {
+                                        Toggle("", isOn: $result.imageSelected)
+                                            .labelsHidden()
+                                            .toggleStyle(.checkbox)
+                                            .scaleEffect(1.5)
+                                            .padding(.top, 2)
+                                        Text("\(result.sectionFileName) Page \(result.pageNumber)")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                                        Spacer()
+                                        Color.clear.frame(width: 32, height: 20)
                                     }
-                                    .help("Remove this result")
+                                    TextField("Label", text: $result.label)
+                                        .font(.system(size: 12))
+                                        .padding(8)
+                                        .background(NewOCRMainPalette.fieldBackground)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
                                 }
-                                TextField("Label", text: $result.label)
-                                    .font(.system(size: 12))
-                                    .padding(8)
-                                    .background(NewOCRMainPalette.fieldBackground)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .padding(12)
+                                .background(NewOCRMainPalette.panelBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                                )
+
+                                Button(action: {
+                                    state.autoDetectImageResults.removeAll { $0.id == result.id }
+                                }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 20))
+                                        .foregroundStyle(Color.red)
+                                        .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
+                                }
+                                .padding(8)
                             }
-                            .padding(12)
-                            .background(NewOCRMainPalette.panelBackground)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                            )
                         }
                     }
                     .padding(12)
@@ -17336,33 +17343,36 @@ struct LayoutAreaEditorWindowView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach($state.autoDetectFootnotePages) { $page in
-                            HStack(spacing: 12) {
-                                Toggle("", isOn: $page.isSelected)
-                                    .labelsHidden()
-                                    .toggleStyle(.checkbox)
-                                    .scaleEffect(1.5)
-                                Text("\(page.sectionFileName) Page \(page.pageNumber)")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(NewOCRMainPalette.primaryText)
-                                Spacer()
+                            ZStack(alignment: .topTrailing) {
+                                HStack(spacing: 12) {
+                                    Toggle("", isOn: $page.isSelected)
+                                        .labelsHidden()
+                                        .toggleStyle(.checkbox)
+                                        .scaleEffect(1.5)
+                                    Text("\(page.sectionFileName) Page \(page.pageNumber)")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                                    Spacer()
+                                    Color.clear.frame(width: 32, height: 20)
+                                }
+                                .padding(12)
+                                .background(NewOCRMainPalette.panelBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                                )
 
                                 Button(action: {
                                     state.autoDetectFootnotePages.removeAll { $0.id == page.id }
                                 }) {
                                     Image(systemName: "xmark.circle.fill")
-                                        .font(.system(size: 18, weight: .semibold))
-                                        .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
-                                        .padding(4)
+                                        .font(.system(size: 20))
+                                        .foregroundStyle(Color.red)
+                                        .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
                                 }
-                                .help("Remove this page")
+                                .padding(8)
                             }
-                            .padding(12)
-                            .background(NewOCRMainPalette.panelBackground)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                            )
                         }
                     }
                     .padding(12)
@@ -17376,41 +17386,44 @@ struct LayoutAreaEditorWindowView: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(NewOCRMainPalette.primaryText)
                             ForEach($state.autoDetectFootnoteResults) { $result in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack(spacing: 12) {
-                                        Toggle("", isOn: $result.isSelected)
-                                            .labelsHidden()
-                                            .toggleStyle(.checkbox)
-                                            .scaleEffect(1.5)
-                                            .padding(.top, 2)
-                                        Text("\(result.sectionFileName) Page \(result.pageNumber) [\(result.label)]")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                                        Spacer()
-
-                                        Button(action: {
-                                            state.autoDetectFootnoteResults.removeAll { $0.id == result.id }
-                                        }) {
-                                            Image(systemName: "xmark.circle.fill")
-                                                .font(.system(size: 18, weight: .semibold))
-                                                .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
-                                                .padding(4)
+                                ZStack(alignment: .topTrailing) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack(spacing: 12) {
+                                            Toggle("", isOn: $result.isSelected)
+                                                .labelsHidden()
+                                                .toggleStyle(.checkbox)
+                                                .scaleEffect(1.5)
+                                                .padding(.top, 2)
+                                            Text("\(result.sectionFileName) Page \(result.pageNumber) [\(result.label)]")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(NewOCRMainPalette.primaryText)
+                                            Spacer()
+                                            Color.clear.frame(width: 32, height: 20)
                                         }
-                                        .help("Remove this footnote")
+                                        TextField("Text", text: $result.text)
+                                            .font(.system(size: 11))
+                                            .padding(8)
+                                            .background(NewOCRMainPalette.fieldBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
                                     }
-                                    TextField("Text", text: $result.text)
-                                        .font(.system(size: 11))
-                                        .padding(8)
-                                        .background(NewOCRMainPalette.fieldBackground)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .padding(12)
+                                    .background(NewOCRMainPalette.panelBackground)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                                    )
+
+                                    Button(action: {
+                                        state.autoDetectFootnoteResults.removeAll { $0.id == result.id }
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 20))
+                                            .foregroundStyle(Color.red)
+                                            .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
+                                    }
+                                    .padding(8)
                                 }
-                                .padding(12)
-                                .background(NewOCRMainPalette.panelBackground)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                                )
                             }
                         }
 
@@ -17420,41 +17433,44 @@ struct LayoutAreaEditorWindowView: View {
                                 .foregroundStyle(NewOCRMainPalette.primaryText)
                                 .padding(.top, 8)
                             ForEach($state.autoDetectRefmarkResults) { $result in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack(spacing: 12) {
-                                        Toggle("", isOn: $result.isSelected)
-                                            .labelsHidden()
-                                            .toggleStyle(.checkbox)
-                                            .scaleEffect(1.5)
-                                            .padding(.top, 2)
-                                        Text("\(result.sectionFileName) Page \(result.pageNumber) [\(result.label)]")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                                        Spacer()
-
-                                        Button(action: {
-                                            state.autoDetectRefmarkResults.removeAll { $0.id == result.id }
-                                        }) {
-                                            Image(systemName: "xmark.circle.fill")
-                                                .font(.system(size: 18, weight: .semibold))
-                                                .foregroundStyle(Color(red: 1.0, green: 0.278, blue: 0.278))
-                                                .padding(4)
+                                ZStack(alignment: .topTrailing) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack(spacing: 12) {
+                                            Toggle("", isOn: $result.isSelected)
+                                                .labelsHidden()
+                                                .toggleStyle(.checkbox)
+                                                .scaleEffect(1.5)
+                                                .padding(.top, 2)
+                                            Text("\(result.sectionFileName) Page \(result.pageNumber) [\(result.label)]")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(NewOCRMainPalette.primaryText)
+                                            Spacer()
+                                            Color.clear.frame(width: 32, height: 20)
                                         }
-                                        .help("Remove this refmark")
+                                        TextField("Anchor", text: $result.anchorWord)
+                                            .font(.system(size: 11))
+                                            .padding(8)
+                                            .background(NewOCRMainPalette.fieldBackground)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
                                     }
-                                    TextField("Anchor", text: $result.anchorWord)
-                                        .font(.system(size: 11))
-                                        .padding(8)
-                                        .background(NewOCRMainPalette.fieldBackground)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .padding(12)
+                                    .background(NewOCRMainPalette.panelBackground)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                                    )
+
+                                    Button(action: {
+                                        state.autoDetectRefmarkResults.removeAll { $0.id == result.id }
+                                    }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 20))
+                                            .foregroundStyle(Color.red)
+                                            .background(Circle().fill(NewOCRMainPalette.panelBackground).padding(3))
+                                    }
+                                    .padding(8)
                                 }
-                                .padding(12)
-                                .background(NewOCRMainPalette.panelBackground)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                                )
                             }
                         }
                     }
