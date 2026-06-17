@@ -11383,7 +11383,9 @@ struct AutoDetectImageWindowView: View {
                                 .padding(.horizontal, 4)
                                 .padding(.bottom, 4)
                             ForEach($state.localCandidates) { $candidate in
-                                AutoDetectLocalCandidateRow(candidate: $candidate)
+                                AutoDetectLocalCandidateRow(candidate: $candidate) {
+                                    state.localCandidates.removeAll { $0.id == candidate.id }
+                                }
                             }
                         }
                     } else {
@@ -11409,26 +11411,49 @@ struct AutoDetectImageWindowView: View {
 
 private struct AutoDetectLocalCandidateRow: View {
     @Binding var candidate: AutoDetectLocalCandidate
+    let onRemove: () -> Void
+    @State private var removeHovered = false
+    @State private var thumbnail: NSImage? = nil
+
+    private let thumbW: CGFloat = 200
+    private let thumbH: CGFloat = 283  // A4 ratio ≈ 1:1.414
 
     var body: some View {
-        HStack(spacing: 12) {
-            Toggle("", isOn: $candidate.isSelected)
-                .labelsHidden()
-                .toggleStyle(.checkbox)
-                .padding(.leading, 2)
+        HStack(alignment: .top, spacing: 14) {
+            // PDF page thumbnail
+            ZStack {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(NewOCRMainPalette.fieldBackground)
+                if let thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: thumbW, height: thumbH)
+                        .clipped()
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .frame(width: thumbW, height: thumbH)
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
 
-            Image(systemName: "doc.richtext")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color.orange.opacity(0.85))
-                .frame(width: 24)
-
-            VStack(alignment: .leading, spacing: 4) {
+            // Info + checkbox
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
+                    Toggle("", isOn: $candidate.isSelected)
+                        .labelsHidden()
+                        .toggleStyle(.checkbox)
+
                     Text(candidate.sectionFileName)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(NewOCRMainPalette.primaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
+
                     Text("Page \(candidate.pageNumber)")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white)
@@ -11437,15 +11462,34 @@ private struct AutoDetectLocalCandidateRow: View {
                         .background(Color(red: 80/255, green: 130/255, blue: 220/255))
                         .clipShape(Capsule())
                 }
+
                 Text(candidate.detectionNote)
                     .font(.system(size: 11))
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.top, 4)
 
             Spacer()
+
+            // Remove button
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(removeHovered ? Color.white : Color(white: 0.65))
+                    .frame(width: 26, height: 26)
+                    .background(removeHovered ? Color.red.opacity(0.80) : Color.white.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+            .onHover { hovering in
+                removeHovered = hovering
+                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+            }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
@@ -11461,8 +11505,24 @@ private struct AutoDetectLocalCandidateRow: View {
         .contentShape(Rectangle())
         .onTapGesture { candidate.isSelected.toggle() }
         .onHover { hovering in
-            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+            if hovering && !removeHovered { NSCursor.pointingHand.set() }
+            else if !hovering { NSCursor.arrow.set() }
         }
+        .task(id: candidate.id) {
+            await loadThumbnail()
+        }
+    }
+
+    private func loadThumbnail() async {
+        let url = candidate.pdfURL
+        let pageIndex = candidate.pageNumber - 1
+        let size = CGSize(width: thumbW * 2, height: thumbH * 2) // 2× for retina
+        let image = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            guard let doc = PDFDocument(url: url),
+                  let page = doc.page(at: pageIndex) else { return nil }
+            return page.thumbnail(of: size, for: .artBox)
+        }.value
+        await MainActor.run { thumbnail = image }
     }
 }
 

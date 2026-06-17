@@ -1254,9 +1254,18 @@ Enabled only when at least one non-completed section has existing `page*.md` out
      above). Catches vector illustrations that have no XObject.
    A page is flagged if **either** check matches. Each candidate row shows which
    detection method triggered it.
-5. **Review candidates**: Each flagged page appears as a row with a checkbox. Uncheck
-   any false positives (e.g. chapter-opening pages with decorative spacing). At least
-   one page must remain checked for the next step.
+5. **Review candidates**: Each flagged page appears as a card row containing:
+   - A **page thumbnail** (200×283 px, rendered at 2× for retina) so you can visually
+     confirm whether the page actually contains an image.
+   - A **checkbox** to include or exclude the page from the Codex run. Clicking the
+     row body also toggles the checkbox. Unchecked rows are dimmed (55% opacity).
+   - The section filename, page number badge, and a note explaining which detection
+     method triggered the flag (`"Embedded image detected in PDF structure"`,
+     `"Large empty region detected"`, or both).
+   - A **× remove button** (trailing edge, turns red on hover) to permanently delete
+     the row from the list — useful for confirmed false positives that you never want
+     to see again during this session.
+   At least one row must remain checked to enable the next step.
 6. Press **Process by Codex** (enabled only when ≥ 1 candidate is checked and Phase 1
    is complete). Checked pages are rendered to PNG at `OCR_RENDER_SCALE` and sent to
    Codex. Codex identifies actual image regions (photos, illustrations, diagrams) and
