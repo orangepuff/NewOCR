@@ -128,6 +128,7 @@ struct AutoDetectLocalCandidate: Identifiable {
     fileprivate var pageTextObservations: [OCRLine]
     var isSelected: Bool = true
     var detectionNote: String = "Large empty region detected — likely contains an image"
+    var thumbnail: NSImage? = nil
 }
 
 struct AutoDetectImageResult: Identifiable {
@@ -3157,6 +3158,22 @@ final class AppState: ObservableObject {
         }
 
         layoutState.autoDetectImageCandidates = candidates
+
+        // Pre-render thumbnails once in background so the view never blocks on render
+        DispatchQueue.global(qos: .userInitiated).async {
+            var rendered = candidates
+            for i in rendered.indices {
+                let c = rendered[i]
+                if let doc = PDFDocument(url: c.pdfURL),
+                   let page = doc.page(at: max(c.pageNumber - 1, 0)),
+                   let cgImg = try? self.renderPDFPageToCGImage(page, scale: 2.0) {
+                    rendered[i].thumbnail = NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+                }
+            }
+            DispatchQueue.main.async {
+                layoutState.autoDetectImageCandidates = rendered
+            }
+        }
     }
 
     func buildAutoDetectFootnotePages(in layoutState: LayoutAreaEditorState) {
@@ -17247,8 +17264,8 @@ struct LayoutAreaEditorWindowView: View {
                                         Color.clear.frame(width: 32, height: 32)
                                     }
 
-                                    // Thumbnail (300px wide)
-                                    if let image = appState.layoutAreaPreviewImage(pdfURL: candidate.pdfURL, pageNumber: candidate.pageNumber) {
+                                    // Thumbnail pre-rendered at build time — no work done here
+                                    if let image = candidate.thumbnail {
                                         Image(nsImage: image)
                                             .resizable()
                                             .scaledToFit()
