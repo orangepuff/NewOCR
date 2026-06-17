@@ -509,12 +509,15 @@ The window is dark-styled (matching Compare/Log windows) and is split into two c
 labelled sections:
 
 **1. Corrections** (shown first, blue header)
-During OCR, underscore characters that appear at word boundaries are automatically removed
-from the `.md` output before saving. This corrects a common Vision OCR artifact where
-italic-styled text is misread as Markdown italic syntax (e.g. `_บทที่ 1` → `บทที่ 1`).
-Each row shows the original struck-through text with an arrow to the corrected version so
-the user can verify every fix. The correction is already applied to the saved `page*.md`
-files.
+During OCR, two automatic cleanup passes run before layout rules are applied:
+
+- **Superscript removal** — two complementary passes:
+  - *Standalone line removal*: OCR observations that are geometrically elevated above neighbouring body text are silently dropped. A line is treated as a superscript when its height is less than 55 % of the page median line height, its text is 1–4 characters consisting only of digits, ASCII letters, or common footnote symbols (`*`, `†`, `‡`, `§`, `¶`, `°`, `+`, `-`), and its lower edge sits at or above the vertical midpoint of a horizontally-overlapping body-text line.
+  - *Inline Unicode superscript stripping*: Apple Vision sometimes embeds superscript reference numbers directly inside a text observation rather than emitting a separate small line. Characters in the Unicode superscript digit block (⁰ ¹ ² ³ ⁴ ⁵ ⁶ ⁷ ⁸ ⁹) and common superscript letters (ⁱ ⁿ ᵃ ᵇ … ᶻ) are stripped from every OCR line before layout rules are applied. These characters are unambiguous — they never appear in normal body text.
+
+- **Underscore artifact removal**: underscore characters that appear at word boundaries are removed from the text of each remaining line. This corrects a common Vision OCR artifact where italic-styled text is misread as Markdown italic syntax (e.g. `_บทที่ 1` → `บทที่ 1`).
+
+Each auto-corrected line is flagged in the OCR Review window showing the original and corrected versions so the user can verify every fix. The corrections are already applied to the saved `page*.md` files.
 
 **2. Low-Confidence** (shown second, amber header)
 Lines where Vision's recognition confidence score fell below 75% are flagged for manual
@@ -1287,38 +1290,34 @@ Auto-detect image is integrated into **Define Layout** to prepare rules before O
 
 Click the **Auto Image** button in the Define Layout header to activate image
 detection. The scope (All/Selected/Section/Page) controls which sections/pages
-are scanned.
+are scanned. Pages are enumerated directly from the PDF so Auto Image works
+before OCR has been run — no existing Markdown files are required.
 
 ### Workflow
 
 1. Open **Define Layout** and set your scope (All Sections, Selected Sections,
    This Section, or This Page).
-2. Click the **Auto Image** button in the header.
-3. Press **Process Local** (Phase 1) — blue full-width button at the bottom of the panel.
-   - Before scanning, the app checks whether any candidate section already has a saved `image` rule
-     in `layout-areas.json` (scope: all_sections, section, or matching page). If conflicts are found,
-     an alert lists the affected section file names and blocks the scan — the user must open
-     **View Rules**, delete those existing image rules, and then try again.
-   - Scans pages with Apple Vision and PDF structure checks in parallel
-   - Flags pages with large empty regions (likely images) or embedded XObjects
-   - Shows candidate pages with thumbnails and checkboxes
-4. Review candidates — a sub-menu bar above the candidate list shows:
+2. Click the **Auto Image** button in the header. All pages in the scope appear
+   immediately as candidates with page thumbnails and checkboxes — no local
+   scanning step is required.
+3. Review candidates — a sub-menu bar above the list shows:
    - **"X of Y selected"** count (updates live as checkboxes change)
-   - **Select All** button (disabled when all are already selected)
-   - **Unselect All** button (disabled when none are selected)
-   - Uncheck false positives (pages that are actually text, not images)
-   - Click the red **×** button to remove a candidate entirely from the list
-   - At least one row must remain checked
-5. Press **Process Codex** (Phase 2) — green full-width button, enabled when ≥ 1 candidate is checked.
+   - **Select All** and **Unselect All** buttons
+   - Click a thumbnail to open the full page in the macOS viewer for review
+   - Click the red **×** button to remove a page from the list
+4. Press **Process Codex** — green full-width button, enabled when ≥ 1 page is checked.
+   - Before sending, the app checks whether any selected section already has a saved `image`
+     rule in `layout-areas.json`. If conflicts are found, an alert lists the affected sections
+     and blocks the scan — remove those rules from **View Rules** first.
    - Sends checked pages to Codex for precise image region detection
-   - Codex identifies actual images and captions
-6. Review results — each detected image shows:
+   - Codex identifies actual images and captions on each page
+5. Review results — each detected image shows:
    - Checkbox to include/exclude from save
    - Page thumbnail so you can visually confirm the image
    - Editable label field (e.g. Image1)
-   - Caption / Image Description row (if Codex detected a caption), with its own checkbox
+   - Caption / Image Description row (if Codex detected caption text), with its own checkbox — shown even when Codex did not return precise caption coordinates; in that case the saved `image_desc` rect is derived as a strip immediately below the image boundary
    - Red **×** button to remove the result entirely
-7. Click **Save (N)** — blue full-width button — to save selected rules to `layout-areas.json`.
+6. Click **Save (N)** — blue full-width button — to save selected rules to `layout-areas.json`.
    - Runs in background; shows spinner then a ✓ status line on completion
    - `image` rule saved to `layout-areas.json` for each checked image
    - `image_desc` rule saved for each checked caption
@@ -1328,23 +1327,30 @@ are scanned.
 
 ### Scope Behavior
 
-- **All Sections**: Scans all non-completed sections with OCR output
-- **Selected Sections**: Scans only checked sections (if "Selected" scope is chosen)
-- **This Section**: Scans only the currently selected section
-- **This Page**: Scans only the currently displayed page
+- **All Sections**: Lists all pages across all non-manual sections
+- **Selected Sections**: Lists all pages from checked sections only
+- **This Section**: Lists all pages of the currently selected section
+- **This Page**: Treated the same as **This Section** — all pages of the current section are listed, because images can appear on any page
 
-Clicking the **Auto Image** or **Auto Footnote** buttons does not change the
-current section selection or scope. The existing scope/selection is preserved
-and used for scanning.
+Clicking **Auto Image** does not change the current section selection or scope.
+Changing scope while Auto Image is active resets the list and rebuilds it from
+the new scope.
 
-Changing scope while in Auto Image mode will reset the candidates and re-scan
-based on the new scope.
+### Controls Disabled in Auto Mode
+
+When any Auto mode is active (**Auto Image**, **Auto Header**, **Auto Quote**, or **Auto Footnote**):
+
+- The **Scope picker** (Selected / Section / Page) is disabled and grayed out. Scope must be set before activating an auto mode; it cannot be changed while a panel is open. Closing the auto mode re-enables the picker.
+- The top-level **Save Area** / **Update Rule** button is disabled (grayed out). Each auto-detect panel has its own dedicated **Save (N)** button after Codex processing completes. The top-level save button is re-enabled once the auto-detect mode is closed.
+
+Changing scope while in Auto Image mode will reset the candidates and rebuild
+the list based on the new scope.
 
 ### What Save Does
 
 For each checked image:
 1. **`image` rule saved** to `layout-areas.json` with section, page, rect, and label
-2. **`image_desc` rule saved** (if caption detected and checked) with matching label
+2. **`image_desc` rule saved** (if caption text present and checked) with matching label; rect comes from Codex coordinates when available, otherwise a 5 % strip immediately below the image boundary is used
 3. **Image cropped** from PDF and saved to `AppleVision/MD/<section>/Images/`
 4. **Markdown inserted** into `page*.md` at best-effort position above image
 
@@ -1446,7 +1452,8 @@ Auto-detect footnote is integrated into **Define Layout** to prepare rules befor
 
 Click the **Auto Footnote** button in the Define Layout header to activate footnote
 detection. The scope (All/Selected/Section/Page) controls which sections/pages
-are available for selection.
+are available for selection. Pages are enumerated directly from the PDF so Auto
+Footnote works before OCR has been run — no existing Markdown files are required.
 
 ### Workflow
 
@@ -1454,37 +1461,48 @@ are available for selection.
    This Section, or This Page).
 2. Click the **Auto Footnote** button in the header.
 3. A list of all available pages appears (no local scanning needed).
-   - Each page shows section name and page number
+   - Each page shows a portrait thumbnail of the PDF page, section name, and page number
+   - Click a thumbnail to open the full page in the macOS viewer
    - Click the red **×** button to remove a page entirely from the list
 4. **Select pages**: A sub-menu bar above the list shows **"X of Y selected"** count,
    **Select All**, and **Unselect All** buttons. All pages are checked by default.
-   - All pages are checked by default
 5. Press **Process Codex** (enabled only when ≥ 1 page is checked).
    - Before sending to Codex, the app checks whether any selected page's section already has
      a saved `footnote` or `refmark` rule in `layout-areas.json`. If conflicts are found,
      an alert lists the affected section file names and blocks the scan — the user must open
      **View Rules**, delete those existing rules, and then try again.
-   - Renders selected pages to PNG at `OCR_RENDER_SCALE`
-   - Sends all pages to Codex in a single batch request
-6. **Codex analysis**: Codex identifies:
-   - **Footnotes**: Text regions at page bottom with detected label and text
-   - **Ref marks**: Inline reference locations with detected label and anchor word
-7. Review results:
-   - **Footnotes** section: each row shows section, page, label, and text
-     - Footnote text is fully editable
-     - Click the red **×** button to remove a footnote result from the save list
-   - **Ref Marks** section: each row shows section, page, label, and anchor word
-     - Anchor word is fully editable (must match exact OCR text)
-     - Click the red **×** button to remove a ref mark result from the save list
-8. Check/uncheck rows to select which rules to save (all checked by default)
-9. Click **Save (N)** to save rules to `layout-areas.json`.
+   - Renders selected pages to PNG at `AUTO_DETECT_RENDER_SCALE`
+   - **Apple Vision pre-scan**: for each rendered page the app runs `VNRecognizeTextRequest`
+     locally to find superscript candidates in the body text (characters matching footnote
+     symbols `*`, `†`, `‡`, digits, etc. that are small and geometrically elevated above
+     neighbouring body text lines and above the footnote zone). The found labels and
+     coordinates are stored before Codex is called. The log shows which superscripts were
+     detected per page (e.g. `(2 superscript(s): *, †)`).
+   - Sends all pages to Codex in a single batch request, asking only for footnote
+     definitions (not ref marks — those are handled locally by Apple Vision)
+6. **Codex analysis**: Codex identifies footnote definitions:
+   - **Footnotes**: Text regions at page bottom with detected label and full text
+7. **Label matching**: For each Codex footnote label (e.g. `*`), the app looks for a
+   matching Apple Vision superscript candidate — first on the **same page** as the
+   footnote, then on each **preceding selected page** in reverse order (closest first).
+   This handles the common case where a refmark appears on page N and the footnote
+   definition is at the bottom of page N+1. If a match is found on any page, a refmark
+   result is created on that page at the Apple Vision-detected coordinates. If no match
+   is found anywhere (e.g. translator's notes with no inline ref mark), only the
+   footnote rule is saved.
+8. Review results — two sections are shown after Codex completes:
+   - **Footnotes** section: each card shows a page thumbnail (click to open full page), section/page/label header, and editable footnote text in a TextEditor
+   - **Ref Marks** section: each card shows a page thumbnail (click to open full page), section/page/label header, and editable anchor word in a TextEditor (only present when Apple Vision found a matching superscript in the body text)
+   - Click the red **×** button on any card to remove it from the save list
+8. Check/uncheck rows to select which rules to save (all checked by default). Changing a checkbox re-enables the save button if it was already saved.
+9. Click **Save (N)** to save rules to `layout-areas.json`. After a successful save the button changes to **Saved** (checkmark icon) and is disabled. Toggling a checkbox or removing a result re-enables it.
 
 ### Scope Behavior
 
 - **All Sections**: Shows all pages across all non-completed sections with OCR output
-- **Selected Sections**: Shows pages only from checked sections
-- **This Section**: Shows pages only from current section
-- **This Page**: Shows only the current page
+- **Selected Sections**: Shows all pages from checked sections
+- **This Section**: Shows all pages of the current section
+- **This Page**: Treated the same as **This Section** — all pages of the current section are listed, because footnotes can appear on any page
 
 Changing scope while in Auto Footnote mode will reset the page list and rebuild
 based on the new scope.
@@ -1492,10 +1510,24 @@ based on the new scope.
 ### What Save Does
 
 For each checked footnote:
-1. **`footnote` rule saved** to `layout-areas.json` with section, page, rect, label
+1. **`footnote` rule saved** to `layout-areas.json` with `scope: "page"`, section, page number, rect, and label
 
-For each checked ref mark:
-1. **`refmark` rule saved** to `layout-areas.json` with section, page, rect, label, and anchor word
+For each checked ref mark (present only when Apple Vision found a matching superscript in body text):
+1. **`refmark` rule saved** to `layout-areas.json` with `scope: "page"`, section, page number, rect, label, and anchor word
+
+All auto-detect rules use `scope: "page"` (explicitly page-level) so the conflict detection and OCR pipeline always match them correctly.
+
+**Migration**: Existing rules saved with the old format (`scope: null` with a page number) were migrated once via a Python script — all 31 rules in the project's `layout-areas.json` now have `scope: "page"`.
+
+### Footnote Output in Markdown / EPUB
+
+- The `refmark` rule inserts `[^label]` **inline** in the paragraph where the superscript was found.
+- The `footnote` rule writes `[^label]: footnote text` at the **end of the page's `.md` file**.
+- **Cross-page refmark/footnote pairs work correctly**: `apple_vision_convert.py` joins all
+  page `.md` files for a section into one string before rendering (`"\n\n".join(...)`), so
+  `[^*]` on page 3 and `[^*]: text` on page 4 end up in the same document and are linked correctly.
+- In Markdown renderers and EPUB readers, footnote content appears as a **popup / side note** or at the end of the chapter — not after the specific paragraph or at a page break. This is standard Markdown footnote behaviour.
+- Pages with only a `footnote` rule (no matching refmark — e.g. translator's notes with `-ผู้แปล`) produce a standalone footnote definition that is still valid Markdown; EPUB readers will render it at the end of the chapter.
 
 Future OCR runs will use these rules to format footnotes and ref marks automatically.
 
@@ -1503,7 +1535,7 @@ Future OCR runs will use these rules to format footnotes and ref marks automatic
 
 Auto-detect quote is integrated into **Define Layout** to identify blockquote regions before OCR.
 
-Click the **Auto Quote** button (purple, quote bubble icon) in the Define Layout header to activate quote detection. The scope (All/Selected/Section/Page) controls which sections/pages appear in the candidate list.
+Click the **Auto Quote** button (purple, quote bubble icon) in the Define Layout header to activate quote detection. The scope (All/Selected/Section/Page) controls which sections/pages appear in the candidate list. Pages are enumerated directly from the PDF so Auto Quote works before OCR has been run — no existing Markdown files are required.
 
 ### Workflow
 
@@ -1518,14 +1550,15 @@ Click the **Auto Quote** button (purple, quote bubble icon) in the Define Layout
    - Before sending to Codex, checks whether any selected page's section already has a saved `blockquote` rule in `layout-areas.json`. If conflicts exist, an alert blocks the scan — remove those rules first from **View Rules**.
    - Renders selected pages to PNG and sends a batch request to Codex
 6. **Codex analysis**: Codex identifies blockquote/indented text regions on each page.
-7. Review results: each detected region shows section, page, and editable preview text.
+7. Review results: each detected region shows section, page, a portrait thumbnail of the source page, and editable preview text.
    - Toggle rows to include/exclude from save
+   - Click the thumbnail to open the full page image in the default macOS viewer
    - Click **×** to remove a result entirely
-8. Click **Save (N)** to write `blockquote` rules to `layout-areas.json`.
+8. Click **Save (N)** to write `blockquote` rules to `layout-areas.json`. After a successful save the button changes to **Saved** (checkmark icon) and is disabled. Toggling a checkbox or removing a result re-enables it.
 
 ### Scope Behavior
 
-Same as Auto Detect Footnote — scope controls which pages appear in the candidate list.
+Scope controls which sections are scanned; all pages within each section are always listed. **This Page** scope is treated as **This Section** — all pages of the current section appear, because quotes can appear on any page.
 Changing scope while in Auto Quote mode resets and rebuilds the page list.
 
 ### What Save Does
@@ -1538,7 +1571,7 @@ For each checked quote result, a `blockquote` rule is saved to `layout-areas.jso
 
 Auto-detect header is integrated into **Define Layout** to identify section headings on the first page of each section.
 
-Click the **Auto Header** button (orange, text.badge.star icon) in the Define Layout header to activate header detection.
+Click the **Auto Header** button (orange, text.badge.star icon) in the Define Layout header to activate header detection. Sections are enumerated directly from the PDF so Auto Header works before OCR has been run — no existing Markdown files are required.
 
 ### Key Difference From Other Auto Detect Modes
 
