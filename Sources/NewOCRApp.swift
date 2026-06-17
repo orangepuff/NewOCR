@@ -3976,13 +3976,19 @@ final class AppState: ObservableObject {
         return urls.contains { sectionPDFIndex($0) != nil }
     }
 
+    private var layoutAreaPreviewCache: [String: NSImage] = [:]
+
     func layoutAreaPreviewImage(pdfURL: URL, pageNumber: Int) -> NSImage? {
+        let key = "\(pdfURL.path):\(pageNumber)"
+        if let cached = layoutAreaPreviewCache[key] { return cached }
         guard let document = PDFDocument(url: pdfURL),
               let page = document.page(at: max(pageNumber - 1, 0)),
               let image = try? renderPDFPageToCGImage(page, scale: 2.0) else {
             return nil
         }
-        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        let nsImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        layoutAreaPreviewCache[key] = nsImage
+        return nsImage
     }
 
     func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil, anchorWord: String? = nil) throws -> Int {
