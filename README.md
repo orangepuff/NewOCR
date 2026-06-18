@@ -167,8 +167,13 @@ Important actions:
 - **Crop**: open the crop window for the working PDF.
 - **Revert Original**: restore from `_original.pdf` and clear generated output.
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
-- **Define Layout**: draw project-wide OCR layout-area rules for forcing
+- **Define Layout**: draw project-wide OCR layout-area rules manually for forcing
   header, blockquote, image, footnote, or ignore behavior across sections.
+  This window is manual-only — it no longer contains Auto Detect buttons.
+- **Auto Detect**: open the dedicated Auto Detect window for Codex-powered
+  detection of images, footnotes, quotes, and headers. Contains Auto Image,
+  Auto Footnote, Auto Quote, and Auto Header buttons with a section list.
+  Enabled only when at least one non-completed section PDF exists.
 - **Auto Detect Image by Codex**: automatically scan non-completed sections for
   image regions. Uses Apple Vision locally to find pages with large empty
   regions (likely images), then sends those pages to Codex for precise image
@@ -575,11 +580,122 @@ paragraph breaks. The surrounding text paragraphs stay unchanged, and NewOCR
 inserts a separate `<br/>` paragraph between them so the visible blank row is
 preserved.
 
-Page-boundary paragraph merging must not merge Markdown blockquotes or images
-with normal body text. If either side of a possible page-boundary merge starts
-with `>` or `![`, NewOCR keeps the paragraphs separate.
+Paragraph boundaries are detected by `buildContinuousParagraphs`. A new
+paragraph starts when a line is indented or has a blank-line gap above it.
+The indent threshold is `max(0.015, columnWidth × indentFraction)` where
+`indentFraction` is determined per PDF by a calibration pass that runs
+automatically before the first OCR of each file.
+
+A continuation line (non-indented, no blank gap) joins the previous line when
+the previous line was "full" (reached within 8% of `normalRight`). In Thai
+justified text the OCR may slightly under-report the right edge of the last
+character, preventing a full-line detection. To handle short carry-over
+fragments (e.g. a single word wrapping to the next line), a line shorter than
+40% of `normalWidth` is always joined even if the previous line was not
+detected as full.
+
+**Short-line indent bypass**: when the previous line was full AND the current
+line is short, the indent check is skipped and the line is always joined. In
+Thai dialogue text the wrapped carry-over word (e.g. `ไหม"`) sits at the same
+indentation level as the rest of the speech, which would otherwise trigger a
+spurious new paragraph via the normal indent check.
+
+**Indent calibration**: before the main OCR loop, the app samples up to 5 body
+pages (skipping page 0) at scale 2.0, runs Vision OCR on each, and collects
+`(line.left − normalLeft) / columnWidth` offsets. A histogram with 0.5%-wide
+bins identifies the first repeating positive offset cluster — the paragraph
+indent. The threshold is set at 65% of the detected indent center. The result
+is cached in `AppleVision/indent-calibration.json` keyed by PDF filename and
+reused on every subsequent OCR run of the same file. If detection fails or the
+file is not yet calibrated, the fallback fraction is `0.04`.
+
+Page-boundary paragraph merging must not merge Markdown blockquotes, images,
+or HTML comments with normal body text. If either side of a possible
+page-boundary merge starts with `>`, `![`, or `<!--`, NewOCR keeps the
+paragraphs separate.
+
+**Heading detection guards:** `isHeadingLine` requires all of:
+- the line is in the first two OCR positions on the page (`index <= 1`)
+- the line is near the top of the page (`bottom >= 0.42`)
+- the line is short (≤ 74 % of column width for index 0, ≤ 65 % for index 1)
+- the line is horizontally centered
+- there is a large vertical gap below the line, OR it follows a chapter-number
+  line or another centered title line — **this gap condition now applies to
+  index 0 as well**; previously index 0 was exempt, which caused short dialogue
+  lines at the top of a page to be misread as headings
+- the line does **not** start with a quote character (`"`, `'`, `"`, `'`,
+  `«`, `‟`, `「`, etc.) — dialogue lines are never chapter headings
+
+When a page contains footnotes, OCR appends the footnote definitions and a
+`<!-- page-break-after -->` marker after the last body-text paragraph. The
+merge step must look past these trailing special paragraphs to find the last
+real body-text paragraph. NewOCR searches backward through the previous page's
+paragraphs, skipping any that start with `<!--` (page-break comments) or `[^`
+(footnote definitions), and merges that body paragraph with the first paragraph
+of the next page — leaving the footnote definitions and the page-break marker
+in their original position after the merged text.
+
+The page-boundary continuation flags (`lastTextLineCanContinueNextPage`,
+`firstTextLineContinuesPreviousPage`) are computed from OCR lines before the
+layout-rule substitutions run. When a page ends with footnote lines (which are
+narrower than body text), the right-edge check on those lines would wrongly
+prevent the preceding body paragraph from merging. To avoid this, footnote-area
+OCR lines are excluded when computing these flags — only non-footnote body lines
+are considered.
+
+After the cross-page merge, the replaced paragraph range includes the trailing
+`\n` of its last line. Without compensation, the following content (footnote
+definitions, page-break comment) loses one `\n` of the blank-line separator and
+collapses into the same paragraph. `replacingMarkdownParagraphAtRange` appends
+`"\n"` to the replacement to keep the separator intact.
 
 ## OCR Layout Areas
+
+### Define Layout vs Auto Detect
+
+There are two separate windows for managing layout rules:
+
+- **Define Layout** (`Edit PDF > Define Layout`) — manual-only editor for drawing
+  rectangles and saving rules by hand. Does not include Auto Detect buttons.
+  Use this for precise, one-off rules like ignoring a specific page element.
+
+- **Auto Detect** (`Edit PDF > Auto Detect`) — dedicated window for running
+  Codex-powered detection of images, footnotes, quotes, and headers. Contains
+  Auto Image, Auto Footnote, Auto Quote, and Auto Header buttons. Both windows
+  share the same underlying `LayoutAreaEditorState` and `layout-areas.json` file.
+
+### Editing Coordinates of Existing Rules (Auto Detect)
+
+When **View Rules** is open in the Auto Detect window and the user clicks the pencil
+icon for a rule, a `RulePreviewSheet` appears showing the PDF page with the saved
+rectangle highlighted. The selection rectangle is fully interactive — the same drag
+behavior as Define Layout:
+
+- **Drag inside the rectangle** to move it.
+- **Drag a corner handle** to resize it.
+- **Drag outside the rectangle** to draw a new one from scratch.
+- A green **Save** button (checkmark icon) becomes active as soon as the rectangle
+  differs from the saved value. Click it to convert the dragged selection to
+  normalized coordinates and write them back to `layout-areas.json` without
+  changing any other field (type, scope, section, page, codexText, markers, etc.).
+- A brief `✓ Saved` status appears in the header after a successful save.
+- The Save button is disabled (grayed out) when the region is unchanged.
+
+### `isAuto` Field in OCRLayoutAreaRule
+
+Every rule in `layout-areas.json` now carries an optional `isAuto: Bool` field
+(default `false`). Rules created by Auto Detect panels (Auto Image, Auto Footnote,
+Auto Quote, Auto Header) are saved with `isAuto: true`. Rules drawn manually in
+Define Layout have `isAuto: false`.
+
+**Migration**: when loading `layout-areas.json`, any rule that has a non-empty
+`codexText` but `isAuto == false` is automatically upgraded to `isAuto: true` so
+existing auto-detect files from before this field was added are handled correctly.
+
+This field is informational — OCR processing currently ignores it. It can be
+used in future features to distinguish auto-generated rules from user-drawn rules.
+
+---
 
 **Edit PDF > Define Layout** opens a project-wide visual editor. Choose a
 sample section/page, select **Section Title**, **Quote**, **Image**,
@@ -646,18 +762,14 @@ The report uses consistent NewOCR dark styling with color-coded rule type icons 
 scanning. The close button is distinct from delete buttons, preventing accidental closure
 when attempting to delete a rule.
 
-### Define Layout PDF Preview Zoom
+### Define Layout PDF Preview
 
-The PDF preview in Define Layout supports zoom in/out for precise area selection.
-A `[−] 120% [+]` zoom pill sits in the page-slider row to the right of the slider.
+The PDF preview in Define Layout shows one page at a time, fitted to the available area. There is no zoom — the page always fills the preview container.
 
-- **[−]** decreases zoom by 25% per click (minimum 50%)
-- **[+]** increases zoom by 25% per click (maximum 400%)
-- Tap the **percentage** label to reset zoom to 100% (fit to viewport)
-- When zoomed in, the preview becomes scrollable (trackpad scroll to pan)
-- A "Scroll to pan · drag to set area" hint appears in the bottom-right corner whenever zoom ≠ 100%
-- Zoom resets to 100% automatically when switching to a different section
-- Drawing the selection rectangle and moving/resizing handles work at any zoom level
+**Page navigation:**
+- The status bar shows **⬆ Page X / Y ⬇** — chevron buttons step one page at a time
+- If the section has more than one page, a slim vertical **page scrollbar** appears on the right edge of the preview; drag or click it to jump to any page
+- Drawing the selection rectangle and moving/resizing handles work normally at the fit-to-area scale
 
 The Define Layout PDF preview crossfades smoothly when switching between sections.
 The previous section's page stays visible while the new page loads in the background;
@@ -678,6 +790,13 @@ On subsequent opens the thumbnails are loaded from disk instantly (in-memory
 cache is also populated so the same session never re-reads disk). The cache is
 shared between the Define Layout preview and the auto-detect candidate panels.
 Delete the `LayoutThumbs/` folder to force a full regeneration.
+
+**Page thumbnail popup**: clicking any page thumbnail in Auto Detect candidate or
+result cards opens a floating `NSWindow` showing the full PDF page rendered at
+scale 4.0. The page is displayed scaled-to-fit inside the window, which is
+sized to 82% × 88% of the available screen area. A red **✕** button in the
+top-right corner closes the window. Multiple popup windows can be open at once;
+each is tracked and released when closed.
 
 Define Layout remembers the last-used selection state per project. When closed and
 reopened, it restores: the previewed section, scope (All/Selected/Section/Page),
@@ -715,8 +834,9 @@ Supported rule types:
   ## Line 2
   ## Line 3
   ```
-  Header rules only apply to the first page of each section, never to subsequent pages.
-  This prevents section titles from appearing on every page.
+  Header rules (`header`, `h2`, `header3`) only apply to the first page of each
+  section, never to subsequent pages. This prevents section titles from appearing
+  on every page.
 - `blockquote` — OCR lines in the rectangle are written as Markdown
   blockquotes with `>`. A blank paragraph (`<br/>`) is automatically inserted
   after every blockquote block so the following body text has visual separation.
@@ -770,8 +890,9 @@ Supported rule types:
     `[^label]` is placed. Type the word exactly as it will appear in the OCR
     output (case-sensitive, character-exact). During OCR, NewOCR searches the
     recognized text for this word and inserts `[^label]` immediately after it.
-    If the word is not found the marker is placed at the right-edge position
-    estimate as a fallback.
+    If the word is not found in the OCR line, the marker is **not inserted** for
+    that line — the rectangle overlapped an adjacent line by accident, so skipping
+    it avoids duplicate `[^label]` markers on nearby lines.
   Example: if the OCR line reads "อาร์ชี แต่เขากลับนึกถึงเอมีล" and the
   reference follows "เอมีล", enter **Ref label** `1` and **Word in area**
   `เอมีล` → OCR produces `อาร์ชี แต่เขากลับนึกถึงเอมีล[^1]`.
@@ -783,6 +904,44 @@ Supported rule types:
   superscript-artefact detection strategy.
 - `ignore` — OCR lines in the rectangle are removed from Markdown.
 
+Refmark lines are integrated into the normal text flow during OCR rendering. The
+`[^label]` insertion is applied first, then the processed line is treated as a
+regular body-text line by `buildContinuousParagraphs`. This ensures that a short
+carry-over line that follows a refmark line (e.g. a word wrapping to the next
+OCR line) is joined into the same paragraph rather than being split off.
+
+### Codex Text Override (`codexText`)
+
+The **View Rules** panel shows `codexText` when present for a rule. It appears
+as an italic blue-tinted quoted block beneath the rule's scope metadata so the
+saved Codex text is immediately visible without opening the editor.
+
+When clicking the pencil **Edit** icon for a rule that has `codexText`, the
+Define Layout editor shows a **Codex Text Override** panel below the type/scope
+controls. The panel contains a multi-line text editor pre-filled with the saved
+Codex text. The panel border highlights in the type's accent color when text is
+present. A **Clear** button removes the override. Saving or Updating the rule
+persists the current text in the panel back to `layout-areas.json`.
+
+When a rule is created manually (drawn in Define Layout without Auto Detect),
+the Codex Text Override panel is empty by default and can be filled by typing
+or pasting text. This lets users manually specify replacement text for any
+header, blockquote, footnote, or image-description area.
+
+### Codex Text Override (`codexText`)
+
+Rules saved by Auto Detect Header, Quote, Footnote, or Image carry an optional
+`codexText` field containing the text Codex detected for that area. During OCR:
+
+- Any Apple Vision OCR lines that overlap the rule rectangle are **discarded**.
+- The saved `codexText` is used verbatim in their place, split by newline into
+  synthetic lines that are then classified by the same rule type (header → `##`,
+  blockquote → `>`, footnote → `[^label]: …`, image_desc caption).
+- Rules without `codexText` (manually drawn rules, or older rules) continue to
+  use Apple Vision OCR as before.
+- `codexText` may be edited directly in `layout-areas.json` when a correction is
+  needed without re-running Auto Detect.
+
 Advanced JSON example:
 
 ```json
@@ -790,6 +949,7 @@ Advanced JSON example:
   "rules": [
     {
       "type": "blockquote",
+      "codexText": "The original quoted passage text as detected by Codex.",
       "scope": "all_sections",
       "page": 1,
       "rect": {
@@ -812,6 +972,7 @@ Advanced JSON example:
     },
     {
       "type": "header",
+      "codexText": "Chapter 3: The Journey Begins",
       "section": "section-003.pdf",
       "page": 1,
       "rect": {
@@ -896,13 +1057,14 @@ UI notes:
   `300` points wide, with large clickable rows (`minHeight: 68`) for selecting
   the active section PDF. Do not use a compact Section dropdown for this window.
   The right side gets the remaining width and contains Scope controls,
-  icon-only layout-type buttons, a large Page slider, and the expanding PDF
+  icon-only layout-type buttons, a compact page-nav row, and the expanding PDF
   preview.
 - Keep the controls from being cut off: the layout-type icon buttons and wider
   Scope segmented control share one compact control row when space allows; the
-  row may wrap before it overflows. Page navigation lives in its own slider row
-  below. Define Layout does not show default instruction text in this control
-  row; save/error status appears in the header area (below the Define Layout title) after an action, not in the page slider row.
+  row may wrap before it overflows. Page navigation (⬆ X/Y ⬇) lives in its own
+  status-bar row below. Define Layout does not show default instruction text in
+  this control row; save/error status appears in the header area (below the
+  Define Layout title) after an action, not in the page-nav row.
 - Do not use the native AppKit segmented picker for Scope on this dark surface;
   its text can inherit dark colors and become unreadable. Use the custom
   SwiftUI segmented control style with explicit light text and a clear selected
@@ -925,9 +1087,7 @@ UI notes:
   tooltips on hover, matching the other NewOCR icon controls. Section Title is
   saved internally as rule type `header` for compatibility with existing
   `layout-areas.json` files.
-- Page navigation in Define Layout uses a large custom slider with a
-  thicker track and a `Page n / total` readout. Action status text appears in
-  the top header (as a third line below the Define Layout title), not in this row.
+- Page navigation in Define Layout uses **⬆ / ⬇ chevron buttons** with a `Page n / total` readout. When the section has multiple pages, a slim vertical scrollbar on the right edge of the preview also allows dragging to any page. Action status text appears in the top header, not in this row.
 - Define Layout scope options are **Selected**, **Section**, and **Page** (shown
   as tabs on the right). The **All Sections** scope is set by checking the
   "All Sections" row at the top of the left section list — this means the rule
@@ -951,8 +1111,7 @@ UI notes:
   and the default scope is **Page** (since Quote is a page-only type). Page-only
   types (Quote, Image, Image Description, Footnote, Ref Mark) always start with
   scope set to Page.
-- The Define Layout PDF preview renders slightly zoomed in by default so the
-  working page is easier to inspect while drawing layout areas.
+- The Define Layout PDF preview always fits the current page to the available area (no zoom). One page is shown at a time. Navigate between pages with the ⬆/⬇ buttons, the thumbnail side scrollbar, or by scrolling the mouse wheel / two-finger swiping on the trackpad while the cursor is over the preview panel (scroll down = next page, scroll up = previous page).
 
 ### User-Added Images
 
@@ -1061,19 +1220,18 @@ The window is a split editor:
   `Page 3 / 12` style text, alongside up/down page and zoom buttons
 - the `Page n / total` text updates when the user scrolls or drags the PDF
   preview between pages
-- the PDF preview can be dragged with the mouse to pan around the zoomed page,
-  in addition to normal scrolling
-- page/zoom updates should preserve the user's horizontal PDF preview position;
-  moving up/down must not recenter left/right unless the user pans horizontally
+- the PDF preview uses standard trackpad/scroll-wheel scrolling only — drag-to-pan is removed
+- page/zoom updates preserve the user's horizontal PDF preview position;
+  moving up/down must not recenter left/right unless the user scrolls horizontally
 - editing paragraph text must not reset the PDF preview to the start of the
   source page; keep the current preview area when the source page is unchanged
 - opening the OCR window should clear the paragraph search, focus/scroll the
   paragraph editor to paragraph 1, and show paragraph 1's source page in the PDF
   preview
 - OCR PDF preview zoom is remembered per selected section PDF file and persists
-  after closing and reopening the app. If a section has no saved zoom yet, use
-  the last OCR PDF preview zoom the user chose instead of resetting to `145%`.
-  The OCR PDF preview zoom range is `100%` to `220%`.
+  after closing and reopening the app. Default zoom is `100%` (fit to container).
+  If a section has no saved zoom yet, use the last OCR PDF preview zoom the user
+  chose. The OCR PDF preview zoom range is `100%` to `220%`.
 - Closed OCR and Compare windows must be removed from retained window lists and
   release their hosted views so editing many sections does not get slower over
   time.
@@ -1097,6 +1255,14 @@ Features:
   newly inserted paragraphs, and paragraphs without a known OCR page keep the
   plain `Paragraph 1` label; this state is saved in
   `paragraph-source-pages.json` next to the section's `page*.md` files
+- a small **page-jump button** (clipboard-arrow icon) appears in the paragraph
+  header row when a source page is known; clicking it navigates the PDF preview
+  on the right directly to that paragraph's source page
+- pressing **Return/Enter** inside a paragraph textarea inserts a newline within
+  that paragraph's text; it does **not** create a new paragraph. Paragraphs are
+  only split on blank lines (double newline). Trailing newlines added by the
+  Return key are stripped before paragraphs are joined into `ocrText` so the
+  `\n` + `\n\n` separator combination never produces a spurious empty paragraph.
 - paragraph editing actions:
   - add paragraph before/after
   - add user image before/after
@@ -1303,19 +1469,21 @@ before OCR has been run — no existing Markdown files are required.
 3. Review candidates — a sub-menu bar above the list shows:
    - **"X of Y selected"** count (updates live as checkboxes change)
    - **Select All** and **Unselect All** buttons
-   - Click a thumbnail to open the full page in the macOS viewer for review
+   - Each page shows a full-width thumbnail (portrait, scaled to fit, max height 340 pt) with a checkbox and "Page N" label below
+   - Click a thumbnail to open a popup window showing the full PDF page scaled to fit the screen
    - Click the red **×** button to remove a page from the list
 4. Press **Process Codex** — green full-width button, enabled when ≥ 1 page is checked.
    - Before sending, the app checks whether any selected section already has a saved `image`
      rule in `layout-areas.json`. If conflicts are found, an alert lists the affected sections
      and blocks the scan — remove those rules from **View Rules** first.
-   - Sends checked pages to Codex for precise image region detection
+   - Each page is rendered to PNG with a **10×10 coordinate grid overlay** (labeled 0.0–1.0 on both axes) before being sent to Codex. This gives the model visual anchor points to read off normalized coordinates precisely rather than estimating by eye. The grid is only on the image sent to Codex — the user-facing thumbnail is always clean.
    - Codex identifies actual images and captions on each page
 5. Review results — each detected image shows:
    - Checkbox to include/exclude from save
-   - Page thumbnail so you can visually confirm the image
+   - Full-width page thumbnail (scaled to fit, max height 340 pt) — click to open a popup window showing the full PDF page
    - Editable label field (e.g. Image1)
-   - Caption / Image Description row (if Codex detected caption text), with its own checkbox — shown even when Codex did not return precise caption coordinates; in that case the saved `image_desc` rect is derived as a strip immediately below the image boundary
+   - **Editable region coordinates** — four numeric fields (L, R, T, B) bound directly to the Codex-returned `imageRect`. Values are normalized 0.00–1.00. Edit these fields to correct an inaccurate Codex-detected image region before saving.
+   - Caption / Image Description row (if Codex detected caption text), with its own checkbox — shown even when Codex did not return precise caption coordinates; in that case the saved `image_desc` rect is derived as a strip immediately below the image boundary. When Codex returned caption coordinates, editable L/R/T/B fields are also shown for the caption rect.
    - Red **×** button to remove the result entirely
 6. Click **Save (N)** — blue full-width button — to save selected rules to `layout-areas.json`.
    - Runs in background; shows spinner then a ✓ status line on completion
@@ -1461,16 +1629,18 @@ Footnote works before OCR has been run — no existing Markdown files are requir
    This Section, or This Page).
 2. Click the **Auto Footnote** button in the header.
 3. A list of all available pages appears (no local scanning needed).
-   - Each page shows a portrait thumbnail of the PDF page, section name, and page number
-   - Click a thumbnail to open the full page in the macOS viewer
+   - Each page shows a full-width thumbnail (scaled to fit, max height 340 pt) with a checkbox and "Page N" label below
+   - Click a thumbnail to open a popup window showing the full PDF page scaled to fit the screen
    - Click the red **×** button to remove a page entirely from the list
 4. **Select pages**: A sub-menu bar above the list shows **"X of Y selected"** count,
    **Select All**, and **Unselect All** buttons. All pages are checked by default.
 5. Press **Process Codex** (enabled only when ≥ 1 page is checked).
-   - Before sending to Codex, the app checks whether any selected page's section already has
-     a saved `footnote` or `refmark` rule in `layout-areas.json`. If conflicts are found,
-     an alert lists the affected section file names and blocks the scan — the user must open
-     **View Rules**, delete those existing rules, and then try again.
+   - Before sending to Codex, the app checks whether any selected **section+page** already
+     has a saved `footnote` or `refmark` rule in `layout-areas.json`. Conflict detection is
+     per section+page: a rule on page 5 of `section-003.pdf` does not block detection on
+     page 13 of the same section. If conflicts are found, an alert lists the affected
+     section/page(s) (e.g. `section-003.pdf (page 5)`) and blocks the scan — the user must
+     open **View Rules**, delete those specific rules, and then try again.
    - Renders selected pages to PNG at `AUTO_DETECT_RENDER_SCALE`
    - **Apple Vision pre-scan**: for each rendered page the app runs `VNRecognizeTextRequest`
      locally to find superscript candidates in the body text (characters matching footnote
@@ -1491,8 +1661,8 @@ Footnote works before OCR has been run — no existing Markdown files are requir
    is found anywhere (e.g. translator's notes with no inline ref mark), only the
    footnote rule is saved.
 8. Review results — two sections are shown after Codex completes:
-   - **Footnotes** section: each card shows a page thumbnail (click to open full page), section/page/label header, and editable footnote text in a TextEditor
-   - **Ref Marks** section: each card shows a page thumbnail (click to open full page), section/page/label header, and editable anchor word in a TextEditor (only present when Apple Vision found a matching superscript in the body text)
+   - **Footnotes** section: each card shows a full-width page thumbnail (max height 340 pt; click to open popup with full PDF page), section/page/label header, and editable footnote text in a TextEditor
+   - **Ref Marks** section: each card shows a full-width page thumbnail (max height 340 pt; click to open popup), section/page/label header, and editable anchor word in a TextEditor (only present when Apple Vision found a matching superscript in the body text)
    - Click the red **×** button on any card to remove it from the save list
 8. Check/uncheck rows to select which rules to save (all checked by default). Changing a checkbox re-enables the save button if it was already saved.
 9. Click **Save (N)** to save rules to `layout-areas.json`. After a successful save the button changes to **Saved** (checkmark icon) and is disabled. Toggling a checkbox or removing a result re-enables it.
@@ -1542,17 +1712,17 @@ Click the **Auto Quote** button (purple, quote bubble icon) in the Define Layout
 1. Open **Define Layout** and set your scope.
 2. Click the **Auto Quote** button in the header (also sets the type selector to "blockquote").
 3. A list of all available pages appears based on scope.
-   - Each row shows a portrait thumbnail of the page (size set by `AUTO_DETECT_THUMB_WIDTH` × `AUTO_DETECT_THUMB_HEIGHT` in `config.txt`), plus section name and page number
-   - Click the thumbnail to open the page image in the default macOS viewer for review
+   - Each row shows a full-width thumbnail (scaled to fit, max height 340 pt) with a checkbox and "Page N" label below
+   - Click a thumbnail to open a popup window showing the full PDF page scaled to fit the screen
    - Click the red **×** button to remove a page from the list
 4. **Select pages**: A sub-menu bar above the list shows **"X of Y selected"** count, **Select All**, and **Unselect All** buttons. All pages are checked by default.
 5. Press **Process Codex** (enabled only when ≥ 1 page is checked).
    - Before sending to Codex, checks whether any selected page's section already has a saved `blockquote` rule in `layout-areas.json`. If conflicts exist, an alert blocks the scan — remove those rules first from **View Rules**.
    - Renders selected pages to PNG and sends a batch request to Codex
 6. **Codex analysis**: Codex identifies blockquote/indented text regions on each page.
-7. Review results: each detected region shows section, page, a portrait thumbnail of the source page, and editable preview text.
+7. Review results: each detected region shows section, page, a full-width thumbnail of the source page (max height 340 pt), and editable preview text.
    - Toggle rows to include/exclude from save
-   - Click the thumbnail to open the full page image in the default macOS viewer
+   - Click a thumbnail to open a popup window showing the full PDF page scaled to fit the screen
    - Click **×** to remove a result entirely
 8. Click **Save (N)** to write `blockquote` rules to `layout-areas.json`. After a successful save the button changes to **Saved** (checkmark icon) and is disabled. Toggling a checkbox or removing a result re-enables it.
 
@@ -1581,7 +1751,7 @@ Click the **Auto Header** button (orange, text.badge.star icon) in the Define La
 
 1. Open **Define Layout** and set your scope (controls which sections are targeted).
 2. Click the **Auto Header** button (also sets the type selector to "header").
-3. A list of sections appears — each row shows a page-1 thumbnail, the section name, and "Page 1 (first page only)". Thumbnails are served from the same layout-area disk/memory cache used by Define Layout. A placeholder is shown if the thumbnail is not yet cached. Clicking a thumbnail opens the cached JPEG file with the system default image app (Preview). If no disk cache exists yet, the image is rendered and saved to a temporary file before opening.
+3. A list of sections appears — each row shows a full-width page-1 thumbnail (max height 340 pt), the section name, and "Page 1 (first page only)". Click a thumbnail to open a popup window showing the full PDF page scaled to fit the screen.
    - Click **×** to remove a section from the list
 4. **Select pages**: Sub-menu bar shows **"X of Y selected"**, **Select All**, **Unselect All**.
 5. Press **Process Codex** (enabled only when ≥ 1 row is checked).
@@ -1763,10 +1933,10 @@ Key notes:
   sufficient and renders/uploads much faster than `OCR_RENDER_SCALE`. At `OCR_RENDER_SCALE=8.0`,
   a single A4 page becomes a ~4760 × 6736 px PNG — at `AUTO_DETECT_RENDER_SCALE=2.0`
   the same page is ~1190 × 1684 px, roughly 16× smaller file. Range: 1.0–8.0. Default: 2.0.
-- `AUTO_DETECT_THUMB_WIDTH` / `AUTO_DETECT_THUMB_HEIGHT` — thumbnail size (points)
-  shown in all Auto Detect candidate lists (Header, Quote, and any future panels).
-  Both panels share the same values so thumbnails are always the same size.
-  Minimum: width 40, height 52. Default: 80 × 104.
+- `AUTO_DETECT_THUMB_WIDTH` / `AUTO_DETECT_THUMB_HEIGHT` — **deprecated, no longer
+  used.** Candidate cards in all Auto Detect panels (Image, Footnote, Quote, Header)
+  now display full-width page thumbnails scaled to fit within a maximum height of 340
+  points, so these fixed-size keys have no effect.
 
 ## Current UI Principles
 
@@ -1774,7 +1944,7 @@ Key notes:
 - Buttons should be clear, friendly, and consistent.
 - The main top bar groups commands into compact menus instead of many separate
   buttons: Project contains New, Open, Revert Original, and Open Config; Edit
-  PDF contains Crop, Add Split, Define Layout, Auto Detect Image by Codex,
+  PDF contains Crop, Add Split, Define Layout, Auto Detect, Auto Detect Image by Codex,
   Apply CSS, Codex Review, and Clear Scan Report; Build EPUB and Close remain single top-level commands. View EPUB appears in Project when
   a built EPUB file exists. Top-bar dropdowns are custom popovers, not native
   macOS menus, so rows can use larger text and visible hover/pressed
@@ -1942,8 +2112,8 @@ Key notes:
   preview panel does not show a `PDF Preview` title or OCR status text such as
   "Loaded existing AppleVision Markdown"; keep vertical space for the PDF
   itself. Up/down page navigation, `Page n / total` text, and Zoom In/Zoom Out
-  controls live on one compact row. The PDF view should support hand-style drag
-  panning so the user can drag the zoomed page to inspect a specific area. Zoom
+  controls live on one compact row. The PDF view uses standard scroll-wheel/trackpad
+  scrolling only (no drag-to-pan). Default zoom is 100% (fit to container); zoom
   percent is stored per section PDF path so returning to a file restores that
   file's last OCR preview zoom.
 - The OCR editor keeps an in-memory paragraph-to-source-page map when it loads
@@ -2071,6 +2241,13 @@ These are intentional and should not be changed casually:
   footnotes not already rendered inline fall back to the end-of-document
   `<section class="footnotes">` block. This allows the EPUB to reflect the
   original book's per-page footnote layout.
+- **Auto Detect saves `codexText` alongside rules.** When Auto Detect Header, Quote,
+  Footnote, or Image saves a rule, the Codex-detected text for that area is stored in
+  the `codexText` field of the rule in `layout-areas.json`. During OCR, if `codexText`
+  is present the Vision-recognized lines overlapping that rectangle are discarded and
+  replaced by the saved text. For `image_desc` rules the saved `codexText` is returned
+  directly as the caption without re-running Vision on the caption area. Manually drawn
+  rules (no `codexText`) continue to use Vision OCR output as before.
 - `split-plan.json` stores only created section files and includes `file`.
 - Detect Split saves the current edited Title fields for checked rows directly
   into `book-sections.json` when creating section PDFs; do not defer this to a
@@ -2109,6 +2286,29 @@ These are intentional and should not be changed casually:
   popup style as crop and layout refresh confirmations. The report removes the need
   to understand raw JSON structure. Each rule has a blue pencil icon to load it for
   editing.
+- The **Auto Detect** window also has a **View Rules** button. Each rule row shows an
+  **eye (View)** button. Clicking View opens `RulePreviewSheet` — a modal showing the
+  PDF page with an interactive draggable selection rectangle (same drag behavior as
+  Define Layout: drag inside to move, drag a corner handle to resize, drag outside to
+  redraw). A green **Save** button activates when the region differs from the saved
+  value; clicking it writes the updated coordinates back to `layout-areas.json` (all
+  other fields unchanged), briefly shows "✓ Saved", then dismisses the sheet and
+  reopens the rules list automatically. Delete still works the same way with the
+  confirmation dialog.
+
+### Auto Detect Section List — Click Behavior by Scope
+
+Clicking a section row in the Auto Detect section list behaves differently depending
+on the current scope:
+
+- **All Sections** checked: clicking a row transitions out of all-sections scope,
+  sets the clicked section as the only checked item, and switches scope to **Section**.
+- **Section** or **Page** scope: clicking a row switches the preview to that section
+  and moves the single checkmark to it — **no additional sections are checked**.
+- **Selected** scope: clicking a row toggles its checkbox. Checking a previously
+  unchecked section adds it to the set. Unchecking is blocked on the last remaining
+  checked section. When the set drops to one section, scope automatically reverts
+  to **Section**.
 - When a rule is loaded for editing, the **View Rules** and **Clear Rules** buttons
   become disabled (grayed out) to prevent conflicting actions mid-edit. The user must
   save the current rule changes (**Update Rule**) or discard them (**Close**) before
@@ -2229,6 +2429,36 @@ Check:
   cover image item and `meta name="cover"`
 - rebuild the EPUB after cover normalization changes, because an already-created
   `.epub` will still contain the old packaged image
+
+## OCR Editor PDF Preview
+
+The PDF preview panel in the OCR editor uses `PDFView` via `OCRPDFPreviewView`.
+
+- **Display mode**: `.singlePage` — shows one complete page at a time, scaled to fit both the width
+  and height of the preview panel. Previously `.singlePageContinuous` was used, which only fitted
+  the page width and required scrolling to see the full page.
+- **Scale**: `scaleFactorForSizeToFit * zoomScale`. With `zoomScale = 1.0` (100%), the page fills
+  the panel exactly. Zoom in/out buttons adjust `zoomScale` in 15% increments (min 100%, max 220%).
+- **Navigation**: `pdfView.go(to: page)` at the clamped `pageIndex`; the `Coordinator` listens to
+  `PDFViewPageChanged` to sync page number back to the binding.
+
+## Performance Notes
+
+### OCR Editor with Large PDFs (100+ pages)
+
+The OCR editor paragraph list can be slow on large PDFs. Two key optimisations are in place:
+
+1. **`ocrParagraphs` memoisation** — `ocrParagraphs` is a computed property on `AppState` backed by
+   a private `_ocrParagraphsCache: [String]?`. The cache is cleared in `ocrText.didSet` and lazily
+   rebuilt on first access within each render cycle. Without this, the full `splitParagraphs(ocrText)`
+   scan (O(n) over the entire OCR text) ran on every property access — up to 40–60 times per render
+   cycle when the `LazyVStack` rows each called `ocrParagraphs`.
+
+2. **`applyHighlights` guard in `updateNSView`** — `HighlightingTextEditor.updateNSView` previously
+   called `applyHighlights` on every SwiftUI update, even when neither the text nor the search query
+   had changed. The `Coordinator` now tracks `lastHighlightedSearchText` and `lastHighlightedTextLength`;
+   `updateNSView` skips the call if both are unchanged, eliminating redundant NSLayoutManager work on
+   every unrelated state change.
 
 ## Glossary
 

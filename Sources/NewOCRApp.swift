@@ -442,6 +442,10 @@ struct OCRLayoutAreaRule: Codable, Equatable, Identifiable {
     var markers: String?
     // For refmark: the exact word in the selected area after which [^markers] is inserted.
     var anchorWord: String?
+    // Codex-detected text for this area. When present, OCR uses this text directly
+    // instead of re-running Apple Vision on the area rectangle.
+    var codexText: String? = nil
+    var isAuto: Bool? = nil
 }
 
 struct OCRLayoutAreaRect: Codable, Equatable {
@@ -466,6 +470,8 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var loadedRule: OCRLayoutAreaRule?
     @Published var markers: String = ""
     @Published var anchorWord: String = ""
+    // Codex-detected text override for the current rule (shown and editable in the editor)
+    @Published var codexText: String = ""
 
     // Auto Detect Image state
     @Published var autoDetectImageCandidates: [AutoDetectLocalCandidate] = []
@@ -580,6 +586,50 @@ final class LayoutAreaEditorState: ObservableObject {
         pdfItems.filter { selectedLayoutSectionPaths.contains($0.url.path) }
     }
 
+    var selectedLayoutSectionNames: [String] {
+        selectedLayoutSectionItems
+            .map { $0.url.lastPathComponent }
+            .sorted()
+    }
+
+    var primarySelectedLayoutSectionName: String? {
+        if selectedLayoutSectionPaths.contains(selectedPDFPath) {
+            return selectedPDFName
+        }
+        return selectedLayoutSectionNames.first
+    }
+
+    func filteredSavedRulesForSelectedScope(_ rules: [OCRLayoutAreaRule]) -> [OCRLayoutAreaRule] {
+        switch selectedScope {
+        case "all_sections":
+            return rules
+        case "selected_sections":
+            let selectedNames = Set(selectedLayoutSectionNames)
+            guard !selectedNames.isEmpty else {
+                let fallbackSection = primarySelectedLayoutSectionName ?? selectedPDFName
+                return rules.filter { rule in
+                    rule.scope == "all_sections" || rule.section == fallbackSection
+                }
+            }
+            return rules.filter { rule in
+                if rule.scope == "all_sections" {
+                    return true
+                }
+                guard let section = rule.section else { return false }
+                return selectedNames.contains(section)
+            }
+        default:
+            let sectionName = primarySelectedLayoutSectionName ?? selectedPDFName
+            return rules.filter { rule in
+                rule.scope == "all_sections" || rule.section == sectionName
+            }
+        }
+    }
+
+    var visibleSavedRuleCount: Int {
+        filteredSavedRulesForSelectedScope(allSavedRules).count
+    }
+
     var normalizedOCRRect: OCRLayoutAreaRect {
         let clamped = LayoutAreaEditorState.clampedSelection(selectionRect)
         return OCRLayoutAreaRect(
@@ -629,6 +679,7 @@ final class LayoutAreaEditorState: ObservableObject {
         self.selectionRect = selRect
         self.markers = rule.markers ?? ""
         self.anchorWord = rule.anchorWord ?? ""
+        self.codexText = rule.codexText ?? ""
     }
 
     func clearLoadedRule() {
@@ -804,8 +855,11 @@ final class AppState: ObservableObject {
     }
 
     @Published var ocrText: String = "" {
-        didSet {}
+        didSet {
+            _ocrParagraphsCache = nil
+        }
     }
+    private var _ocrParagraphsCache: [String]? = nil
 
     @Published var skipProcessOCREngine: Bool = false {
         didSet {
@@ -879,7 +933,7 @@ final class AppState: ObservableObject {
     @Published var ocrPDFPreviewPageRequestIndex: Int = 0
     @Published var ocrPDFPreviewPageRequestID: Int = 0
     @Published var ocrPDFPreviewZoomPercents: [String: Double] = [:]
-    @Published var ocrPDFPreviewLastZoomPercent: Double = 145
+    @Published var ocrPDFPreviewLastZoomPercent: Double = 100
 
     @Published var pdfTitles: [String: String] = [:] {
         didSet {
@@ -965,6 +1019,8 @@ final class AppState: ObservableObject {
     private var imageDescOCRWindows: [NSWindow] = []
     private var autoDetectImageWindows: [NSWindow] = []
     private var layoutAreaWindows: [NSWindow] = []
+    private var pageThumbPreviewWindows: [NSWindow] = []
+    private var autoDetectEditorWindows: [NSWindow] = []
     private var configEditorWindows: [NSWindow] = []
     private weak var codexFinalizeLogWindow: NSWindow?
     private var retainedWindowDelegates: [ObjectIdentifier: WindowCleanupDelegate] = [:]
@@ -2497,7 +2553,8 @@ final class AppState: ObservableObject {
                         DispatchQueue.main.async { state.runLog += "  ⚠ Could not render \(candidate.sectionFileName) page \(candidate.pageNumber)\n" }
                         continue
                     }
-                    try self.writePNG(fullImage, to: tempDirURL.appendingPathComponent(filename))
+                    let gridImage = self.overlayCoordinateGrid(fullImage)
+                    try self.writePNG(gridImage, to: tempDirURL.appendingPathComponent(filename))
                     imageFilenames.append(filename)
                     filenameToCandidate[filename] = candidate
                     DispatchQueue.main.async { state.runLog += "  Rendered \(filename)\n" }
@@ -2732,7 +2789,8 @@ final class AppState: ObservableObject {
                 areas.rules.append(OCRLayoutAreaRule(
                     type: "image", scope: "page",
                     section: sectionFileName, page: pageNumber,
-                    rect: result.imageRect, markers: result.label, anchorWord: nil
+                    rect: result.imageRect, markers: result.label, anchorWord: nil,
+                    isAuto: true
                 ))
             }
 
@@ -2751,10 +2809,13 @@ final class AppState: ObservableObject {
                     abs(r.rect.top - captionRect.top) <= 0.01
                 }
                 if !isDupDesc {
+                    let captionTrimmedForRule = result.captionText.trimmingCharacters(in: .whitespacesAndNewlines)
                     areas.rules.append(OCRLayoutAreaRule(
                         type: "image_desc", scope: "page",
                         section: sectionFileName, page: pageNumber,
-                        rect: captionRect, markers: result.label, anchorWord: nil
+                        rect: captionRect, markers: result.label, anchorWord: nil,
+                        codexText: captionTrimmedForRule.isEmpty ? nil : captionTrimmedForRule,
+                        isAuto: true
                     ))
                 }
             }
@@ -3167,10 +3228,13 @@ final class AppState: ObservableObject {
                 abs(r.rect.top - footnote.footnoteRect.top) <= 0.01
             }
             if !isDup {
+                let footnoteTrimmed = footnote.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 areas.rules.append(OCRLayoutAreaRule(
                     type: "footnote", scope: "page",
                     section: sectionFileName, page: pageNumber,
-                    rect: footnote.footnoteRect, markers: footnote.label, anchorWord: nil
+                    rect: footnote.footnoteRect, markers: footnote.label, anchorWord: nil,
+                    codexText: footnoteTrimmed.isEmpty ? nil : footnoteTrimmed,
+                    isAuto: true
                 ))
                 savedCount += 1
             }
@@ -3190,7 +3254,8 @@ final class AppState: ObservableObject {
                 areas.rules.append(OCRLayoutAreaRule(
                     type: "refmark", scope: "page",
                     section: sectionFileName, page: pageNumber,
-                    rect: refmark.refmarkRect, markers: refmark.label, anchorWord: refmark.anchorWord
+                    rect: refmark.refmarkRect, markers: refmark.label, anchorWord: refmark.anchorWord,
+                    isAuto: true
                 ))
                 savedCount += 1
             }
@@ -3895,7 +3960,8 @@ final class AppState: ObservableObject {
                 abs(r.rect.left - quote.quoteRect.left) <= 0.01 && abs(r.rect.top - quote.quoteRect.top) <= 0.01
             }
             if !isDup {
-                areas.rules.append(OCRLayoutAreaRule(type: "blockquote", scope: "page", section: quote.sectionFileName, page: quote.pageNumber, rect: quote.quoteRect, markers: nil, anchorWord: nil))
+                let quoteTrimmed = quote.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                areas.rules.append(OCRLayoutAreaRule(type: "blockquote", scope: "page", section: quote.sectionFileName, page: quote.pageNumber, rect: quote.quoteRect, markers: nil, anchorWord: nil, codexText: quoteTrimmed.isEmpty ? nil : quoteTrimmed, isAuto: true))
                 savedCount += 1
             }
         }
@@ -4084,7 +4150,8 @@ final class AppState: ObservableObject {
             if isDup {
                 dupCount += 1
             } else {
-                areas.rules.append(OCRLayoutAreaRule(type: "header", scope: "page", section: header.sectionFileName, page: 1, rect: header.headerRect, markers: nil, anchorWord: nil))
+                let headerTrimmed = header.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                areas.rules.append(OCRLayoutAreaRule(type: "header", scope: "page", section: header.sectionFileName, page: 1, rect: header.headerRect, markers: nil, anchorWord: nil, codexText: headerTrimmed.isEmpty ? nil : headerTrimmed, isAuto: true))
                 savedCount += 1
             }
         }
@@ -4796,6 +4863,64 @@ final class AppState: ObservableObject {
         window.makeKeyAndOrderFront(nil)
     }
 
+    func openAutoDetectEditor() {
+        guard !selectedFolderPath.isEmpty else {
+            showAlert(title: "No Project Selected", message: "Open a NewOCR project folder before using Auto Detect.")
+            return
+        }
+        let projectFolderURL = URL(fileURLWithPath: selectedFolderPath, isDirectory: true)
+        guard hasSectionPDFs(in: projectFolderURL) else {
+            showAlert(title: "No PDF Sections", message: "Create at least one split PDF before using Auto Detect.")
+            return
+        }
+
+        do {
+            _ = try ensureLayoutAreasFile()
+            let selectableItems = pdfFiles.filter { item in
+                isSectionPDFURL(item.url)
+                    && FileManager.default.fileExists(atPath: item.url.path)
+                    && !epubReadySectionIDs.contains(item.id)
+            }
+            guard let initialItem = selectableItems.first(where: { $0.url.path == selectedPDFPath }) ?? selectableItems.first else {
+                showAlert(title: "No PDF Sections", message: "All sections are marked as completed, or no PDF sections found.")
+                return
+            }
+            openAutoDetectEditorWindow(sectionItems: selectableItems, initialItem: initialItem)
+        } catch {
+            showAlert(title: "Could Not Open Auto Detect", message: error.localizedDescription)
+        }
+    }
+
+    private func openAutoDetectEditorWindow(sectionItems: [PDFFileItem], initialItem: PDFFileItem) {
+        let state = LayoutAreaEditorState(pdfItems: sectionItems, initialPDF: initialItem)
+        reloadAllSavedRules(into: state)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Auto Detect"
+        window.contentMinSize = NSSize(width: 900, height: 720)
+        window.isReleasedWhenClosed = false
+
+        let hostingView = NSHostingView(
+            rootView: AutoDetectWindowView(state: state)
+                .environmentObject(self)
+        )
+        hostingView.sizingOptions = []
+        window.contentView = hostingView
+
+        if let visibleFrame = NSScreen.main?.visibleFrame {
+            window.setFrame(visibleFrame, display: true)
+        } else {
+            window.center()
+        }
+        autoDetectEditorWindows.append(window)
+        trackRetainedWindow(window)
+        window.makeKeyAndOrderFront(nil)
+    }
+
     private func hasAppleVisionResources(for pdfURL: URL) -> Bool {
         let mdFolder = appleVisionOutputFolderURL(for: pdfURL)
             .appendingPathComponent(pdfURL.deletingPathExtension().lastPathComponent, isDirectory: true)
@@ -4905,21 +5030,52 @@ final class AppState: ObservableObject {
     }
 
     func openLayoutAreaThumb(pdfURL: URL, pageNumber: Int) {
-        // Prefer the on-disk cache file so Preview.app opens the full image.
-        if let diskURL = layoutThumbFileURL(pdfURL: pdfURL, pageNumber: pageNumber),
-           FileManager.default.fileExists(atPath: diskURL.path) {
-            NSWorkspace.shared.open(diskURL)
-            return
+        guard let image = layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: pageNumber) else { return }
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let avail = screen.visibleFrame
+        let imgAspect = image.size.width / max(image.size.height, 1)
+        let maxW = avail.width * 0.82
+        let maxH = avail.height * 0.88
+        var winW = maxW
+        var winH = winW / imgAspect
+        if winH > maxH { winH = maxH; winW = winH * imgAspect }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: winW, height: winH),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "\(pdfURL.deletingPathExtension().lastPathComponent) — Page \(pageNumber)"
+        window.isReleasedWhenClosed = false
+        let hostingView = NSHostingView(rootView:
+            GeometryReader { proxy in
+                ZStack(alignment: .topTrailing) {
+                    Color(NSColor.darkGray)
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                    Button(action: { window.close() }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color.white)
+                            .frame(width: 32, height: 32)
+                            .background(Color.red)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(12)
+                }
+            }
+        )
+        hostingView.sizingOptions = []
+        window.contentView = hostingView
+        window.center()
+        pageThumbPreviewWindows.append(window)
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            self?.pageThumbPreviewWindows.removeAll { $0 === window }
         }
-        // Ensure the image is rendered and cached, then save to a temp file.
-        guard let image = layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: pageNumber),
-              let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else { return }
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(pdfURL.deletingPathExtension().lastPathComponent)-page\(pageNumber).jpg")
-        try? jpeg.write(to: tmp)
-        NSWorkspace.shared.open(tmp)
+        window.makeKeyAndOrderFront(nil)
     }
 
     func layoutAreaPreviewImage(pdfURL: URL, pageNumber: Int) -> NSImage? {
@@ -4997,29 +5153,30 @@ final class AppState: ObservableObject {
         }
     }
 
-    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil, anchorWord: String? = nil) throws -> Int {
+    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil, anchorWord: String? = nil, codexText: String? = nil, isAuto: Bool = false) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
         let cleanScope = scope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let cleanMarkers = markers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let cleanAnchorWord = anchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let cleanCodexText = codexText.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
             rules = [
-                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
+                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
             ]
         case "selected_sections":
             rules = selectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
+                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
             }
         case "page":
             rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
             ]
         default:
             rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
             ]
         }
         areas.rules.append(contentsOf: rules)
@@ -5027,7 +5184,7 @@ final class AppState: ObservableObject {
         return areas.rules.count
     }
 
-    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect, newMarkers: String? = nil, newAnchorWord: String? = nil) throws -> Int {
+    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect, newMarkers: String? = nil, newAnchorWord: String? = nil, newCodexText: String? = nil, isAuto: Bool = false) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
         if let index = areas.rules.firstIndex(of: oldRule) {
@@ -5036,28 +5193,38 @@ final class AppState: ObservableObject {
         let cleanScope = newScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let cleanMarkers = newMarkers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let cleanAnchorWord = newAnchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let cleanCodexText = newCodexText.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
+                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
             ]
         case "selected_sections":
             rules = newSelectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
             }
         case "page":
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
             ]
         default:
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
             ]
         }
         areas.rules.append(contentsOf: rules)
         try writeLayoutAreasFile(areas, to: url)
         return areas.rules.count
+    }
+
+    func patchRuleRect(matching oldRule: OCRLayoutAreaRule, newRect: OCRLayoutAreaRect) throws {
+        let url = try ensureLayoutAreasFile()
+        var areas = try loadLayoutAreasFileForEditing(from: url)
+        if let index = areas.rules.firstIndex(of: oldRule) {
+            areas.rules[index].rect = newRect
+        }
+        try writeLayoutAreasFile(areas, to: url)
     }
 
     func clearLayoutAreaRules() throws {
@@ -5169,6 +5336,10 @@ final class AppState: ObservableObject {
         state.allSavedRules = areas.rules
     }
 
+    func loadLayoutAreasFilePublic(from url: URL) throws -> OCRLayoutAreasFile {
+        try loadLayoutAreasFileForEditing(from: url)
+    }
+
     private func loadLayoutAreasFileForEditing(from url: URL) throws -> OCRLayoutAreasFile {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return OCRLayoutAreasFile(rules: [])
@@ -5177,7 +5348,16 @@ final class AppState: ObservableObject {
         if data.isEmpty {
             return OCRLayoutAreasFile(rules: [])
         }
-        return try JSONDecoder().decode(OCRLayoutAreasFile.self, from: data)
+        var decoded = try JSONDecoder().decode(OCRLayoutAreasFile.self, from: data)
+        // Migrate: rules where isAuto was never written (nil) → mark as auto
+        decoded.rules = decoded.rules.map { rule in
+            var r = rule
+            if r.isAuto == nil {
+                r.isAuto = true
+            }
+            return r
+        }
+        return decoded
     }
 
     func writeLayoutAreasFile(_ areas: OCRLayoutAreasFile, to url: URL? = nil) throws {
@@ -6916,7 +7096,10 @@ final class AppState: ObservableObject {
     }
 
     var ocrParagraphs: [String] {
-        splitParagraphs(ocrText)
+        if let cached = _ocrParagraphsCache { return cached }
+        let result = splitParagraphs(ocrText)
+        _ocrParagraphsCache = result
+        return result
     }
 
     var shouldUsePlainOCRTextEditor: Bool {
@@ -7540,7 +7723,11 @@ final class AppState: ObservableObject {
         let flags = ocrSourcePageFlags ?? currentOCRSourcePageFlags(for: ocrParagraphs.count)
         ocrParagraphSourcePages = normalizedSourcePages(pages, paragraphCount: paragraphs.count)
         ocrParagraphHasOCRSourcePage = normalizedOCRSourcePageFlags(flags, paragraphCount: paragraphs.count)
-        ocrText = paragraphs.joined(separator: "\n\n")
+        // Trim trailing newlines before joining so that a Return keypress at the
+        // end of a paragraph (which appends "\n") does not produce three consecutive
+        // newlines ("\n" + "\n\n" separator) that splitParagraphs would interpret as
+        // an extra empty paragraph.
+        ocrText = paragraphs.map { $0.trimmingCharacters(in: .newlines) }.joined(separator: "\n\n")
     }
 
     private func sourcePageForParagraph(at index: Int) -> Int {
@@ -7549,7 +7736,7 @@ final class AppState: ObservableObject {
         return pages[index]
     }
 
-    private func ocrSourcePageIsKnown(for index: Int) -> Bool {
+    func ocrSourcePageIsKnown(for index: Int) -> Bool {
         let flags = currentOCRSourcePageFlags(for: ocrParagraphs.count)
         guard flags.indices.contains(index) else { return false }
         return flags[index]
@@ -7874,6 +8061,10 @@ final class AppState: ObservableObject {
         let titleMatchTopLineCount = cleanDocumentTitle.isEmpty ? 0 : ocrTitleMatchTopLineCount
         let filterValues = parseFilterValues(filteredText)
         let layoutRules = loadOCRLayoutAreaRules(for: pdfURL)
+
+        DispatchQueue.main.async { self.ocrStatus = "Calibrating paragraph indent…" }
+        let calibratedIndentFraction = (try? resolvedIndentFraction(for: pdfURL, document: document)) ?? 0.04
+
         var rawPages: [[OCRLine]] = []
         var pageImages: [CGImage] = []
         var allPageLines: [OCRLine] = []
@@ -7993,18 +8184,26 @@ final class AppState: ObservableObject {
                     }
                 }
             }
-            let builtPageText = buildMarkdownPage(from: cleanedLines, imageRegions: imageRegions, layoutRules: pageLayoutRules)
+            let builtPageText = buildMarkdownPage(from: cleanedLines, imageRegions: imageRegions, layoutRules: pageLayoutRules, indentFraction: calibratedIndentFraction)
             let hasHeaderRule = !layoutAreaRules(pageLayoutRules, type: "header").isEmpty
             let pageText = (pageIndex == 0 && !hasHeaderRule)
                 ? applyMarkdownTitle(cleanDocumentTitle, to: builtPageText, replaceExistingHeading: true)
                 : builtPageText
 
+            // Exclude footnote-area lines when computing page-boundary continuation flags.
+            // Footnote lines sit at the bottom of the page and are narrower than body text,
+            // so without this filter the right-edge check on the "last" line incorrectly
+            // prevents body text from being merged across the page boundary.
+            let pageFootnoteRules = layoutAreaRules(pageLayoutRules, type: "footnote")
+            let bodyLines = pageFootnoteRules.isEmpty ? cleanedLines : cleanedLines.filter { line in
+                !pageFootnoteRules.contains { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }
+            }
             pageMarkdownItems.append(
                 OCRPageMarkdown(
                     pageNumber: pageNumber,
                     text: pageText,
-                    firstTextLineContinuesPreviousPage: firstTextLineContinuesPreviousPage(cleanedLines),
-                    lastTextLineCanContinueNextPage: lastTextLineCanContinueNextPage(cleanedLines)
+                    firstTextLineContinuesPreviousPage: firstTextLineContinuesPreviousPage(bodyLines, indentFraction: calibratedIndentFraction),
+                    lastTextLineCanContinueNextPage: lastTextLineCanContinueNextPage(bodyLines)
                 )
             )
             allPageLines.append(contentsOf: cleanedLines)
@@ -8025,7 +8224,7 @@ final class AppState: ObservableObject {
             try pageMarkdown.text.write(to: pageURL, atomically: true, encoding: .utf8)
         }
 
-        let fullText = applyMarkdownTitle(cleanDocumentTitle, to: buildMarkdownPage(from: allPageLines, imageRegions: allPageImageRegions), replaceExistingHeading: true)
+        let fullText = applyMarkdownTitle(cleanDocumentTitle, to: buildMarkdownPage(from: allPageLines, imageRegions: allPageImageRegions, indentFraction: calibratedIndentFraction), replaceExistingHeading: true)
 
         let lowConfidenceCount = reviewItems.filter { $0.reason == "low_confidence" }.count
         let report = OCRReviewReport(
@@ -8319,6 +8518,11 @@ final class AppState: ObservableObject {
         for rule in descRules {
             let label = rule.markers?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !label.isEmpty else { continue }
+            // Use Codex-saved caption text when available; fall back to Vision line matching.
+            if let codexText = rule.codexText, !codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result[label] = codexText.trimmingCharacters(in: .whitespacesAndNewlines)
+                continue
+            }
             let matchingLines = ocrLines
                 .filter { lineOverlapsLayoutArea($0, rule.rect, threshold: 0.18) }
                 .sorted { $0.top > $1.top }
@@ -8357,6 +8561,78 @@ final class AppState: ObservableObject {
             throw NSError(domain: "NewOCR", code: 6, userInfo: [NSLocalizedDescriptionKey: "Could not encode image: \(url.path)"])
         }
         try data.write(to: url, options: .atomic)
+    }
+
+    // Draws a labeled 10×10 coordinate grid onto a CGImage so Codex can read
+    // off normalized (0.0–1.0) coordinates precisely. Only used for images sent
+    // to Codex — never shown to the user.
+    private func overlayCoordinateGrid(_ source: CGImage) -> CGImage {
+        let w = source.width
+        let h = source.height
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return source }
+
+        // Draw original image
+        ctx.draw(source, in: CGRect(x: 0, y: 0, width: CGFloat(w), height: CGFloat(h)))
+
+        let wf = CGFloat(w)
+        let hf = CGFloat(h)
+        let steps = 10
+
+        // Semi-transparent grid lines
+        ctx.setLineWidth(max(1.0, wf / 600))
+        ctx.setStrokeColor(red: 0.0, green: 0.5, blue: 1.0, alpha: 0.45)
+
+        for i in 0...steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            // Vertical line
+            let x = t * wf
+            ctx.move(to: CGPoint(x: x, y: 0))
+            ctx.addLine(to: CGPoint(x: x, y: hf))
+            // Horizontal line (y=0 is top in CGContext when drawn this way)
+            let y = t * hf
+            ctx.move(to: CGPoint(x: 0, y: y))
+            ctx.addLine(to: CGPoint(x: wf, y: y))
+        }
+        ctx.strokePath()
+
+        // Labels: draw axis tick values along the left edge and top edge
+        let fontSize = max(10.0, wf / 60)
+        let font = CTFontCreateWithName("Helvetica-Bold" as CFString, fontSize, nil)
+        let labelColor = CGColor(red: 0.0, green: 0.3, blue: 0.9, alpha: 0.9)
+
+        func drawLabel(_ text: String, at point: CGPoint) {
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor(cgColor: labelColor) ?? .blue,
+            ]
+            let attrStr = NSAttributedString(string: text, attributes: attrs)
+            let line = CTLineCreateWithAttributedString(attrStr)
+            ctx.saveGState()
+            // CGContext text origin is bottom-left, flip for readability
+            ctx.translateBy(x: point.x, y: point.y)
+            ctx.scaleBy(x: 1.0, y: -1.0)
+            ctx.textPosition = .zero
+            CTLineDraw(line, ctx)
+            ctx.restoreGState()
+        }
+
+        for i in 0...steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            let label = String(format: "%.1f", t)
+            // Top-edge x labels
+            drawLabel(label, at: CGPoint(x: t * wf + 2, y: fontSize + 2))
+            // Left-edge y labels
+            drawLabel(label, at: CGPoint(x: 2, y: t * hf + fontSize + 2))
+        }
+
+        guard let result = ctx.makeImage() else { return source }
+        return result
     }
 
     private func parseLineCount(_ value: String, defaultValue: Int) -> Int {
@@ -8881,6 +9157,94 @@ final class AppState: ObservableObject {
             .appendingPathComponent("header-footer-lines.json")
     }
 
+    // MARK: - Indent Calibration
+
+    private func indentCalibrationURL(for pdfURL: URL) -> URL {
+        pdfURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("AppleVision", isDirectory: true)
+            .appendingPathComponent("indent-calibration.json")
+    }
+
+    private func loadCachedIndentFraction(for pdfURL: URL) -> CGFloat? {
+        let url = indentCalibrationURL(for: pdfURL)
+        guard let data = try? Data(contentsOf: url),
+              let dict = try? JSONDecoder().decode([String: CGFloat].self, from: data),
+              let value = dict[pdfURL.lastPathComponent],
+              value > 0 else { return nil }
+        return value
+    }
+
+    private func saveCachedIndentFraction(_ fraction: CGFloat, for pdfURL: URL) {
+        let url = indentCalibrationURL(for: pdfURL)
+        var dict: [String: CGFloat] = [:]
+        if let data = try? Data(contentsOf: url),
+           let existing = try? JSONDecoder().decode([String: CGFloat].self, from: data) {
+            dict = existing
+        }
+        dict[pdfURL.lastPathComponent] = fraction
+        if let data = try? JSONEncoder().encode(dict) {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func indentFractionFromOffsets(_ offsets: [CGFloat]) -> CGFloat {
+        guard offsets.count >= 2 else { return 0.04 }
+        let binSize: CGFloat = 0.005
+        var bins: [Int: Int] = [:]
+        for offset in offsets {
+            bins[Int(offset / binSize), default: 0] += 1
+        }
+        let minCount = max(2, offsets.count / 15)
+        let significantBins = bins
+            .filter { $0.value >= minCount }
+            .map(\.key)
+            .sorted()
+        guard let firstBin = significantBins.first else { return 0.04 }
+        // Center of first significant bin is the detected indent.
+        // Threshold is set at 65% of that so indented lines are reliably caught.
+        let indentFraction = (CGFloat(firstBin) + 0.5) * binSize
+        return min(max(indentFraction * 0.65, 0.010), 0.060)
+    }
+
+    private func calibrateIndentFraction(for pdfURL: URL, document: PDFDocument) throws -> CGFloat {
+        let pageCount = document.pageCount
+        guard pageCount >= 2 else { return 0.04 }
+        // Sample up to 5 body pages, skipping page 0 (often a title page).
+        let sampleRange = 1..<min(1 + 5, pageCount)
+        var allOffsets: [CGFloat] = []
+        for pageIndex in sampleRange {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let image = try renderPDFPageToCGImage(page, scale: 2.0)
+            let lines = try recognizeTextWithAppleVision(in: image)
+            guard lines.count >= 4 else { continue }
+            let normalLeft = lines.map(\.left).min() ?? 0
+            let normalRight = lines.map(\.right).max() ?? 1
+            let normalWidth = normalRight - normalLeft
+            guard normalWidth > 0.1 else { continue }
+            for line in lines {
+                let fraction = (line.left - normalLeft) / normalWidth
+                // Collect only small positive offsets — the indent range.
+                if fraction >= 0.005 && fraction <= 0.20 {
+                    allOffsets.append(fraction)
+                }
+            }
+        }
+        return indentFractionFromOffsets(allOffsets)
+    }
+
+    private func resolvedIndentFraction(for pdfURL: URL, document: PDFDocument) throws -> CGFloat {
+        if let cached = loadCachedIndentFraction(for: pdfURL) {
+            return cached
+        }
+        let fraction = try calibrateIndentFraction(for: pdfURL, document: document)
+        saveCachedIndentFraction(fraction, for: pdfURL)
+        return fraction
+    }
+
     private func headerFooterReviewURL(for pdfURL: URL) -> URL {
         appleVisionLineCacheURL(for: pdfURL)
             .deletingLastPathComponent()
@@ -8942,7 +9306,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func buildMarkdownPage(from lines: [OCRLine], imageRegions: [OCRImageRegion], layoutRules: [OCRLayoutAreaRule] = []) -> String {
+    private func buildMarkdownPage(from lines: [OCRLine], imageRegions: [OCRImageRegion], layoutRules: [OCRLayoutAreaRule] = [], indentFraction: CGFloat = 0.04) -> String {
         let headerRules = layoutAreaRules(layoutRules, type: "header")
         let h2Rules = layoutAreaRules(layoutRules, type: "h2")
         let header3Rules = layoutAreaRules(layoutRules, type: "header3")
@@ -8952,11 +9316,11 @@ final class AppState: ObservableObject {
         let hasForcedLayout = !headerRules.isEmpty || !h2Rules.isEmpty || !header3Rules.isEmpty || !blockquoteRules.isEmpty || !footnoteRules.isEmpty || !refmarkRules.isEmpty
 
         if hasForcedLayout {
-            return buildMarkdownPageWithForcedLayout(from: lines, imageRegions: imageRegions, headerRules: headerRules, h2Rules: h2Rules, header3Rules: header3Rules, blockquoteRules: blockquoteRules, footnoteRules: footnoteRules, refmarkRules: refmarkRules)
+            return buildMarkdownPageWithForcedLayout(from: lines, imageRegions: imageRegions, headerRules: headerRules, h2Rules: h2Rules, header3Rules: header3Rules, blockquoteRules: blockquoteRules, footnoteRules: footnoteRules, refmarkRules: refmarkRules, indentFraction: indentFraction)
         }
 
         if imageRegions.isEmpty {
-            return buildContinuousParagraphs(from: lines)
+            return buildContinuousParagraphs(from: lines, indentFraction: indentFraction)
         }
 
         var blocks: [OCRMarkdownBlock] = lines.map { .text($0) } + imageRegions.map { .image($0) }
@@ -8971,7 +9335,7 @@ final class AppState: ObservableObject {
         var pendingTextLines: [OCRLine] = []
 
         func flushText() {
-            let text = buildContinuousParagraphs(from: pendingTextLines)
+            let text = buildContinuousParagraphs(from: pendingTextLines, indentFraction: indentFraction)
             if !text.isEmpty {
                 rendered.append(text)
             }
@@ -9023,9 +9387,38 @@ final class AppState: ObservableObject {
         header3Rules: [OCRLayoutAreaRule] = [],
         blockquoteRules: [OCRLayoutAreaRule],
         footnoteRules: [OCRLayoutAreaRule],
-        refmarkRules: [OCRLayoutAreaRule] = []
+        refmarkRules: [OCRLayoutAreaRule] = [],
+        indentFraction: CGFloat = 0.04
     ) -> String {
-        var blocks: [OCRMarkdownBlock] = lines.map { line in
+        // Pre-process: rules with codexText replace Vision-recognized lines with saved Codex text.
+        // Remove OCR lines overlapping those rules and inject synthetic lines carrying the Codex text.
+        // Injected lines fall inside the rule rects, so the block-classifier below picks them up normally.
+        let codexTextRules = (headerRules + h2Rules + header3Rules + blockquoteRules + footnoteRules)
+            .filter { !($0.codexText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        var effectiveLines: [OCRLine]
+        if codexTextRules.isEmpty {
+            effectiveLines = lines
+        } else {
+            var filtered = lines
+            var injected: [OCRLine] = []
+            for rule in codexTextRules {
+                filtered = filtered.filter { !lineOverlapsLayoutArea($0, rule.rect, threshold: 0.45) }
+                let rawTextLines = (rule.codexText ?? "")
+                    .components(separatedBy: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                let rectHeight = max(0.001, rule.rect.top - rule.rect.bottom)
+                let lineStep = rawTextLines.count > 1 ? rectHeight / CGFloat(rawTextLines.count) : rectHeight
+                for (idx, txt) in rawTextLines.enumerated() {
+                    let top = rule.rect.top - CGFloat(idx) * lineStep
+                    let bottom = max(rule.rect.bottom, top - lineStep)
+                    injected.append(OCRLine(text: txt, left: rule.rect.left, right: rule.rect.right, bottom: bottom, top: top))
+                }
+            }
+            effectiveLines = filtered + injected
+        }
+
+        var blocks: [OCRMarkdownBlock] = effectiveLines.map { line in
             if headerRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
                 return .header(line)
             }
@@ -9099,7 +9492,7 @@ final class AppState: ObservableObject {
         var hadFootnotes = false
 
         func flushText() {
-            let text = buildContinuousParagraphs(from: pendingTextLines)
+            let text = buildContinuousParagraphs(from: pendingTextLines, indentFraction: indentFraction)
             if !text.isEmpty { rendered.append(text) }
             pendingTextLines.removeAll()
         }
@@ -9218,8 +9611,18 @@ final class AppState: ObservableObject {
                 flushHeader(); flushH2(); flushHeader3(); flushText(); flushQuote(); flushRefmark()
                 pendingFootnoteLines.append((line, markers))
             case .refmark(let line, let refData):
-                flushHeader(); flushH2(); flushHeader3(); flushText(); flushQuote(); flushFootnote()
-                pendingRefmarkLines.append((line, refData))
+                // Apply refmark insertions now and feed the result into pendingTextLines so
+                // buildContinuousParagraphs treats this line like a normal body line. This
+                // lets short wrap-over text that follows (e.g. "แบ่งปัน...") join naturally
+                // instead of being split into a separate paragraph.
+                flushHeader(); flushH2(); flushHeader3(); flushQuote(); flushFootnote(); flushRefmark()
+                let processedText = applyRefmarkInsertions(
+                    line.text.trimmingCharacters(in: .whitespacesAndNewlines), refmarks: refData)
+                if !processedText.isEmpty {
+                    pendingTextLines.append(OCRLine(
+                        text: processedText, left: line.left, right: line.right,
+                        bottom: line.bottom, top: line.top, confidence: line.confidence))
+                }
             case .image(let imageRegion):
                 flushHeader(); flushH2(); flushHeader3(); flushText(); flushQuote(); flushFootnote(); flushRefmark()
                 var imageBlock = imageRegion.markdown
@@ -9314,7 +9717,9 @@ final class AppState: ObservableObject {
                     }
                     continue
                 }
-                // Anchor not found — fall through to legacy artefact-detection.
+                // Anchor word specified but not found in this line — this line is not the
+                // refmark host (the rectangle overlapped an adjacent line). Skip it.
+                continue
             }
 
             // — Legacy artefact-detection path (no anchorWord, or anchor not found) —
@@ -9450,7 +9855,7 @@ final class AppState: ObservableObject {
         let stem = pdfURL.deletingPathExtension().lastPathComponent
         return rules.filter { rule in
             let ruleType = rule.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if ruleType == "header" && pageNumber != 1 {
+            if (ruleType == "header" || ruleType == "h2" || ruleType == "header3") && pageNumber != 1 {
                 return false
             }
             if let page = rule.page, page != pageNumber {
@@ -9486,14 +9891,14 @@ final class AppState: ObservableObject {
             && ((line.bottom + line.top) / 2) <= rect.top
     }
 
-    private func firstTextLineContinuesPreviousPage(_ lines: [OCRLine]) -> Bool {
+    private func firstTextLineContinuesPreviousPage(_ lines: [OCRLine], indentFraction: CGFloat = 0.04) -> Bool {
         guard let firstLine = lines.first else { return false }
         let normalLeft = lines.map(\.left).min() ?? firstLine.left
         let normalRight = lines.map(\.right).max() ?? firstLine.right
         let normalWidth = max(0.0001, normalRight - normalLeft)
         let blockCenter = (normalLeft + normalRight) / 2
         let averageHeight = lines.map(\.height).reduce(0, +) / CGFloat(max(1, lines.count))
-        let indentThreshold = max(0.025, normalWidth * 0.08)
+        let indentThreshold = max(0.015, normalWidth * indentFraction)
 
         if isHeadingLine(firstLine, index: 0, lines: lines, normalWidth: normalWidth, blockCenter: blockCenter, averageHeight: averageHeight)
             || isChapterNumberHeadingLine(firstLine, index: 0, lines: lines, normalWidth: normalWidth, blockCenter: blockCenter, averageHeight: averageHeight) {
@@ -9528,20 +9933,43 @@ final class AppState: ObservableObject {
                   pages[index].firstTextLineContinuesPreviousPage else {
                 continue
             }
-            let previousLast = lastMarkdownParagraph(in: pages[index - 1].text)
+            // Skip page-break comments and footnote definitions when looking for
+            // the last body-text paragraph that can continue across the page boundary.
+            let previousLastItem = lastMergeableMarkdownParagraphWithRange(in: pages[index - 1].text)
             let currentFirst = firstMarkdownParagraph(in: pages[index].text)
-            guard let previousLast,
+            guard let previousLastItem,
                   let currentFirst,
-                  canMergePageBoundaryParagraph(previousLast, currentFirst) else {
+                  canMergePageBoundaryParagraph(previousLastItem.text, currentFirst) else {
                 continue
             }
 
-            pages[index - 1].text = replacingLastMarkdownParagraph(
+            // Replace only that specific paragraph in-place — footnotes and
+            // <!-- page-break-after --> markers that follow it are left untouched.
+            pages[index - 1].text = replacingMarkdownParagraphAtRange(
+                previousLastItem.range,
                 in: pages[index - 1].text,
-                with: joinContinuousLine(previousLast, currentFirst)
+                with: joinContinuousLine(previousLastItem.text, currentFirst)
             )
             pages[index].text = removingFirstMarkdownParagraph(from: pages[index].text)
         }
+    }
+
+    // Last paragraph suitable for cross-page merging: skips page-break comments
+    // and footnote definitions that may trail the real body text.
+    private func lastMergeableMarkdownParagraphWithRange(in text: String) -> (text: String, range: Range<String.Index>)? {
+        markdownParagraphsWithRanges(in: text).last { item in
+            let t = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !t.hasPrefix("<!--") && !t.hasPrefix("[^")
+        }
+    }
+
+    private func replacingMarkdownParagraphAtRange(_ range: Range<String.Index>, in text: String, with replacement: String) -> String {
+        var updated = text
+        // The stored range includes the trailing \n of the paragraph's last line.
+        // Appending \n to the replacement restores the blank-line separator so the
+        // following content (footnotes, page-break) stays in its own paragraph.
+        updated.replaceSubrange(range, with: replacement + "\n")
+        return updated.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func canMergePageBoundaryParagraph(_ previous: String, _ current: String) -> Bool {
@@ -9549,8 +9977,9 @@ final class AppState: ObservableObject {
         let current = current.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !previous.isEmpty, !current.isEmpty else { return false }
         guard !previous.hasPrefix("#"), !previous.hasPrefix("!["),
-              !previous.hasPrefix(">"),
-              !current.hasPrefix("#"), !current.hasPrefix("!["), !current.hasPrefix(">") else {
+              !previous.hasPrefix(">"), !previous.hasPrefix("<!--"),
+              !current.hasPrefix("#"), !current.hasPrefix("!["),
+              !current.hasPrefix(">"), !current.hasPrefix("<!--") else {
             return false
         }
         return true
@@ -9607,7 +10036,7 @@ final class AppState: ObservableObject {
         return updated.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func buildContinuousParagraphs(from lines: [OCRLine]) -> String {
+    private func buildContinuousParagraphs(from lines: [OCRLine], indentFraction: CGFloat = 0.04) -> String {
         guard !lines.isEmpty else { return "" }
 
         let normalLeft = lines.map(\.left).min() ?? 0
@@ -9615,7 +10044,7 @@ final class AppState: ObservableObject {
         let normalWidth = normalRight - normalLeft
         let blockCenter = (normalLeft + normalRight) / 2
         let averageHeight = lines.map(\.height).reduce(0, +) / CGFloat(max(1, lines.count))
-        let indentThreshold = max(0.025, (normalRight - normalLeft) * 0.08)
+        let indentThreshold = max(0.015, (normalRight - normalLeft) * indentFraction)
         let rightEdgeThreshold = max(0.025, (normalRight - normalLeft) * 0.08)
         var paragraphs: [String] = []
         var current = ""
@@ -9673,8 +10102,16 @@ final class AppState: ObservableObject {
 
             let isIndented = (line.left - normalLeft) >= indentThreshold
             let previousIsFullLine = previousLine.map { (normalRight - $0.right) <= rightEdgeThreshold } ?? false
+            // A short line after a full line is a clear word-wrap carry-over (e.g. "ไหม""
+            // at the end of a Thai dialogue speech). Join it even when it appears indented —
+            // in dialogue text the wrapped word sits at the same indent level as the rest of
+            // the speech, so the plain isIndented check incorrectly fires and creates a
+            // spurious new paragraph.
+            let currentLineIsShort = (line.right - line.left) <= normalWidth * 0.40
+            let isWrappedCarryOver = currentLineIsShort && previousIsFullLine
             let hasBlankLineGap = previousLine.map { hasDetectedBlankLineGap(between: $0, and: line, averageHeight: averageHeight) } ?? false
-            let shouldContinue = !hasBlankLineGap && !current.isEmpty && !isIndented && (centeredBodyMode || previousIsFullLine)
+            let shouldContinue = !hasBlankLineGap && !current.isEmpty &&
+                (isWrappedCarryOver || (!isIndented && (centeredBodyMode || previousIsFullLine || currentLineIsShort)))
 
             if shouldContinue {
                 current = joinContinuousLine(current, line.text)
@@ -9877,6 +10314,11 @@ final class AppState: ObservableObject {
             return false
         }
 
+        // Dialogue lines start with a quote and are never chapter headings.
+        let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quoteStarts: [Character] = ["\"", "'", "\u{201C}", "\u{2018}", "\u{201E}", "\u{00AB}", "\u{300C}"]
+        guard !quoteStarts.contains(where: { text.hasPrefix(String($0)) }) else { return false }
+
         let isNearTop = line.centerX.isFinite && line.bottom >= 0.42
         let headingWidthLimit = index == 0 ? normalWidth * 0.74 : normalWidth * 0.65
         let isShort = line.width <= headingWidthLimit
@@ -9900,9 +10342,12 @@ final class AppState: ObservableObject {
                 && abs($0.centerX - blockCenter) <= max(0.04, normalWidth * 0.12)
                 && $0.bottom >= 0.42
         } ?? false
+        // A real chapter heading has a gap below it. Requiring hasLargeGapBelow even for
+        // index 0 prevents a short dialogue line at the top of a page from being misread
+        // as a heading (dialogue is immediately followed by more text, no gap).
         let hasLargeGapBelow = nextLine.map { (line.bottom - $0.top) >= max(averageHeight * 1.8, 0.035) } ?? true
 
-        return isNearTop && isShort && isCentered && (index == 0 || hasLargeGapBelow || followsChapterNumber || followsCenteredTitleLine)
+        return isNearTop && isShort && isCentered && (hasLargeGapBelow || followsChapterNumber || followsCenteredTitleLine)
     }
 
     private func isChapterNumberHeadingLine(
@@ -10008,9 +10453,6 @@ final class AppState: ObservableObject {
         pdfTitles = defaults.dictionary(forKey: "pdfTitles") as? [String: String] ?? [:]
         ocrPDFPreviewZoomPercents = loadDoubleDictionary(forKey: "ocrPDFPreviewZoomPercents")
         ocrPDFPreviewLastZoomPercent = min(max(defaults.double(forKey: "ocrPDFPreviewLastZoomPercent"), 100), 220)
-        if ocrPDFPreviewLastZoomPercent == 100, defaults.object(forKey: "ocrPDFPreviewLastZoomPercent") == nil {
-            ocrPDFPreviewLastZoomPercent = 145
-        }
         frontCoverImagePath = defaults.string(forKey: "frontCoverImagePath") ?? ""
         backCoverImagePath = defaults.string(forKey: "backCoverImagePath") ?? ""
         epubStatus = ""
@@ -11119,6 +11561,15 @@ struct StepOneLoadPDFView: View {
                             }
 
                             TopBarDropdownRow(
+                                title: "Auto Detect",
+                                systemImage: "wand.and.stars",
+                                isDisabled: !appState.canDefineLayoutForSelectedFolder,
+                                close: close
+                            ) {
+                                appState.openAutoDetectEditor()
+                            }
+
+                            TopBarDropdownRow(
                                 title: "Apply CSS",
                                 systemImage: "paintbrush",
                                 isDisabled: appState.selectedFolderPath.isEmpty,
@@ -11723,11 +12174,217 @@ private struct ClearOCRConfirmationView: View {
     }
 }
 
+// MARK: - Rule Preview Sheet (shows page + draggable rect overlay, save updates coordinates)
+
+private struct RulePreviewSheet: View, Identifiable {
+    var id: String { rule.id }
+
+    @EnvironmentObject private var appState: AppState
+    let rule: OCRLayoutAreaRule
+    let pdfItems: [PDFFileItem]
+    var onSaved: (() -> Void)? = nil
+
+    @State private var pageImage: NSImage? = nil
+    @State private var isLoading = true
+    @State private var selectionRect: CGRect  // normalized screen coords: y=0 at top
+    @State private var saveStatus: String = ""
+    @State private var isSaving: Bool = false
+    @Environment(\.dismiss) private var dismiss
+
+    init(rule: OCRLayoutAreaRule, pdfItems: [PDFFileItem], onSaved: (() -> Void)? = nil) {
+        self.rule = rule
+        self.pdfItems = pdfItems
+        self.onSaved = onSaved
+        // Convert OCRLayoutAreaRect (PDF: y=1 at top) → CGRect (screen: y=0 at top)
+        let r = rule.rect
+        _selectionRect = State(initialValue: CGRect(
+            x: r.left,
+            y: 1 - r.top,
+            width: r.right - r.left,
+            height: r.top - r.bottom
+        ))
+    }
+
+    private var typeLabels: [String: String] {
+        ["header": "Section Title", "h2": "H2", "header3": "H3", "blockquote": "Quote",
+         "image": "Image", "image_desc": "Image Description", "footnote": "Footnote",
+         "refmark": "Ref Mark", "ignore": "Ignore"]
+    }
+
+    private var currentOCRRect: OCRLayoutAreaRect {
+        let clamped = LayoutAreaEditorState.clampedSelection(selectionRect)
+        return OCRLayoutAreaRect(
+            left: clamped.minX,
+            right: clamped.maxX,
+            top: 1 - clamped.minY,
+            bottom: 1 - clamped.maxY
+        )
+    }
+
+    private var hasChanges: Bool {
+        let cur = currentOCRRect
+        let tol: CGFloat = 0.005
+        return abs(cur.left - rule.rect.left) > tol
+            || abs(cur.right - rule.rect.right) > tol
+            || abs(cur.top - rule.rect.top) > tol
+            || abs(cur.bottom - rule.rect.bottom) > tol
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(typeLabels[rule.type] ?? rule.type)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                    HStack(spacing: 6) {
+                        if let section = rule.section {
+                            Text(section)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        }
+                        if let page = rule.page {
+                            Text("· Page \(page)")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        }
+                        Text("· Drag to adjust region")
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                    }
+                }
+                Spacer()
+                if !saveStatus.isEmpty {
+                    Text(saveStatus)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(saveStatus.hasPrefix("✓") ? Color.green : Color(red: 255/255, green: 71/255, blue: 71/255))
+                }
+                OCRIconButton(title: "Save", systemImage: "checkmark.circle",
+                              backgroundColor: Color(red: 40/255, green: 170/255, blue: 80/255),
+                              foregroundColor: .white, size: 42) { saveCoordinates() }
+                .disabled(isSaving || !hasChanges)
+                .opacity(hasChanges ? 1.0 : 0.45)
+                OCRIconButton(title: "Close", systemImage: "xmark",
+                              backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                              foregroundColor: .white, size: 42) { dismiss() }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding(22)
+            .border(width: 1, edges: [.bottom], color: NewOCRMainPalette.stroke)
+
+            // PDF page preview with draggable selection overlay
+            Group {
+                if isLoading {
+                    VStack(spacing: 14) {
+                        ProgressView().controlSize(.large)
+                        Text("Loading page…")
+                            .font(.system(size: 13)).foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let image = pageImage {
+                    GeometryReader { proxy in
+                        let imageFrame = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size)
+                        ZStack(alignment: .topLeading) {
+                            Image(nsImage: image)
+                                .resizable()
+                                .interpolation(.high)
+                                .frame(width: imageFrame.width, height: imageFrame.height)
+                                .position(x: imageFrame.midX, y: imageFrame.midY)
+                                .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 2)
+                            LayoutAreaOverlayView(selectionRect: $selectionRect, imageFrame: imageFrame)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(NewOCRMainPalette.fieldBackground)
+                } else {
+                    ContentUnavailableView("Page Not Found", systemImage: "doc.richtext")
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 380)
+            .padding(16)
+
+            // Codex text block
+            if let codexText = rule.codexText, !codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Divider().overlay(NewOCRMainPalette.stroke)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "text.quote")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Color(red: 100/255, green: 180/255, blue: 255/255))
+                        Text("Codex text override")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                    Text(codexText)
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
+                        .italic()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                .background(Color(red: 30/255, green: 42/255, blue: 60/255))
+            }
+        }
+        .frame(minWidth: 640, minHeight: 560)
+        .background(NewOCRMainPalette.windowBackground)
+        .buttonStyle(NewOCRButtonStyle())
+        .onAppear { loadImage() }
+    }
+
+    private func loadImage() {
+        isLoading = true
+        let pdfURL = pdfItems.first { $0.url.lastPathComponent == rule.section }?.url
+            ?? appState.pdfFiles.first { $0.url.lastPathComponent == rule.section }?.url
+        guard let url = pdfURL, let page = rule.page else {
+            isLoading = false
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let image = appState.layoutAreaPreviewImage(pdfURL: url, pageNumber: page)
+            DispatchQueue.main.async {
+                pageImage = image
+                isLoading = false
+            }
+        }
+    }
+
+    private func saveCoordinates() {
+        isSaving = true
+        let newRect = currentOCRRect
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try appState.patchRuleRect(matching: rule, newRect: newRect)
+                DispatchQueue.main.async {
+                    saveStatus = "✓ Saved"
+                    isSaving = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        dismiss()
+                        onSaved?()
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    saveStatus = "Error: \(error.localizedDescription)"
+                    isSaving = false
+                }
+            }
+        }
+    }
+}
+
 private struct LayoutAreasReportView: View {
     @EnvironmentObject private var appState: AppState
     @Binding var isPresented: Bool
     var state: LayoutAreaEditorState? = nil
     var sectionFileName: String? = nil
+    var onView: ((OCRLayoutAreaRule) -> Void)? = nil
+    var isAutoOnly: Bool = false
     @State private var rules: [OCRLayoutAreaRule] = []
     @State private var isLoading = true
     @State private var pendingDeleteRule: OCRLayoutAreaRule?
@@ -11858,7 +12515,8 @@ private struct LayoutAreasReportView: View {
                                     typeColor: typeColors[rule.type] ?? .gray,
                                     typeIcon: typeIcons[rule.type] ?? "rectangle.dashed",
                                     typeLabel: typeLabels[rule.type] ?? rule.type,
-                                    showLoadButton: state != nil,
+                                    showLoadButton: state != nil && onView == nil,
+                                    onView: onView != nil ? { onView?(rule) } : nil,
                                     onLoad: {
                                         state?.loadRule(rule)
                                         isPresented = false
@@ -11997,20 +12655,22 @@ private struct LayoutAreasReportView: View {
     }
 
     private var filteredRules: [OCRLayoutAreaRule] {
+        let base: [OCRLayoutAreaRule]
         if let sectionFileName {
-            return rules.filter { rule in
+            base = rules.filter { rule in
                 rule.scope == "all_sections" || rule.section == sectionFileName
             }
-        }
-        // When opened from Define Layout, state.pdfItems contains only non-completed
-        // sections, so mirror that filter here.
-        if let state {
+        } else if let state {
+            // When opened from Define Layout, state.pdfItems contains only non-completed
+            // sections, so mirror that filter here.
             let visibleFiles = Set(state.pdfItems.map { $0.url.lastPathComponent })
-            return rules.filter { rule in
+            base = rules.filter { rule in
                 rule.section == nil || visibleFiles.contains(rule.section ?? "")
             }
+        } else {
+            base = rules
         }
-        return rules
+        return isAutoOnly ? base.filter { $0.isAuto == true } : base
     }
 
     private var sortedRules: [OCRLayoutAreaRule] {
@@ -12033,7 +12693,12 @@ private struct LayoutAreasReportView: View {
         DispatchQueue.global().async {
             if let url = appState.layoutAreasFileURL(),
                let data = try? Data(contentsOf: url),
-               let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
+               var decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
+                decoded.rules = decoded.rules.map { rule in
+                    var r = rule
+                    if r.isAuto == nil { r.isAuto = true }
+                    return r
+                }
                 DispatchQueue.main.async {
                     rules = decoded.rules
                     isLoading = false
@@ -12064,10 +12729,12 @@ private struct LayoutAreaRuleRow: View {
     let typeIcon: String
     let typeLabel: String
     var showLoadButton: Bool = true
+    var onView: (() -> Void)? = nil
     let onLoad: () -> Void
     let onDelete: () -> Void
     @State private var isDeleteHovered = false
     @State private var isLoadHovered = false
+    @State private var isViewHovered = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -12115,6 +12782,31 @@ private struct LayoutAreaRuleRow: View {
                         }
                     }
                 }
+
+                if let codexText = rule.codexText, !codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "quote.opening")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color(red: 100/255, green: 180/255, blue: 255/255))
+                            .padding(.top, 1)
+                        Text(codexText)
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                            .italic()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(red: 40/255, green: 55/255, blue: 75/255))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color(red: 60/255, green: 110/255, blue: 175/255).opacity(0.7), lineWidth: 1)
+                    )
+                    .padding(.top, 2)
+                }
             }
 
             Spacer()
@@ -12129,9 +12821,18 @@ private struct LayoutAreaRuleRow: View {
                 .background(Color.blue.opacity(isLoadHovered ? 0.9 : 0.8))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .help("Edit rule")
-                .onHover { hovering in
-                    isLoadHovered = hovering
+                .onHover { hovering in isLoadHovered = hovering }
+            } else if let onView {
+                Button(action: onView) {
+                    Image(systemName: "eye")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
                 }
+                .frame(width: 44, height: 44)
+                .background(Color(red: 30/255, green: 160/255, blue: 160/255).opacity(isViewHovered ? 0.95 : 0.8))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .help("Preview rule on page")
+                .onHover { hovering in isViewHovered = hovering }
             }
 
             Button(action: onDelete) {
@@ -13312,6 +14013,45 @@ private struct AutoDetectLocalCandidateRow: View {
     }
 }
 
+private struct RectEditorRow: View {
+    @Binding var rect: OCRLayoutAreaRect
+
+    private static let fmt: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        f.minimum = 0
+        f.maximum = 1
+        return f
+    }()
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ForEach([
+                ("L", \OCRLayoutAreaRect.left),
+                ("R", \OCRLayoutAreaRect.right),
+                ("T", \OCRLayoutAreaRect.top),
+                ("B", \OCRLayoutAreaRect.bottom),
+            ], id: \.0) { label, kp in
+                HStack(spacing: 4) {
+                    Text(label)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                    TextField("", value: Binding(
+                        get: { rect[keyPath: kp] },
+                        set: { rect[keyPath: kp] = max(0, min(1, $0)) }
+                    ), formatter: Self.fmt)
+                    .frame(width: 52)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .multilineTextAlignment(.center)
+                }
+            }
+        }
+    }
+}
+
 private struct AutoDetectImageResultRow: View {
     @Binding var result: AutoDetectImageResult
     let isDone: Bool
@@ -13353,7 +14093,7 @@ private struct AutoDetectImageResultRow: View {
                         .toggleStyle(.checkbox)
                         .padding(.top, 2)
                 }
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
                         Image(systemName: "photo")
                             .font(.system(size: 13))
@@ -13361,11 +14101,16 @@ private struct AutoDetectImageResultRow: View {
                         Text("Image")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(NewOCRMainPalette.primaryText)
-                        Text(String(format: "rect: %.2f–%.2f × %.2f–%.2f",
-                                    result.imageRect.left, result.imageRect.right,
-                                    result.imageRect.bottom, result.imageRect.top))
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                        if !isDone {
+                            Text(String(format: "L%.2f R%.2f T%.2f B%.2f",
+                                        result.imageRect.left, result.imageRect.right,
+                                        result.imageRect.top, result.imageRect.bottom))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                        }
+                    }
+                    if isDone {
+                        RectEditorRow(rect: $result.imageRect)
                     }
                 }
                 Spacer()
@@ -13416,6 +14161,14 @@ private struct AutoDetectImageResultRow: View {
                             )
                             .frame(minHeight: 60)
                             .padding(.top, 2)
+
+                        if result.captionRect != nil {
+                            RectEditorRow(rect: Binding(
+                                get: { result.captionRect ?? OCRLayoutAreaRect(left: 0, right: 1, top: 0, bottom: 1) },
+                                set: { result.captionRect = $0 }
+                            ))
+                            .padding(.top, 2)
+                        }
                     }
                     Spacer()
                 }
@@ -14744,9 +15497,7 @@ struct OCRPDFPreviewView: NSViewRepresentable {
     func makeNSView(context: Context) -> PDFView {
         let pdfView = DraggablePDFView()
         context.coordinator.pdfView = pdfView
-        pdfView.displayMode = .singlePageContinuous
-        pdfView.displayDirection = .vertical
-        pdfView.displaysPageBreaks = true
+        pdfView.displayMode = .singlePage
         pdfView.displayBox = .cropBox
         pdfView.autoScales = false
         pdfView.backgroundColor = NSColor(calibratedWhite: 0.20, alpha: 1)
@@ -14827,71 +15578,14 @@ struct OCRPDFPreviewView: NSViewRepresentable {
 }
 
 private final class DraggablePDFView: PDFView {
-    private var dragStartLocation: NSPoint?
-    private var dragStartOrigin: NSPoint?
     private var rememberedHorizontalOrigin: CGFloat?
     private var rememberedVerticalOrigin: CGFloat?
-
-    override var acceptsFirstResponder: Bool {
-        true
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .openHand)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard let clipView = enclosingScrollView?.contentView else {
-            super.mouseDown(with: event)
-            return
-        }
-        dragStartLocation = event.locationInWindow
-        dragStartOrigin = clipView.bounds.origin
-        NSCursor.closedHand.set()
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let clipView = enclosingScrollView?.contentView,
-              let documentView = enclosingScrollView?.documentView,
-              let dragStartLocation,
-              let dragStartOrigin else {
-            super.mouseDragged(with: event)
-            return
-        }
-
-        let currentLocation = event.locationInWindow
-        let deltaX = currentLocation.x - dragStartLocation.x
-        let deltaY = currentLocation.y - dragStartLocation.y
-        let visibleSize = clipView.bounds.size
-        let documentBounds = documentView.bounds
-        let maxX = max(documentBounds.width - visibleSize.width, 0)
-        let maxY = max(documentBounds.height - visibleSize.height, 0)
-        let proposedY = documentView.isFlipped
-            ? dragStartOrigin.y - deltaY
-            : dragStartOrigin.y + deltaY
-        let proposedOrigin = NSPoint(
-            x: min(max(dragStartOrigin.x - deltaX, 0), maxX),
-            y: min(max(proposedY, 0), maxY)
-        )
-
-        clipView.scroll(to: proposedOrigin)
-        enclosingScrollView?.reflectScrolledClipView(clipView)
-        rememberScrollOrigin(proposedOrigin)
-        NSCursor.closedHand.set()
-    }
 
     override func scrollWheel(with event: NSEvent) {
         super.scrollWheel(with: event)
         DispatchQueue.main.async { [weak self] in
             self?.rememberCurrentScrollOrigin()
         }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        dragStartLocation = nil
-        dragStartOrigin = nil
-        NSCursor.openHand.set()
     }
 
     func resetRememberedHorizontalOrigin() {
@@ -16221,11 +16915,16 @@ struct HighlightingTextEditor: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView else { return }
 
         context.coordinator.parent = self
-        if textView.string != text {
+        let textChanged = textView.string != text
+        if textChanged {
             textView.string = text
         }
 
-        context.coordinator.applyHighlights(searchText: searchText)
+        let coord = context.coordinator
+        let currentLength = (textView.string as NSString).length
+        if textChanged || coord.lastHighlightedSearchText != searchText || coord.lastHighlightedTextLength != currentLength {
+            coord.applyHighlights(searchText: searchText)
+        }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -16233,6 +16932,8 @@ struct HighlightingTextEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         private var markdownPopover: NSPopover?
         private var isApplyingMarkdownStyle = false
+        var lastHighlightedSearchText: String? = nil
+        var lastHighlightedTextLength: Int = -1
 
         init(_ parent: HighlightingTextEditor) {
             self.parent = parent
@@ -16384,16 +17085,19 @@ struct HighlightingTextEditor: NSViewRepresentable {
         func applyHighlights(searchText: String) {
             guard let textView, let layoutManager = textView.layoutManager else { return }
 
-            let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+            let nsString = textView.string as NSString
+            lastHighlightedSearchText = searchText
+            lastHighlightedTextLength = nsString.length
+
+            let fullRange = NSRange(location: 0, length: nsString.length)
             layoutManager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
 
             let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !query.isEmpty else { return }
 
-            let source = textView.string as NSString
             var searchRange = fullRange
-            while searchRange.location < source.length {
-                let foundRange = source.range(
+            while searchRange.location < nsString.length {
+                let foundRange = nsString.range(
                     of: query,
                     options: [.caseInsensitive, .diacriticInsensitive],
                     range: searchRange
@@ -16410,7 +17114,7 @@ struct HighlightingTextEditor: NSViewRepresentable {
                 )
 
                 let nextLocation = foundRange.location + max(foundRange.length, 1)
-                searchRange = NSRange(location: nextLocation, length: source.length - nextLocation)
+                searchRange = NSRange(location: nextLocation, length: nsString.length - nextLocation)
             }
         }
     }
@@ -16546,6 +17250,18 @@ struct ParagraphItemView: View {
                         .lineLimit(1)
 
                     Spacer()
+
+                    if appState.ocrSourcePageIsKnown(for: index) {
+                        Button {
+                            appState.previewOCRParagraphSourcePage(index)
+                        } label: {
+                            Image(systemName: "doc.viewfinder")
+                                .font(.system(size: 13, weight: .medium))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.secondary)
+                        .help("Jump PDF preview to this paragraph's page")
+                    }
 
                     Menu("Actions") {
                         if isImage {
@@ -17812,17 +18528,13 @@ struct LayoutAreaEditorWindowView: View {
     @State private var isSelectedSectionsPopoverPresented = false
     @State private var isLayoutAreasReportPresented = false
     @State private var pendingDuplicateRule: OCRLayoutAreaRule?
-    @State private var layoutZoomScale: CGFloat = 1.0
-    @State private var activeAutoDetectMode: String? = nil  // nil, "image", "footnote", "quote", or "header"
-    @State private var isLoadingAutoDetect: Bool = false
+    @State private var layoutZoomScale: CGFloat = 1.0  // kept for legacy; preview now always fits page
     @State private var previewImage: NSImage? = nil
     @State private var isPreviewLoading: Bool = false
     @State private var previewImageKey: String = ""
     @State private var displayedImageKey: String = ""
-    @State private var autoDetectDuplicateConflicts: [String] = []
-    @State private var autoDetectFootnoteDuplicateConflicts: [String] = []
-    @State private var autoDetectQuoteDuplicateConflicts: [String] = []
-    @State private var autoDetectHeaderDuplicateConflicts: [String] = []
+    @State private var previewHovered: Bool = false
+    @State private var previewScrollMonitor: Any? = nil
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
         ("header", "Section Title", "book.closed"),
@@ -17844,16 +18556,17 @@ struct LayoutAreaEditorWindowView: View {
 
                 VStack(alignment: .leading, spacing: 16) {
                     controls
-                    if activeAutoDetectMode == nil {
+                    HStack(alignment: .top, spacing: 12) {
                         statusBar
+                        preview
                     }
-                    preview
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.top, 22)
         .padding(.horizontal, 36)
         .padding(.bottom, 22)
@@ -17862,22 +18575,6 @@ struct LayoutAreaEditorWindowView: View {
         .buttonStyle(NewOCRButtonStyle())
         .onChange(of: state.selectedPage) { _, newValue in
             state.selectedPage = min(max(newValue, 1), max(state.pageCount, 1))
-        }
-        .onChange(of: state.selectedScope) { _, _ in
-            // Reset auto-detect when scope changes
-            if activeAutoDetectMode == "image" {
-                state.resetAutoDetect()
-                appState.buildAutoDetectImageCandidates(in: state)
-            } else if activeAutoDetectMode == "footnote" {
-                state.resetAutoDetect()
-                appState.buildAutoDetectFootnotePages(in: state)
-            } else if activeAutoDetectMode == "quote" {
-                state.resetAutoDetect()
-                appState.buildAutoDetectQuotePages(in: state)
-            } else if activeAutoDetectMode == "header" {
-                state.resetAutoDetect()
-                appState.buildAutoDetectHeaderPages(in: state)
-            }
         }
         .onChange(of: state.selectedPDFPath) { _, _ in
             loadPreviewImageAsync()
@@ -17889,7 +18586,7 @@ struct LayoutAreaEditorWindowView: View {
             loadPreviewImageAsync()
         }
         .sheet(isPresented: $isLayoutAreasReportPresented) {
-            LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state, sectionFileName: state.selectedScope == "all_sections" ? nil : state.selectedPDFName)
+            LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state, sectionFileName: state.selectedScope == "all_sections" ? nil : state.primarySelectedLayoutSectionName)
                 .environmentObject(appState)
         }
         .sheet(item: $pendingDuplicateRule) { duplicate in
@@ -17904,42 +18601,6 @@ struct LayoutAreaEditorWindowView: View {
                 }
             )
         }
-        .alert("Existing Image Rules Found", isPresented: Binding(
-            get: { !autoDetectDuplicateConflicts.isEmpty },
-            set: { if !$0 { autoDetectDuplicateConflicts = [] } }
-        )) {
-            Button("OK") { autoDetectDuplicateConflicts = [] }
-        } message: {
-            let sections = autoDetectDuplicateConflicts.joined(separator: "\n• ")
-            Text("The following section(s) already have saved Image rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
-        }
-        .alert("Existing Footnote Rules Found", isPresented: Binding(
-            get: { !autoDetectFootnoteDuplicateConflicts.isEmpty },
-            set: { if !$0 { autoDetectFootnoteDuplicateConflicts = [] } }
-        )) {
-            Button("OK") { autoDetectFootnoteDuplicateConflicts = [] }
-        } message: {
-            let sections = autoDetectFootnoteDuplicateConflicts.joined(separator: "\n• ")
-            Text("The following section(s) already have saved Footnote or Ref Mark rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
-        }
-        .alert("Existing Quote Rules Found", isPresented: Binding(
-            get: { !autoDetectQuoteDuplicateConflicts.isEmpty },
-            set: { if !$0 { autoDetectQuoteDuplicateConflicts = [] } }
-        )) {
-            Button("OK") { autoDetectQuoteDuplicateConflicts = [] }
-        } message: {
-            let sections = autoDetectQuoteDuplicateConflicts.joined(separator: "\n• ")
-            Text("The following section(s) already have saved Quote (blockquote) rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
-        }
-        .alert("Existing Header Rules Found", isPresented: Binding(
-            get: { !autoDetectHeaderDuplicateConflicts.isEmpty },
-            set: { if !$0 { autoDetectHeaderDuplicateConflicts = [] } }
-        )) {
-            Button("OK") { autoDetectHeaderDuplicateConflicts = [] }
-        } message: {
-            let sections = autoDetectHeaderDuplicateConflicts.joined(separator: "\n• ")
-            Text("The following section(s) already have saved Section Title (header) rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
-        }
     }
 
     private func performSave() {
@@ -17947,6 +18608,9 @@ struct LayoutAreaEditorWindowView: View {
         let markersValue = markersApply(to: state.selectedType) ? state.markers : nil
         let anchorWordValue = state.selectedType == "refmark"
             ? (state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        let codexTextValue = codexTextApplies(to: state.selectedType)
+            ? (state.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.codexText.trimmingCharacters(in: .whitespacesAndNewlines))
             : nil
         do {
             let count: Int
@@ -17960,7 +18624,8 @@ struct LayoutAreaEditorWindowView: View {
                     newPageNumber: state.selectedPage,
                     newRect: state.normalizedOCRRect,
                     newMarkers: markersValue,
-                    newAnchorWord: anchorWordValue
+                    newAnchorWord: anchorWordValue,
+                    newCodexText: codexTextValue
                 )
                 state.loadedRule = nil
                 state.status = "Updated \(displayName(for: state.selectedType)) area."
@@ -17973,7 +18638,8 @@ struct LayoutAreaEditorWindowView: View {
                     pageNumber: state.selectedPage,
                     rect: state.normalizedOCRRect,
                     markers: markersValue,
-                    anchorWord: anchorWordValue
+                    anchorWord: anchorWordValue,
+                    codexText: codexTextValue
                 )
                 state.status = savedStatusMessage(for: state.selectedType)
             }
@@ -17986,6 +18652,10 @@ struct LayoutAreaEditorWindowView: View {
 
     private func markersApply(to type: String) -> Bool {
         type == "footnote" || type == "refmark" || type == "image" || type == "image_desc"
+    }
+
+    private func codexTextApplies(to type: String) -> Bool {
+        type == "header" || type == "h2" || type == "header3" || type == "blockquote" || type == "footnote" || type == "image_desc"
     }
 
     private func loadPreviewImageAsync() {
@@ -18044,86 +18714,6 @@ struct LayoutAreaEditorWindowView: View {
         }
     }
 
-    // Returns section file names that already have saved footnote/refmark rules covering the selected pages.
-    private func conflictingSectionsForAutoDetectFootnote() -> [String] {
-        let fnRules = state.allSavedRules.filter { $0.type == "footnote" || $0.type == "refmark" }
-        guard !fnRules.isEmpty else { return [] }
-        var seen = Set<String>()
-        var conflicts: [String] = []
-        for page in state.autoDetectFootnotePages where page.isSelected {
-            let section = page.sectionFileName
-            guard !seen.contains(section) else { continue }
-            let hasConflict = fnRules.contains { rule in
-                if rule.scope == "all_sections" { return true }
-                guard rule.section == section else { return false }
-                if rule.scope == "section" { return true }
-                if rule.page == page.pageNumber { return true } // matches scope:"page" and legacy scope:nil page rules
-                return false
-            }
-            if hasConflict {
-                seen.insert(section)
-                conflicts.append(section)
-            }
-        }
-        return conflicts
-    }
-
-    private func conflictingSectionsForAutoDetectQuote() -> [String] {
-        let rules = state.allSavedRules.filter { $0.type == "blockquote" }
-        guard !rules.isEmpty else { return [] }
-        var seen = Set<String>(); var conflicts: [String] = []
-        for page in state.autoDetectQuotePages where page.isSelected {
-            let section = page.sectionFileName
-            guard !seen.contains(section) else { continue }
-            if rules.contains(where: { r in
-                if r.scope == "all_sections" { return true }
-                guard r.section == section else { return false }
-                return r.scope == "section" || r.page == page.pageNumber
-            }) { seen.insert(section); conflicts.append(section) }
-        }
-        return conflicts
-    }
-
-    private func conflictingSectionsForAutoDetectHeader() -> [String] {
-        let rules = state.allSavedRules.filter { $0.type == "header" }
-        guard !rules.isEmpty else { return [] }
-        var seen = Set<String>(); var conflicts: [String] = []
-        for page in state.autoDetectHeaderPages where page.isSelected {
-            let section = page.sectionFileName
-            guard !seen.contains(section) else { continue }
-            if rules.contains(where: { r in
-                if r.scope == "all_sections" { return true }
-                guard r.section == section else { return false }
-                return r.scope == "section" || r.page == 1
-            }) { seen.insert(section); conflicts.append(section) }
-        }
-        return conflicts
-    }
-
-    // Returns section file names that already have a saved "image" rule covering the candidates.
-    private func conflictingSectionsForAutoDetect() -> [String] {
-        let imageRules = state.allSavedRules.filter { $0.type == "image" }
-        guard !imageRules.isEmpty else { return [] }
-        var seen = Set<String>()
-        var conflicts: [String] = []
-        for candidate in state.autoDetectImageCandidates {
-            let section = candidate.sectionFileName
-            guard !seen.contains(section) else { continue }
-            let hasConflict = imageRules.contains { rule in
-                if rule.scope == "all_sections" { return true }
-                guard rule.section == section else { return false }
-                if rule.scope == "section" { return true }
-                if rule.page == candidate.pageNumber { return true } // matches scope:"page" and legacy scope:nil page rules
-                return false
-            }
-            if hasConflict {
-                seen.insert(section)
-                conflicts.append(section)
-            }
-        }
-        return conflicts
-    }
-
     private var header: some View {
         HStack(alignment: .center, spacing: 16) {
             ZStack {
@@ -18151,7 +18741,7 @@ struct LayoutAreaEditorWindowView: View {
 
             Spacer()
 
-            Text("\(state.selectedScope == "all_sections" ? state.allSavedRules.count : state.allSavedRules.filter { $0.scope == "all_sections" || $0.section == state.selectedPDFName }.count) saved")
+            Text("\(state.visibleSavedRuleCount) saved")
                 .font(.system(size: 18, weight: .semibold).monospacedDigit())
                 .foregroundStyle(NewOCRMainPalette.primaryText)
                 .lineLimit(1)
@@ -18180,99 +18770,14 @@ struct LayoutAreaEditorWindowView: View {
             .disabled(state.loadedRule != nil)
 
             OCRIconButton(
-                title: "Auto Image",
-                systemImage: "photo.badge.magnifyingglass",
-                backgroundColor: activeAutoDetectMode == "image" ? Color(red: 80/255, green: 130/255, blue: 220/255) : Color(red: 80/255, green: 130/255, blue: 220/255).opacity(0.6),
-                foregroundColor: .white,
-                size: 44
-            ) {
-                if activeAutoDetectMode == "image" {
-                    activeAutoDetectMode = nil
-                } else {
-                    activeAutoDetectMode = "image"
-                    state.selectedType = "image"
-                    state.resetAutoDetect()
-                    isLoadingAutoDetect = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        appState.buildAutoDetectImageCandidates(in: state)
-                        isLoadingAutoDetect = false
-                    }
-                }
-            }
-
-            OCRIconButton(
-                title: "Auto Footnote",
-                systemImage: "note.text",
-                backgroundColor: activeAutoDetectMode == "footnote" ? Color(red: 100/255, green: 120/255, blue: 180/255) : Color(red: 100/255, green: 120/255, blue: 180/255).opacity(0.6),
-                foregroundColor: .white,
-                size: 44
-            ) {
-                if activeAutoDetectMode == "footnote" {
-                    activeAutoDetectMode = nil
-                } else {
-                    activeAutoDetectMode = "footnote"
-                    state.selectedType = "footnote"
-                    state.resetAutoDetect()
-                    isLoadingAutoDetect = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        appState.buildAutoDetectFootnotePages(in: state)
-                        isLoadingAutoDetect = false
-                    }
-                }
-            }
-
-            OCRIconButton(
-                title: "Auto Quote",
-                systemImage: "quote.bubble",
-                backgroundColor: activeAutoDetectMode == "quote" ? Color(red: 120/255, green: 90/255, blue: 180/255) : Color(red: 120/255, green: 90/255, blue: 180/255).opacity(0.6),
-                foregroundColor: .white,
-                size: 44
-            ) {
-                if activeAutoDetectMode == "quote" {
-                    activeAutoDetectMode = nil
-                } else {
-                    activeAutoDetectMode = "quote"
-                    state.selectedType = "blockquote"
-                    state.resetAutoDetect()
-                    isLoadingAutoDetect = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        appState.buildAutoDetectQuotePages(in: state)
-                        isLoadingAutoDetect = false
-                    }
-                }
-            }
-
-            OCRIconButton(
-                title: "Auto Header",
-                systemImage: "text.badge.star",
-                backgroundColor: activeAutoDetectMode == "header" ? Color(red: 180/255, green: 110/255, blue: 60/255) : Color(red: 180/255, green: 110/255, blue: 60/255).opacity(0.6),
-                foregroundColor: .white,
-                size: 44
-            ) {
-                if activeAutoDetectMode == "header" {
-                    activeAutoDetectMode = nil
-                } else {
-                    activeAutoDetectMode = "header"
-                    state.selectedType = "header"
-                    state.resetAutoDetect()
-                    isLoadingAutoDetect = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        appState.buildAutoDetectHeaderPages(in: state)
-                        isLoadingAutoDetect = false
-                    }
-                }
-            }
-
-            OCRIconButton(
                 title: state.loadedRule != nil ? "Update Rule" : "Save Area",
                 systemImage: state.loadedRule != nil ? "pencil.and.list.clipboard" : "square.and.arrow.down",
-                backgroundColor: (state.loadedRule != nil ? Color(red: 255/255, green: 159/255, blue: 64/255) : Color(red: 53/255, green: 200/255, blue: 90/255)).opacity(activeAutoDetectMode != nil ? 0.4 : 1.0),
+                backgroundColor: state.loadedRule != nil ? Color(red: 255/255, green: 159/255, blue: 64/255) : Color(red: 53/255, green: 200/255, blue: 90/255),
                 foregroundColor: .black,
                 size: 44
             ) {
                 saveCurrentArea()
             }
-            .disabled(activeAutoDetectMode != nil)
 
             OCRIconButton(
                 title: "Close",
@@ -18343,106 +18848,139 @@ struct LayoutAreaEditorWindowView: View {
 
     private var statusBar: some View {
         let totalPages = max(state.pageCount, 1)
+        guard let pdfURL = state.selectedPDFURL else {
+            return AnyView(EmptyView())
+        }
 
-        return HStack(spacing: 10) {
-            Text("Page")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(NewOCRMainPalette.primaryText)
-                .lineLimit(1)
+        return AnyView(
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(spacing: 10) {
+                    ForEach(1...totalPages, id: \.self) { page in
+                        let isSelected = state.selectedPage == page
+                        let thumb = appState.layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: page)
+                        VStack(spacing: 6) {
+                            Group {
+                                if let thumb {
+                                    Image(nsImage: thumb)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(maxWidth: .infinity)
+                                } else {
+                                    NewOCRMainPalette.fieldBackground
+                                        .frame(maxWidth: .infinity, minHeight: 100)
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(isSelected ? Color.accentColor : NewOCRMainPalette.stroke,
+                                            lineWidth: isSelected ? 2.5 : 1)
+                            )
+                            .shadow(color: Color.black.opacity(isSelected ? 0.25 : 0.08), radius: isSelected ? 6 : 2)
 
-            Text("\(state.selectedPage) / \(totalPages)")
-                .font(.system(size: 18, weight: .semibold).monospacedDigit())
-                .foregroundStyle(NewOCRMainPalette.primaryText)
-                .frame(width: 74, alignment: .leading)
-
-            NewOCRPageSlider(page: $state.selectedPage, pageCount: totalPages)
-                .frame(minWidth: 200, maxWidth: .infinity)
-
-            // Zoom control pill
-            HStack(spacing: 0) {
-                Button {
-                    layoutZoomScale = max(0.5, (layoutZoomScale - 0.25).rounded(toPlaces: 2))
-                } label: {
-                    Image(systemName: "minus")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 32, height: 32)
-                        .foregroundStyle(layoutZoomScale <= 0.5 ? NewOCRMainPalette.tertiaryText : NewOCRMainPalette.primaryText)
-                        .contentShape(Rectangle())
+                            Text("Page \(page)")
+                                .font(.system(size: 11, weight: isSelected ? .bold : .regular).monospacedDigit())
+                                .foregroundStyle(isSelected ? Color.accentColor : NewOCRMainPalette.secondaryText)
+                        }
+                        .padding(8)
+                        .background(isSelected ? Color.accentColor.opacity(0.08) : NewOCRMainPalette.panelBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .onTapGesture { state.selectedPage = page }
+                        .pointingHandCursor()
+                    }
                 }
-                .buttonStyle(.plain)
-                .disabled(layoutZoomScale <= 0.5)
-                .pointingHandCursor()
-
-                Rectangle()
-                    .fill(NewOCRMainPalette.stroke)
-                    .frame(width: 1, height: 20)
-
-                Text("\(Int((layoutZoomScale * 100).rounded()))%")
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
-                    .frame(minWidth: 52)
-                    .padding(.horizontal, 6)
-                    .frame(height: 32)
-                    .contentShape(Rectangle())
-                    .onTapGesture { layoutZoomScale = 1.0 }
-                    .pointingHandCursor()
-                    .help("Tap to reset zoom to 100%")
-
-                Rectangle()
-                    .fill(NewOCRMainPalette.stroke)
-                    .frame(width: 1, height: 20)
-
-                Button {
-                    layoutZoomScale = min(4.0, (layoutZoomScale + 0.25).rounded(toPlaces: 2))
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 32, height: 32)
-                        .foregroundStyle(layoutZoomScale >= 4.0 ? NewOCRMainPalette.tertiaryText : NewOCRMainPalette.primaryText)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(layoutZoomScale >= 4.0)
-                .pointingHandCursor()
+                .padding(8)
             }
+            .frame(width: 140)
+            .frame(maxHeight: .infinity)
             .background(NewOCRMainPalette.fieldBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
             )
-
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(NewOCRMainPalette.panelBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
         )
     }
 
     private var controls: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 16) {
-                scopePicker
-                typeButtons
-                Spacer(minLength: 12)
-            }
+        let showCodexRow = state.loadedRule != nil && !state.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
-            VStack(alignment: .leading, spacing: 12) {
-                scopePicker
-                typeButtons
+        return VStack(alignment: .leading, spacing: 0) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 16) {
+                    scopePicker
+                    if markersApply(to: state.selectedType) {
+                        markersField
+                            .frame(width: 300)
+                    }
+                    Spacer(minLength: 4)
+                    typeButtons
+                    Spacer(minLength: 12)
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .center, spacing: 12) {
+                        scopePicker
+                        if markersApply(to: state.selectedType) {
+                            markersField
+                                .frame(width: 300)
+                        }
+                    }
+                    typeButtons
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            if showCodexRow {
+                Divider().overlay(NewOCRMainPalette.stroke)
+
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "text.quote")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(red: 100/255, green: 180/255, blue: 255/255))
+                        .padding(.top, 3)
+
+                    ZStack(alignment: .topLeading) {
+                        if state.codexText.isEmpty {
+                            Text("Codex text override…")
+                                .font(.system(size: 13))
+                                .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                                .italic()
+                                .allowsHitTesting(false)
+                                .padding(.leading, 4)
+                                .padding(.top, 2)
+                        }
+                        TextEditor(text: $state.codexText)
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                            .scrollContentBackground(.hidden)
+                            .background(Color.clear)
+                            .frame(minHeight: 52, maxHeight: 96)
+                    }
+
+                    Button {
+                        state.codexText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .help("Clear Codex text override")
+                    .padding(.top, 2)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(NewOCRMainPalette.fieldBackground)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                .stroke(showCodexRow ? Color(red: 100/255, green: 180/255, blue: 255/255).opacity(0.45) : NewOCRMainPalette.stroke, lineWidth: 1)
         )
     }
 
@@ -18461,6 +18999,9 @@ struct LayoutAreaEditorWindowView: View {
                     if type.id != "refmark" {
                         state.anchorWord = ""
                     }
+                    if !codexTextApplies(to: type.id) {
+                        state.codexText = ""
+                    }
                     let pageOnlyTypes: Set<String> = ["image", "image_desc", "blockquote", "footnote", "refmark"]
                     if pageOnlyTypes.contains(type.id) {
                         if state.selectedScope == "all_sections" {
@@ -18469,10 +19010,6 @@ struct LayoutAreaEditorWindowView: View {
                         state.selectedScope = "page"
                     }
                 }
-            }
-
-            if markersApply(to: state.selectedType) {
-                markersField
             }
         }
     }
@@ -18569,6 +19106,83 @@ struct LayoutAreaEditorWindowView: View {
         )
     }
 
+    private var codexTextPanel: some View {
+        let typeColorMap: [String: Color] = [
+            "header": Color(red: 60/255, green: 120/255, blue: 220/255),
+            "h2": Color(red: 60/255, green: 120/255, blue: 220/255),
+            "header3": Color(red: 60/255, green: 120/255, blue: 220/255),
+            "blockquote": Color(red: 210/255, green: 130/255, blue: 60/255),
+            "footnote": Color(red: 60/255, green: 180/255, blue: 100/255),
+            "image_desc": Color(red: 210/255, green: 170/255, blue: 60/255)
+        ]
+        let accentColor = typeColorMap[state.selectedType] ?? Color(red: 100/255, green: 160/255, blue: 255/255)
+        let hasText = !state.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        return VStack(alignment: .leading, spacing: 0) {
+            // Header strip
+            HStack(spacing: 8) {
+                Image(systemName: "text.quote")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(accentColor)
+                Text("Codex Text Override")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Text("— replaces Vision OCR for this area during OCR runs")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                Spacer(minLength: 0)
+                if hasText {
+                    Button {
+                        state.codexText = ""
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("Clear")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 9)
+            .padding(.bottom, 7)
+
+            Divider().overlay(NewOCRMainPalette.stroke)
+
+            // Text editor
+            ZStack(alignment: .topLeading) {
+                if state.codexText.isEmpty {
+                    Text("Paste or type the Codex-detected text here. During OCR, this text replaces Vision recognition for the drawn rectangle.")
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                        .italic()
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $state.codexText)
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.clear)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .frame(minHeight: 64, maxHeight: 120)
+            }
+            .background(NewOCRMainPalette.fieldBackground)
+        }
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(hasText ? accentColor.opacity(0.55) : NewOCRMainPalette.stroke, lineWidth: 1)
+        )
+    }
+
     private var scopePicker: some View {
         LayoutAreaScopePicker(
             selection: $state.selectedScope,
@@ -18582,113 +19196,616 @@ struct LayoutAreaEditorWindowView: View {
             }
         }
         .frame(minWidth: 310, idealWidth: 350, maxWidth: 390)
-        .disabled(state.loadedRule != nil || activeAutoDetectMode != nil)
-        .opacity(state.loadedRule != nil || activeAutoDetectMode != nil ? 0.4 : 1.0)
+        .disabled(state.loadedRule != nil)
+        .opacity(state.loadedRule != nil ? 0.4 : 1.0)
     }
 
     private var preview: some View {
         Group {
-            if isLoadingAutoDetect {
-                // Loading state
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .controlSize(.large)
-                    Text("Loading \(activeAutoDetectMode == "image" ? "image" : activeAutoDetectMode == "quote" ? "quote" : activeAutoDetectMode == "header" ? "header" : "footnote") candidates...")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(NewOCRMainPalette.fieldBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                )
-            } else if let mode = activeAutoDetectMode {
-                // Auto Detect mode
-                if mode == "image" {
-                    autoDetectImagePanel
-                } else if mode == "footnote" {
-                    autoDetectFootnotePanel
-                } else if mode == "quote" {
-                    autoDetectQuotePanel
-                } else if mode == "header" {
-                    autoDetectHeaderPanel
-                } else {
-                    ContentUnavailableView("Unknown Mode", systemImage: "exclamationmark.triangle")
-                }
-            } else {
-                // Manual drawing mode
-                if let image = previewImage {
-                    GeometryReader { proxy in
-                        let baseFit = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size, zoomScale: 1.0)
-                        let imageW = baseFit.width * layoutZoomScale
-                        let imageH = baseFit.height * layoutZoomScale
-                        let contentW = max(imageW, proxy.size.width)
-                        let contentH = max(imageH, proxy.size.height)
-                        let imageFrame = CGRect(
-                            x: (contentW - imageW) / 2,
-                            y: (contentH - imageH) / 2,
-                            width: imageW,
-                            height: imageH
-                        )
-
-                        ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                            ZStack(alignment: .topLeading) {
-                                Image(nsImage: image)
-                                    .resizable()
-                                    .interpolation(.high)
-                                    .frame(width: imageFrame.width, height: imageFrame.height)
-                                    .position(x: imageFrame.midX, y: imageFrame.midY)
-                                    .shadow(color: Color.black.opacity(0.18), radius: 8, x: 0, y: 2)
-                                    .id(displayedImageKey)
-                                    .transition(.opacity)
-
-                                LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
-                            }
-                            .frame(width: contentW, height: contentH)
-                        }
-                        .background(Color.black.opacity(0.10))
-                    }
-                    .frame(minWidth: 0, minHeight: 460)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(NewOCRMainPalette.fieldBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                    )
-                    .overlay(alignment: .bottomTrailing) {
-                        if layoutZoomScale != 1.0 {
-                            Text("Scroll to pan · drag to set area")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(NewOCRMainPalette.secondaryText)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(NewOCRMainPalette.panelBackground.opacity(0.92))
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                .padding(10)
-                        }
+            if let image = previewImage {
+                GeometryReader { proxy in
+                    let imageFrame = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size)
+                    ZStack(alignment: .topLeading) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: imageFrame.width, height: imageFrame.height)
+                            .position(x: imageFrame.midX, y: imageFrame.midY)
+                            .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: 1)
+                            .id(displayedImageKey)
+                            .transition(.opacity)
+                        LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
                     }
                     .overlay(alignment: .topTrailing) {
                         if isPreviewLoading {
-                            ProgressView()
-                                .controlSize(.small)
-                                .padding(8)
+                            ProgressView().controlSize(.small).padding(8)
                                 .background(NewOCRMainPalette.panelBackground.opacity(0.85))
-                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .padding(8)
                         }
                     }
-                } else {
-                    ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
-                        .frame(minWidth: 0, minHeight: 460)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .foregroundStyle(NewOCRMainPalette.primaryText)
                 }
+            } else {
+                ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+            }
+        }
+        .frame(minWidth: 0, minHeight: 460)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(NewOCRMainPalette.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+        .onHover { previewHovered = $0 }
+        .onAppear {
+            previewScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                guard self.previewHovered else { return event }
+                let delta = event.scrollingDeltaY
+                DispatchQueue.main.async {
+                    if delta < -8 {
+                        let next = min(self.state.selectedPage + 1, self.state.pageCount)
+                        if next != self.state.selectedPage { self.state.selectedPage = next }
+                    } else if delta > 8 {
+                        let prev = max(self.state.selectedPage - 1, 1)
+                        if prev != self.state.selectedPage { self.state.selectedPage = prev }
+                    }
+                }
+                return event
+            }
+        }
+        .onDisappear {
+            if let monitor = previewScrollMonitor {
+                NSEvent.removeMonitor(monitor)
+                previewScrollMonitor = nil
             }
         }
     }
+
+
+    private func saveCurrentArea() {
+        guard let url = state.selectedPDFURL else { return }
+        if state.selectedScope == "selected_sections" && state.selectedLayoutSectionItems.isEmpty {
+            state.status = "Choose at least one section."
+            return
+        }
+
+        let normalizedRect = state.normalizedOCRRect
+        let cleanScope = state.selectedScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        var duplicateFound: OCRLayoutAreaRule? = nil
+
+        switch cleanScope {
+        case "all_sections":
+            duplicateFound = appState.findDuplicateRule(
+                type: state.selectedType,
+                scope: "all_sections",
+                section: nil,
+                page: nil,
+                rect: normalizedRect,
+                excludingRule: state.loadedRule
+            )
+        case "selected_sections":
+            for item in state.selectedLayoutSectionItems {
+                if let duplicate = appState.findDuplicateRule(
+                    type: state.selectedType,
+                    scope: nil,
+                    section: item.url.lastPathComponent,
+                    page: nil,
+                    rect: normalizedRect,
+                    excludingRule: state.loadedRule
+                ) {
+                    duplicateFound = duplicate
+                    break
+                }
+            }
+        case "page":
+            duplicateFound = appState.findDuplicateRule(
+                type: state.selectedType,
+                scope: nil,
+                section: url.lastPathComponent,
+                page: state.selectedPage,
+                rect: normalizedRect,
+                excludingRule: state.loadedRule
+            )
+        default:
+            duplicateFound = appState.findDuplicateRule(
+                type: state.selectedType,
+                scope: nil,
+                section: url.lastPathComponent,
+                page: nil,
+                rect: normalizedRect,
+                excludingRule: state.loadedRule
+            )
+        }
+
+        if let duplicate = duplicateFound {
+            pendingDuplicateRule = duplicate
+            return
+        }
+
+        let markersValue = markersApply(to: state.selectedType) ? state.markers : nil
+        let anchorWordValue = state.selectedType == "refmark"
+            ? (state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        let codexTextValue = codexTextApplies(to: state.selectedType)
+            ? (state.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.codexText.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        do {
+            let count: Int
+            if let loadedRule = state.loadedRule {
+                count = try appState.updateLayoutAreaRule(
+                    loadedRule,
+                    with: state.selectedType,
+                    newScope: state.selectedScope,
+                    newCurrentSectionURL: url,
+                    newSelectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
+                    newPageNumber: state.selectedPage,
+                    newRect: state.normalizedOCRRect,
+                    newMarkers: markersValue,
+                    newAnchorWord: anchorWordValue,
+                    newCodexText: codexTextValue
+                )
+                state.loadedRule = nil
+                state.status = "Updated \(displayName(for: state.selectedType)) area."
+            } else {
+                count = try appState.saveLayoutAreaRules(
+                    type: state.selectedType,
+                    scope: state.selectedScope,
+                    currentSectionURL: url,
+                    selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
+                    pageNumber: state.selectedPage,
+                    rect: state.normalizedOCRRect,
+                    markers: markersValue,
+                    anchorWord: anchorWordValue,
+                    codexText: codexTextValue
+                )
+                state.status = savedStatusMessage(for: state.selectedType)
+            }
+            state.savedRuleCount = count
+            appState.reloadAllSavedRules(into: state)
+        } catch {
+            state.status = "Could not save: \(error.localizedDescription)"
+        }
+    }
+
+    private func savedStatusMessage(for type: String) -> String {
+        let areaName = displayName(for: type)
+        switch state.selectedScope {
+        case "all_sections":
+            return "Saved \(areaName) area for all sections."
+        case "selected_sections":
+            return "Saved \(areaName) area for \(state.selectedLayoutSectionItems.count) selected section(s)."
+        case "page":
+            return "Saved \(areaName) area for current section page \(state.selectedPage)."
+        default:
+            return "Saved \(areaName) area for current section."
+        }
+    }
+
+    private func clearRules() {
+        let alert = NSAlert()
+        alert.messageText = "Clear Layout Rules?"
+        alert.informativeText = "This removes all saved header, quote, image, image description, footnote, ref mark, and ignore layout areas for the current project."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try appState.clearLayoutAreaRules()
+            state.savedRuleCount = 0
+            state.allSavedRules = []
+            state.status = "Cleared layout rules."
+        } catch {
+            state.status = "Could not clear rules: \(error.localizedDescription)"
+        }
+    }
+
+    private func displayName(for type: String) -> String {
+        switch type {
+        case "header":     return "section title"
+        case "h2":         return "H2 heading"
+        case "header3":    return "H3 subheading"
+        case "blockquote": return "quote"
+        case "image":      return "image"
+        case "image_desc": return "image description"
+        case "footnote":   return "footnote"
+        case "refmark":    return "ref mark"
+        case "ignore":     return "ignore"
+        default:           return "layout"
+        }
+    }
+}
+
+
+// MARK: - Auto Detect Window
+
+struct AutoDetectWindowView: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject var state: LayoutAreaEditorState
+    @State private var activeAutoDetectMode: String? = nil
+    @State private var isLoadingAutoDetect: Bool = false
+    @State private var autoDetectDuplicateConflicts: [String] = []
+    @State private var autoDetectFootnoteDuplicateConflicts: [String] = []
+    @State private var autoDetectQuoteDuplicateConflicts: [String] = []
+    @State private var autoDetectHeaderDuplicateConflicts: [String] = []
+    @State private var isViewRulesPresented = false
+    @State private var viewingRule: OCRLayoutAreaRule? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            header
+            HStack(alignment: .top, spacing: 16) {
+                sectionList
+                VStack(alignment: .leading, spacing: 0) {
+                    if let mode = activeAutoDetectMode {
+                        if isLoadingAutoDetect {
+                            VStack(spacing: 20) {
+                                ProgressView().controlSize(.large)
+                                Text("Loading \(mode == "image" ? "image" : mode == "quote" ? "quote" : mode == "header" ? "header" : "footnote") candidates...")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(NewOCRMainPalette.fieldBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                        } else if mode == "image" {
+                            autoDetectImagePanel
+                        } else if mode == "footnote" {
+                            autoDetectFootnotePanel
+                        } else if mode == "quote" {
+                            autoDetectQuotePanel
+                        } else if mode == "header" {
+                            autoDetectHeaderPanel
+                        }
+                    } else {
+                        ContentUnavailableView("Select a Detect Mode", systemImage: "wand.and.stars", description: Text("Use the buttons above to start Auto Image, Footnote, Quote, or Header detection."))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.top, 22)
+        .padding(.horizontal, 36)
+        .padding(.bottom, 22)
+        .frame(minWidth: 0, minHeight: 720)
+        .background(NewOCRMainPalette.windowBackground)
+        .buttonStyle(NewOCRButtonStyle())
+        .sheet(isPresented: $isViewRulesPresented) {
+            LayoutAreasReportView(
+                isPresented: $isViewRulesPresented,
+                state: state,
+                sectionFileName: state.selectedScope == "all_sections" ? nil : state.selectedPDFName,
+                onView: { rule in
+                    isViewRulesPresented = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        viewingRule = rule
+                    }
+                },
+                isAutoOnly: true
+            )
+            .environmentObject(appState)
+        }
+        .sheet(item: $viewingRule) { rule in
+            RulePreviewSheet(rule: rule, pdfItems: state.pdfItems, onSaved: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    appState.reloadAllSavedRules(into: state)
+                    isViewRulesPresented = true
+                }
+            })
+            .environmentObject(appState)
+        }
+        .onChange(of: state.selectedScope) { _, _ in
+            if activeAutoDetectMode == "image" {
+                state.resetAutoDetect()
+                appState.buildAutoDetectImageCandidates(in: state)
+            } else if activeAutoDetectMode == "footnote" {
+                state.resetAutoDetect()
+                appState.buildAutoDetectFootnotePages(in: state)
+            } else if activeAutoDetectMode == "quote" {
+                state.resetAutoDetect()
+                appState.buildAutoDetectQuotePages(in: state)
+            } else if activeAutoDetectMode == "header" {
+                state.resetAutoDetect()
+                appState.buildAutoDetectHeaderPages(in: state)
+            }
+        }
+        .alert("Existing Image Rules Found", isPresented: Binding(
+            get: { !autoDetectDuplicateConflicts.isEmpty },
+            set: { if !$0 { autoDetectDuplicateConflicts = [] } }
+        )) { Button("OK") { autoDetectDuplicateConflicts = [] } }
+        message: {
+            let sections = autoDetectDuplicateConflicts.joined(separator: "\n• ")
+            Text("The following section(s) already have saved Image rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
+        }
+        .alert("Existing Footnote Rules Found", isPresented: Binding(
+            get: { !autoDetectFootnoteDuplicateConflicts.isEmpty },
+            set: { if !$0 { autoDetectFootnoteDuplicateConflicts = [] } }
+        )) { Button("OK") { autoDetectFootnoteDuplicateConflicts = [] } }
+        message: {
+            let sections = autoDetectFootnoteDuplicateConflicts.joined(separator: "\n• ")
+            Text("The following section/page(s) already have saved Footnote or Ref Mark rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
+        }
+        .alert("Existing Quote Rules Found", isPresented: Binding(
+            get: { !autoDetectQuoteDuplicateConflicts.isEmpty },
+            set: { if !$0 { autoDetectQuoteDuplicateConflicts = [] } }
+        )) { Button("OK") { autoDetectQuoteDuplicateConflicts = [] } }
+        message: {
+            let sections = autoDetectQuoteDuplicateConflicts.joined(separator: "\n• ")
+            Text("The following section/page(s) already have saved Quote (blockquote) rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
+        }
+        .alert("Existing Header Rules Found", isPresented: Binding(
+            get: { !autoDetectHeaderDuplicateConflicts.isEmpty },
+            set: { if !$0 { autoDetectHeaderDuplicateConflicts = [] } }
+        )) { Button("OK") { autoDetectHeaderDuplicateConflicts = [] } }
+        message: {
+            let sections = autoDetectHeaderDuplicateConflicts.joined(separator: "\n• ")
+            Text("The following section/page(s) already have saved Section Title (header) rules:\n\n• \(sections)\n\nPlease remove those rules from \"View Rules\" before running Auto Detect.")
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(0.94))
+                    .frame(width: 58, height: 58)
+                    .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(Color.black)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Auto Detect")
+                    .font(.largeTitle.weight(.semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                if !state.status.isEmpty {
+                    Text(state.status)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer()
+
+            Text("\(state.allSavedRules.filter { $0.isAuto == true && (state.selectedScope == "all_sections" || $0.section == state.selectedPDFName) }.count) saved")
+                .font(.system(size: 18, weight: .semibold).monospacedDigit())
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+                .lineLimit(1)
+                .frame(minWidth: 96, alignment: .trailing)
+
+            OCRIconButton(
+                title: "View Rules",
+                systemImage: "list.bullet.rectangle",
+                backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255),
+                foregroundColor: .white,
+                size: 44
+            ) {
+                appState.reloadAllSavedRules(into: state)
+                isViewRulesPresented = true
+            }
+
+            autoModeButton(
+                title: "Image", systemImage: "photo.badge.magnifyingglass", mode: "image",
+                activeColor: Color(red: 80/255, green: 130/255, blue: 220/255)
+            ) {
+                state.selectedType = "image"
+                state.resetAutoDetect()
+                isLoadingAutoDetect = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    appState.buildAutoDetectImageCandidates(in: state)
+                    isLoadingAutoDetect = false
+                }
+            }
+
+            autoModeButton(
+                title: "Footnote", systemImage: "note.text", mode: "footnote",
+                activeColor: Color(red: 100/255, green: 120/255, blue: 180/255)
+            ) {
+                state.selectedType = "footnote"
+                state.resetAutoDetect()
+                isLoadingAutoDetect = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    appState.buildAutoDetectFootnotePages(in: state)
+                    isLoadingAutoDetect = false
+                }
+            }
+
+            autoModeButton(
+                title: "Quote", systemImage: "quote.bubble", mode: "quote",
+                activeColor: Color(red: 120/255, green: 90/255, blue: 180/255)
+            ) {
+                state.selectedType = "blockquote"
+                state.resetAutoDetect()
+                isLoadingAutoDetect = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    appState.buildAutoDetectQuotePages(in: state)
+                    isLoadingAutoDetect = false
+                }
+            }
+
+            autoModeButton(
+                title: "Header", systemImage: "text.badge.star", mode: "header",
+                activeColor: Color(red: 180/255, green: 110/255, blue: 60/255)
+            ) {
+                state.selectedType = "header"
+                state.resetAutoDetect()
+                isLoadingAutoDetect = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    appState.buildAutoDetectHeaderPages(in: state)
+                    isLoadingAutoDetect = false
+                }
+            }
+
+            OCRIconButton(
+                title: "Close",
+                systemImage: "xmark",
+                backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                foregroundColor: .white,
+                size: 44
+            ) {
+                NSApp.keyWindow?.close()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func autoModeButton(title: String, systemImage: String, mode: String, activeColor: Color, onActivate: @escaping () -> Void) -> some View {
+        let isActive = activeAutoDetectMode == mode
+        OCRIconButton(
+            title: title,
+            systemImage: systemImage,
+            backgroundColor: isActive ? activeColor : activeColor.opacity(0.55),
+            foregroundColor: .white,
+            size: 44
+        ) {
+            if isActive {
+                activeAutoDetectMode = nil
+            } else {
+                activeAutoDetectMode = mode
+                onActivate()
+            }
+        }
+    }
+
+    private var sectionList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.orange)
+                Text("Sections")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.primaryText)
+                Spacer()
+                Text("\(state.pdfItems.count)")
+                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(NewOCRMainPalette.secondaryText)
+            }
+
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    LayoutAreaAllSectionsRow(
+                        isChecked: state.selectedScope == "all_sections"
+                    ) {
+                        state.selectedScope = "all_sections"
+                        state.selectedLayoutSectionPaths = []
+                    }
+                    ForEach(state.pdfItems) { item in
+                        LayoutAreaSectionRow(
+                            item: item,
+                            isChecked: state.selectedLayoutSectionPaths.contains(item.url.path),
+                            isCurrentPreview: item.url.path == state.selectedPDFPath && state.selectedScope != "all_sections",
+                            pageCount: state.pageCount(for: item)
+                        ) {
+                            toggleSectionCheck(item)
+                        }
+                    }
+                }
+                .padding(8)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+        }
+        .padding(12)
+        .frame(width: 280)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+    }
+
+    private func toggleSectionCheck(_ item: PDFFileItem) {
+        let path = item.url.path
+        state.selectPDFPath(path)
+        if state.selectedScope == "all_sections" {
+            state.selectedLayoutSectionPaths = [path]
+            state.selectedScope = "section"
+            return
+        }
+        // In Section or Page scope: just switch the active section, don't toggle checkboxes
+        if state.selectedScope == "section" || state.selectedScope == "page" {
+            state.selectedLayoutSectionPaths = [path]
+            return
+        }
+        // In Selected scope: toggle checkbox
+        if state.selectedLayoutSectionPaths.contains(path) {
+            guard state.selectedLayoutSectionPaths.count > 1 else { return }
+            state.selectedLayoutSectionPaths.remove(path)
+            if state.selectedLayoutSectionPaths.count == 1 {
+                state.selectedScope = "section"
+            }
+            if state.selectedPDFPath == path, let next = state.selectedLayoutSectionPaths.first {
+                state.selectPDFPath(next)
+            }
+        } else {
+            state.selectedLayoutSectionPaths.insert(path)
+        }
+    }
+
+    // Returns conflict strings keyed by section+page so a rule on page 5 does not
+    // block detection on page 13 of the same section.
+    private func conflictingPagesFormatted(
+        rules: [OCRLayoutAreaRule],
+        pages: [(sectionFileName: String, pageNumber: Int)]
+    ) -> [String] {
+        guard !rules.isEmpty else { return [] }
+        var seen = Set<String>()
+        var bySection: [String: [Int]] = [:]
+        for page in pages {
+            let key = "\(page.sectionFileName):\(page.pageNumber)"
+            guard !seen.contains(key) else { continue }
+            let hasConflict = rules.contains { rule in
+                if rule.scope == "all_sections" { return true }
+                guard rule.section == page.sectionFileName else { return false }
+                if rule.scope == "section" { return true }
+                return rule.page == page.pageNumber
+            }
+            if hasConflict {
+                seen.insert(key)
+                bySection[page.sectionFileName, default: []].append(page.pageNumber)
+            }
+        }
+        return bySection.sorted { $0.key < $1.key }.map { section, pageNums in
+            let sorted = pageNums.sorted()
+            let pageList = sorted.map { String($0) }.joined(separator: ", ")
+            return sorted.count == 1 ? "\(section) (page \(pageList))" : "\(section) (pages \(pageList))"
+        }
+    }
+
+    private func conflictingSectionsForAutoDetectFootnote() -> [String] {
+        let rules = state.allSavedRules.filter { $0.type == "footnote" || $0.type == "refmark" }
+        let pages = state.autoDetectFootnotePages.filter(\.isSelected).map { (sectionFileName: $0.sectionFileName, pageNumber: $0.pageNumber) }
+        return conflictingPagesFormatted(rules: rules, pages: pages)
+    }
+
+    private func conflictingSectionsForAutoDetectQuote() -> [String] {
+        let rules = state.allSavedRules.filter { $0.type == "blockquote" }
+        let pages = state.autoDetectQuotePages.filter(\.isSelected).map { (sectionFileName: $0.sectionFileName, pageNumber: $0.pageNumber) }
+        return conflictingPagesFormatted(rules: rules, pages: pages)
+    }
+
+    private func conflictingSectionsForAutoDetectHeader() -> [String] {
+        let rules = state.allSavedRules.filter { $0.type == "header" }
+        let pages = state.autoDetectHeaderPages.filter(\.isSelected).map { (sectionFileName: $0.sectionFileName, pageNumber: $0.pageNumber) }
+        return conflictingPagesFormatted(rules: rules, pages: pages)
+    }
+
+    private func conflictingSectionsForAutoDetect() -> [String] {
+        let rules = state.allSavedRules.filter { $0.type == "image" }
+        let pages = state.autoDetectImageCandidates.map { (sectionFileName: $0.sectionFileName, pageNumber: $0.pageNumber) }
+        return conflictingPagesFormatted(rules: rules, pages: pages)
+    }
+
 
     private var autoDetectImagePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -18729,32 +19846,25 @@ struct LayoutAreaEditorWindowView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach($state.autoDetectImageCandidates) { $candidate in
+                            let thumb = appState.layoutAreaPreviewImage(pdfURL: candidate.pdfURL, pageNumber: candidate.pageNumber)
                             ZStack(alignment: .topTrailing) {
-                                HStack(spacing: 12) {
-                                    Toggle("", isOn: $candidate.isSelected)
-                                        .labelsHidden().toggleStyle(.checkbox).scaleEffect(1.5)
-                                    let thumb = appState.layoutAreaPreviewImage(pdfURL: candidate.pdfURL, pageNumber: candidate.pageNumber)
-                                    ScrollView(.vertical, showsIndicators: true) {
-                                        Group {
-                                            if let thumb {
-                                                Image(nsImage: thumb).resizable().scaledToFit()
-                                                    .frame(width: appState.autoDetectThumbWidth)
-                                            } else {
-                                                NewOCRMainPalette.fieldBackground
-                                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
-                                            }
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Group {
+                                        if let thumb {
+                                            Image(nsImage: thumb).resizable().scaledToFit()
+                                        } else {
+                                            NewOCRMainPalette.fieldBackground
                                         }
                                     }
-                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                    .frame(maxWidth: .infinity, maxHeight: 340)
                                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
                                     .onTapGesture { appState.openLayoutAreaThumb(pdfURL: candidate.pdfURL, pageNumber: candidate.pageNumber) }
                                     .pointingHandCursor()
-                                    Text("\(candidate.sectionFileName) Page \(candidate.pageNumber)")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(NewOCRMainPalette.primaryText)
-                                    Spacer()
-                                    Color.clear.frame(width: 32, height: 20)
+                                    HStack(spacing: 12) {
+                                        Toggle("", isOn: $candidate.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.3)
+                                        Text("Page \(candidate.pageNumber)").font(.system(size: 16, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                                        Spacer()
+                                    }.padding(.top, 8)
                                 }
                                 .padding(12)
                                 .background(NewOCRMainPalette.panelBackground)
@@ -18784,8 +19894,8 @@ struct LayoutAreaEditorWindowView: View {
                                             .padding(.top, 2)
                                             .onChange(of: result.imageSelected) { _, _ in state.autoDetectImageSaved = false }
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text("\(result.sectionFileName) Page \(result.pageNumber)")
-                                                .font(.system(size: 13, weight: .semibold))
+                                            Text("Page \(result.pageNumber)")
+                                                .font(.system(size: 16, weight: .semibold))
                                                 .foregroundStyle(NewOCRMainPalette.primaryText)
                                             Text("Image")
                                                 .font(.system(size: 11))
@@ -19040,49 +20150,38 @@ struct LayoutAreaEditorWindowView: View {
                         ForEach($state.autoDetectFootnotePages) { $page in
                             let thumb = appState.layoutAreaPreviewImage(pdfURL: page.pdfURL, pageNumber: page.pageNumber)
                             ZStack(alignment: .topTrailing) {
-                                HStack(spacing: 12) {
-                                    Toggle("", isOn: $page.isSelected)
-                                        .labelsHidden()
-                                        .toggleStyle(.checkbox)
-                                        .scaleEffect(1.5)
-                                    ScrollView(.vertical, showsIndicators: true) {
-                                        Group {
-                                            if let thumb {
-                                                Image(nsImage: thumb).resizable().scaledToFit()
-                                                    .frame(width: appState.autoDetectThumbWidth)
-                                            } else {
-                                                NewOCRMainPalette.fieldBackground
-                                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
-                                            }
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Group {
+                                        if let thumb {
+                                            Image(nsImage: thumb).resizable().scaledToFit()
+                                        } else {
+                                            NewOCRMainPalette.fieldBackground
                                         }
                                     }
-                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                    .frame(maxWidth: .infinity, maxHeight: 340)
                                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
                                     .onTapGesture { appState.openLayoutAreaThumb(pdfURL: page.pdfURL, pageNumber: page.pageNumber) }
                                     .pointingHandCursor()
-                                    Text("\(page.sectionFileName) Page \(page.pageNumber)")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(NewOCRMainPalette.primaryText)
-                                    Spacer()
-                                    Color.clear.frame(width: 32, height: 20)
+
+                                    HStack(spacing: 12) {
+                                        Toggle("", isOn: $page.isSelected)
+                                            .labelsHidden().toggleStyle(.checkbox).scaleEffect(1.3)
+                                        Text("Page \(page.pageNumber)")
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundStyle(NewOCRMainPalette.primaryText)
+                                        Spacer()
+                                    }
+                                    .padding(.top, 8)
                                 }
                                 .padding(12)
                                 .background(NewOCRMainPalette.panelBackground)
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
 
-                                Button(action: {
-                                    state.autoDetectFootnotePages.removeAll { $0.id == page.id }
-                                }) {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 13, weight: .bold))
-                                        .foregroundStyle(Color.white)
-                                        .frame(width: 28, height: 28)
-                                        .background(Color.red)
-                                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                                }
-                                .padding(8)
+                                Button(action: { state.autoDetectFootnotePages.removeAll { $0.id == page.id } }) {
+                                    Image(systemName: "xmark").font(.system(size: 13, weight: .bold)).foregroundStyle(Color.white)
+                                        .frame(width: 28, height: 28).background(Color.red).clipShape(RoundedRectangle(cornerRadius: 7))
+                                }.padding(8)
                             }
                         }
                     }
@@ -19106,25 +20205,21 @@ struct LayoutAreaEditorWindowView: View {
                                                 .scaleEffect(1.5)
                                                 .padding(.top, 2)
                                                 .onChange(of: result.isSelected) { _, _ in state.autoDetectFootnoteSaved = false }
-                                            Text("\(result.sectionFileName) Page \(result.pageNumber) [\(result.label)]")
-                                                .font(.system(size: 12, weight: .semibold))
+                                            Text("Page \(result.pageNumber) [\(result.label)]")
+                                                .font(.system(size: 16, weight: .semibold))
                                                 .foregroundStyle(NewOCRMainPalette.primaryText)
                                             Spacer()
                                             Color.clear.frame(width: 32, height: 20)
                                         }
                                         let thumb = appState.layoutAreaPreviewImage(pdfURL: result.pdfURL, pageNumber: result.pageNumber)
-                                        ScrollView(.vertical, showsIndicators: true) {
-                                            Group {
-                                                if let thumb {
-                                                    Image(nsImage: thumb).resizable().scaledToFit()
-                                                        .frame(width: appState.autoDetectThumbWidth)
-                                                } else {
-                                                    NewOCRMainPalette.fieldBackground
-                                                        .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
-                                                }
+                                        Group {
+                                            if let thumb {
+                                                Image(nsImage: thumb).resizable().scaledToFit()
+                                            } else {
+                                                NewOCRMainPalette.fieldBackground
                                             }
                                         }
-                                        .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                        .frame(maxWidth: .infinity, maxHeight: 340)
                                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                                         .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
                                         .onTapGesture { appState.openLayoutAreaThumb(pdfURL: result.pdfURL, pageNumber: result.pageNumber) }
@@ -19176,25 +20271,21 @@ struct LayoutAreaEditorWindowView: View {
                                                 .scaleEffect(1.5)
                                                 .padding(.top, 2)
                                                 .onChange(of: result.isSelected) { _, _ in state.autoDetectFootnoteSaved = false }
-                                            Text("\(result.sectionFileName) Page \(result.pageNumber) [\(result.label)]")
-                                                .font(.system(size: 12, weight: .semibold))
+                                            Text("Page \(result.pageNumber) [\(result.label)]")
+                                                .font(.system(size: 16, weight: .semibold))
                                                 .foregroundStyle(NewOCRMainPalette.primaryText)
                                             Spacer()
                                             Color.clear.frame(width: 32, height: 20)
                                         }
                                         let thumb = appState.layoutAreaPreviewImage(pdfURL: result.pdfURL, pageNumber: result.pageNumber)
-                                        ScrollView(.vertical, showsIndicators: true) {
-                                            Group {
-                                                if let thumb {
-                                                    Image(nsImage: thumb).resizable().scaledToFit()
-                                                        .frame(width: appState.autoDetectThumbWidth)
-                                                } else {
-                                                    NewOCRMainPalette.fieldBackground
-                                                        .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
-                                                }
+                                        Group {
+                                            if let thumb {
+                                                Image(nsImage: thumb).resizable().scaledToFit()
+                                            } else {
+                                                NewOCRMainPalette.fieldBackground
                                             }
                                         }
-                                        .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                        .frame(maxWidth: .infinity, maxHeight: 340)
                                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                                         .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
                                         .onTapGesture { appState.openLayoutAreaThumb(pdfURL: result.pdfURL, pageNumber: result.pageNumber) }
@@ -19375,29 +20466,23 @@ struct LayoutAreaEditorWindowView: View {
                         ForEach($state.autoDetectQuotePages) { $page in
                             let thumb = appState.layoutAreaPreviewImage(pdfURL: page.pdfURL, pageNumber: page.pageNumber)
                             ZStack(alignment: .topTrailing) {
-                                HStack(spacing: 12) {
-                                    Toggle("", isOn: $page.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.5)
-                                    ScrollView(.vertical, showsIndicators: true) {
-                                        Group {
-                                            if let thumb {
-                                                Image(nsImage: thumb).resizable().scaledToFit()
-                                                    .frame(width: appState.autoDetectThumbWidth)
-                                            } else {
-                                                NewOCRMainPalette.fieldBackground
-                                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
-                                            }
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Group {
+                                        if let thumb {
+                                            Image(nsImage: thumb).resizable().scaledToFit()
+                                        } else {
+                                            NewOCRMainPalette.fieldBackground
                                         }
                                     }
-                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                    .frame(maxWidth: .infinity, maxHeight: 340)
                                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
                                     .onTapGesture { appState.openLayoutAreaThumb(pdfURL: page.pdfURL, pageNumber: page.pageNumber) }
                                     .pointingHandCursor()
-                                    Text("\(page.sectionFileName) Page \(page.pageNumber)")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(NewOCRMainPalette.primaryText)
-                                    Spacer()
-                                    Color.clear.frame(width: 32, height: 20)
+                                    HStack(spacing: 12) {
+                                        Toggle("", isOn: $page.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.3)
+                                        Text("Page \(page.pageNumber)").font(.system(size: 16, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                                        Spacer()
+                                    }.padding(.top, 8)
                                 }
                                 .padding(12)
                                 .background(NewOCRMainPalette.panelBackground)
@@ -19423,24 +20508,20 @@ struct LayoutAreaEditorWindowView: View {
                                         HStack(spacing: 12) {
                                             Toggle("", isOn: $result.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.5).padding(.top, 2)
                                             .onChange(of: result.isSelected) { _, _ in state.autoDetectQuoteSaved = false }
-                                            Text("\(result.sectionFileName) Page \(result.pageNumber)")
-                                                .font(.system(size: 12, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                                            Text("Page \(result.pageNumber)")
+                                                .font(.system(size: 16, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
                                             Spacer()
                                             Color.clear.frame(width: 32, height: 20)
                                         }
                                         let thumb = appState.layoutAreaPreviewImage(pdfURL: result.pdfURL, pageNumber: result.pageNumber)
-                                        ScrollView(.vertical, showsIndicators: true) {
-                                            Group {
-                                                if let thumb {
-                                                    Image(nsImage: thumb).resizable().scaledToFit()
-                                                        .frame(width: appState.autoDetectThumbWidth)
-                                                } else {
-                                                    NewOCRMainPalette.fieldBackground
-                                                        .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
-                                                }
+                                        Group {
+                                            if let thumb {
+                                                Image(nsImage: thumb).resizable().scaledToFit()
+                                            } else {
+                                                NewOCRMainPalette.fieldBackground
                                             }
                                         }
-                                        .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
+                                        .frame(maxWidth: .infinity, maxHeight: 340)
                                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                                         .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
                                         .onTapGesture { appState.openLayoutAreaThumb(pdfURL: result.pdfURL, pageNumber: result.pageNumber) }
@@ -19578,32 +20659,25 @@ struct LayoutAreaEditorWindowView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach($state.autoDetectHeaderPages) { $page in
+                            let thumb = appState.layoutAreaPreviewImage(pdfURL: page.pdfURL, pageNumber: 1)
                             ZStack(alignment: .topTrailing) {
-                                HStack(spacing: 12) {
-                                    Toggle("", isOn: $page.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.5)
-                                    let thumb = appState.layoutAreaPreviewImage(pdfURL: page.pdfURL, pageNumber: 1)
-                                    ScrollView(.vertical, showsIndicators: true) {
-                                        Group {
-                                            if let thumb {
-                                                Image(nsImage: thumb).resizable().scaledToFit()
-                                                    .frame(width: appState.autoDetectThumbWidth)
-                                            } else {
-                                                NewOCRMainPalette.fieldBackground
-                                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
-                                            }
+                                VStack(alignment: .leading, spacing: 0) {
+                                    Group {
+                                        if let thumb {
+                                            Image(nsImage: thumb).resizable().scaledToFit()
+                                        } else {
+                                            NewOCRMainPalette.fieldBackground
                                         }
                                     }
-                                    .frame(width: appState.autoDetectThumbWidth, height: appState.autoDetectThumbHeight)
-                                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                                    .frame(maxWidth: .infinity, maxHeight: 340)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                                     .onTapGesture { appState.openLayoutAreaThumb(pdfURL: page.pdfURL, pageNumber: 1) }
                                     .pointingHandCursor()
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(page.sectionFileName).font(.system(size: 13, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
-                                        Text("Page 1 (first page only)").font(.system(size: 11)).foregroundStyle(NewOCRMainPalette.secondaryText)
-                                    }
-                                    Spacer()
-                                    Color.clear.frame(width: 32, height: 20)
+                                    HStack(spacing: 12) {
+                                        Toggle("", isOn: $page.isSelected).labelsHidden().toggleStyle(.checkbox).scaleEffect(1.3)
+                                        Text("Page 1 (first page only)").font(.system(size: 16, weight: .semibold)).foregroundStyle(NewOCRMainPalette.primaryText)
+                                        Spacer()
+                                    }.padding(.top, 8)
                                 }
                                 .padding(12)
                                 .background(NewOCRMainPalette.panelBackground)
@@ -19740,156 +20814,9 @@ struct LayoutAreaEditorWindowView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
     }
-
-    private func saveCurrentArea() {
-        guard let url = state.selectedPDFURL else { return }
-        if state.selectedScope == "selected_sections" && state.selectedLayoutSectionItems.isEmpty {
-            state.status = "Choose at least one section."
-            return
-        }
-
-        let normalizedRect = state.normalizedOCRRect
-        let cleanScope = state.selectedScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-
-        var duplicateFound: OCRLayoutAreaRule? = nil
-
-        switch cleanScope {
-        case "all_sections":
-            duplicateFound = appState.findDuplicateRule(
-                type: state.selectedType,
-                scope: "all_sections",
-                section: nil,
-                page: nil,
-                rect: normalizedRect,
-                excludingRule: state.loadedRule
-            )
-        case "selected_sections":
-            for item in state.selectedLayoutSectionItems {
-                if let duplicate = appState.findDuplicateRule(
-                    type: state.selectedType,
-                    scope: nil,
-                    section: item.url.lastPathComponent,
-                    page: nil,
-                    rect: normalizedRect,
-                    excludingRule: state.loadedRule
-                ) {
-                    duplicateFound = duplicate
-                    break
-                }
-            }
-        case "page":
-            duplicateFound = appState.findDuplicateRule(
-                type: state.selectedType,
-                scope: nil,
-                section: url.lastPathComponent,
-                page: state.selectedPage,
-                rect: normalizedRect,
-                excludingRule: state.loadedRule
-            )
-        default:
-            duplicateFound = appState.findDuplicateRule(
-                type: state.selectedType,
-                scope: nil,
-                section: url.lastPathComponent,
-                page: nil,
-                rect: normalizedRect,
-                excludingRule: state.loadedRule
-            )
-        }
-
-        if let duplicate = duplicateFound {
-            pendingDuplicateRule = duplicate
-            return
-        }
-
-        let markersValue = markersApply(to: state.selectedType) ? state.markers : nil
-        let anchorWordValue = state.selectedType == "refmark"
-            ? (state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines))
-            : nil
-        do {
-            let count: Int
-            if let loadedRule = state.loadedRule {
-                count = try appState.updateLayoutAreaRule(
-                    loadedRule,
-                    with: state.selectedType,
-                    newScope: state.selectedScope,
-                    newCurrentSectionURL: url,
-                    newSelectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
-                    newPageNumber: state.selectedPage,
-                    newRect: state.normalizedOCRRect,
-                    newMarkers: markersValue,
-                    newAnchorWord: anchorWordValue
-                )
-                state.loadedRule = nil
-                state.status = "Updated \(displayName(for: state.selectedType)) area."
-            } else {
-                count = try appState.saveLayoutAreaRules(
-                    type: state.selectedType,
-                    scope: state.selectedScope,
-                    currentSectionURL: url,
-                    selectedSectionURLs: state.selectedLayoutSectionItems.map(\.url),
-                    pageNumber: state.selectedPage,
-                    rect: state.normalizedOCRRect,
-                    markers: markersValue,
-                    anchorWord: anchorWordValue
-                )
-                state.status = savedStatusMessage(for: state.selectedType)
-            }
-            state.savedRuleCount = count
-            appState.reloadAllSavedRules(into: state)
-        } catch {
-            state.status = "Could not save: \(error.localizedDescription)"
-        }
-    }
-
-    private func savedStatusMessage(for type: String) -> String {
-        let areaName = displayName(for: type)
-        switch state.selectedScope {
-        case "all_sections":
-            return "Saved \(areaName) area for all sections."
-        case "selected_sections":
-            return "Saved \(areaName) area for \(state.selectedLayoutSectionItems.count) selected section(s)."
-        case "page":
-            return "Saved \(areaName) area for current section page \(state.selectedPage)."
-        default:
-            return "Saved \(areaName) area for current section."
-        }
-    }
-
-    private func clearRules() {
-        let alert = NSAlert()
-        alert.messageText = "Clear Layout Rules?"
-        alert.informativeText = "This removes all saved header, quote, image, image description, footnote, ref mark, and ignore layout areas for the current project."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Clear")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        do {
-            try appState.clearLayoutAreaRules()
-            state.savedRuleCount = 0
-            state.allSavedRules = []
-            state.status = "Cleared layout rules."
-        } catch {
-            state.status = "Could not clear rules: \(error.localizedDescription)"
-        }
-    }
-
-    private func displayName(for type: String) -> String {
-        switch type {
-        case "header":     return "section title"
-        case "h2":         return "H2 heading"
-        case "header3":    return "H3 subheading"
-        case "blockquote": return "quote"
-        case "image":      return "image"
-        case "image_desc": return "image description"
-        case "footnote":   return "footnote"
-        case "refmark":    return "ref mark"
-        case "ignore":     return "ignore"
-        default:           return "layout"
-        }
-    }
 }
+
+
 
 private struct NewOCRPageSlider: View {
     @Binding var page: Int
@@ -19952,6 +20879,51 @@ private struct NewOCRPageSlider: View {
         .opacity(isEnabled ? 1 : 0.55)
         .accessibilityLabel("Page")
         .accessibilityValue("\(page) of \(totalPages)")
+    }
+}
+
+private struct LayoutPageScrollbar: View {
+    @Binding var page: Int
+    let totalPages: Int
+    @State private var isDragging = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let trackH = geo.size.height
+            let thumbH = max(24, trackH / max(1, CGFloat(totalPages)))
+            let travel = max(0, trackH - thumbH)
+            let fraction = totalPages > 1 ? CGFloat(page - 1) / CGFloat(totalPages - 1) : 0
+            let thumbY = fraction * travel
+
+            ZStack(alignment: .top) {
+                // Track
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(NewOCRMainPalette.fieldBackground)
+                    .frame(width: 8)
+                    .frame(maxHeight: .infinity)
+
+                // Thumb
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(isDragging ? Color.white.opacity(0.7) : Color.white.opacity(0.45))
+                    .frame(width: 8, height: thumbH)
+                    .offset(y: thumbY)
+                    .animation(.easeOut(duration: 0.1), value: thumbY)
+            }
+            .frame(width: 14)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        isDragging = true
+                        let f = max(0, min(1, value.location.y / trackH))
+                        let newPage = Int((f * CGFloat(totalPages - 1)).rounded()) + 1
+                        page = max(1, min(totalPages, newPage))
+                    }
+                    .onEnded { _ in isDragging = false }
+            )
+        }
+        .frame(width: 14)
+        .padding(.vertical, 6)
     }
 }
 
@@ -20396,7 +21368,7 @@ private struct LayoutAreaOverlayView: View {
             path.addRect(imageFrame)
             path.addRect(selectionFrame)
         }
-        .fill(Color.black.opacity(0.28), style: FillStyle(eoFill: true))
+        .fill(Color.black.opacity(0.12), style: FillStyle(eoFill: true))
         .allowsHitTesting(false)
     }
 
