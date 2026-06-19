@@ -2430,6 +2430,21 @@ Check:
 - rebuild the EPUB after cover normalization changes, because an already-created
   `.epub` will still contain the old packaged image
 
+## Define Layout PDF Preview
+
+The PDF preview in the Define Layout window (`LayoutAreaEditorWindowView.preview`) renders the
+current PDF page as an `NSImage` (via `loadPreviewImageAsync`) and displays it inside a
+`ScrollView(.vertical)`:
+
+- The image is scaled to fill the full **width** of the preview panel. Height follows the page
+  aspect ratio, so the full page height extends below the visible area when the window is short.
+- Scroll down within the panel to see the bottom of the page.
+- The `LayoutAreaOverlayView` (selection rectangle and drag handles) is positioned over the image
+  using `imageFrame = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)`, which maps
+  normalised coordinates directly to screen coordinates without any centering offset.
+- The previous `NSEvent` scroll-wheel monitor that hijacked scroll events for page navigation has
+  been removed; use the page navigation buttons (← →) instead.
+
 ## OCR Editor PDF Preview
 
 The PDF preview panel in the OCR editor uses `PDFView` via `OCRPDFPreviewView`.

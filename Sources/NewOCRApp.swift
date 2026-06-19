@@ -18533,8 +18533,6 @@ struct LayoutAreaEditorWindowView: View {
     @State private var isPreviewLoading: Bool = false
     @State private var previewImageKey: String = ""
     @State private var displayedImageKey: String = ""
-    @State private var previewHovered: Bool = false
-    @State private var previewScrollMonitor: Any? = nil
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
         ("header", "Section Title", "book.closed"),
@@ -19204,24 +19202,28 @@ struct LayoutAreaEditorWindowView: View {
         Group {
             if let image = previewImage {
                 GeometryReader { proxy in
-                    let imageFrame = layoutAreaAspectFitRect(imageSize: image.size, containerSize: proxy.size)
-                    ZStack(alignment: .topLeading) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .interpolation(.high)
-                            .frame(width: imageFrame.width, height: imageFrame.height)
-                            .position(x: imageFrame.midX, y: imageFrame.midY)
-                            .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: 1)
-                            .id(displayedImageKey)
-                            .transition(.opacity)
-                        LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
-                    }
-                    .overlay(alignment: .topTrailing) {
-                        if isPreviewLoading {
-                            ProgressView().controlSize(.small).padding(8)
-                                .background(NewOCRMainPalette.panelBackground.opacity(0.85))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .padding(8)
+                    let scaledWidth = proxy.size.width
+                    let scaledHeight = scaledWidth * (image.size.height / max(image.size.width, 1))
+                    let imageFrame = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)
+                    ScrollView(.vertical, showsIndicators: true) {
+                        ZStack(alignment: .topLeading) {
+                            Image(nsImage: image)
+                                .resizable()
+                                .interpolation(.high)
+                                .frame(width: scaledWidth, height: scaledHeight)
+                                .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: 1)
+                                .id(displayedImageKey)
+                                .transition(.opacity)
+                            LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
+                        }
+                        .frame(width: scaledWidth, height: scaledHeight)
+                        .overlay(alignment: .topTrailing) {
+                            if isPreviewLoading {
+                                ProgressView().controlSize(.small).padding(8)
+                                    .background(NewOCRMainPalette.panelBackground.opacity(0.85))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .padding(8)
+                            }
                         }
                     }
                 }
@@ -19235,29 +19237,6 @@ struct LayoutAreaEditorWindowView: View {
         .background(NewOCRMainPalette.fieldBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
-        .onHover { previewHovered = $0 }
-        .onAppear {
-            previewScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-                guard self.previewHovered else { return event }
-                let delta = event.scrollingDeltaY
-                DispatchQueue.main.async {
-                    if delta < -8 {
-                        let next = min(self.state.selectedPage + 1, self.state.pageCount)
-                        if next != self.state.selectedPage { self.state.selectedPage = next }
-                    } else if delta > 8 {
-                        let prev = max(self.state.selectedPage - 1, 1)
-                        if prev != self.state.selectedPage { self.state.selectedPage = prev }
-                    }
-                }
-                return event
-            }
-        }
-        .onDisappear {
-            if let monitor = previewScrollMonitor {
-                NSEvent.removeMonitor(monitor)
-                previewScrollMonitor = nil
-            }
-        }
     }
 
 
