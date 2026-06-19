@@ -75,6 +75,8 @@ config.txt
 
 Runtime configuration defaults. The app reads this file as-is and does not
 recreate it or append missing keys automatically.
+Set `TYPHOON_OCR_API_KEY` here if you want Auto Detect Quote / Footnote to use
+Typhoon OCR first.
 
 ## App Purpose
 
@@ -700,8 +702,8 @@ used in future features to distinguish auto-generated rules from user-drawn rule
 **Edit PDF > Define Layout** opens a project-wide visual editor. Choose a
 sample section/page, select **Section Title**, **Quote**, **Image**,
 **Image Description**, **Footnote**, or **Ignore**, drag the rectangle over
-the page area, choose whether it applies to **All Sections** or only
-**This Section**, then click **Save Area**.
+the page area, then click **Save Area**. Define Layout saves rules as
+page-scoped entries for the currently selected section/page.
 
 The editor writes the project layout rules automatically to:
 
@@ -1088,18 +1090,12 @@ UI notes:
   saved internally as rule type `header` for compatibility with existing
   `layout-areas.json` files.
 - Page navigation in Define Layout uses **⬆ / ⬇ chevron buttons** with a `Page n / total` readout. When the section has multiple pages, a slim vertical scrollbar on the right edge of the preview also allows dragging to any page. Action status text appears in the top header, not in this row.
-- Define Layout scope options are **Selected**, **Section**, and **Page** (shown
-  as tabs on the right). The **All Sections** scope is set by checking the
-  "All Sections" row at the top of the left section list — this means the rule
-  applies to every section (including future ones). Each row in the left panel
-  has a checkbox. Checking multiple individual sections auto-sets scope to
-  **Selected**; checking one section auto-sets to **Section**. **Page** can be
-  chosen manually when at least one section is checked. When "All Sections" is
-  checked, the Selected/Section/Page tabs are disabled and no individual section
-  row shows as highlighted. Clicking "All Sections" always unchecks all
-  individual section rows (by clearing `selectedLayoutSectionPaths`). This
-  is correctly restored on re-open: when the saved scope is "all_sections" the
-  restored paths are set to empty even if the saved path list was empty
+- Define Layout does not show scope tabs. The `Select All | Unselect All`
+  strip above the left section list only controls the section list selection.
+  Define Layout saves the rule as `scope: page` for the current section/page.
+  Clicking **Unselect All** clears `selectedLayoutSectionPaths`. This is
+  correctly restored on re-open: the section selection paths are set to empty
+  even if the saved path list was empty
   (previously the `!restored.isEmpty` guard prevented this, leaving the initial
   PDF path checked alongside "All Sections"). Clicking **Selected**, **Section**,
   or **Page** tabs while "All Sections" is checked transitions out of
@@ -1622,18 +1618,21 @@ Click the **Auto Footnote** button in the Define Layout header to activate footn
 detection. The scope (All/Selected/Section/Page) controls which sections/pages
 are available for selection. Pages are enumerated directly from the PDF so Auto
 Footnote works before OCR has been run — no existing Markdown files are required.
+Only pages that cross the detection threshold are shown in the candidate list.
+If `TYPHOON_OCR_API_KEY` is set in `config.txt`, Typhoon OCR is used first to
+produce the markdown that feeds the candidate scorer.
 
 ### Workflow
 
 1. Open **Define Layout** and set your scope (All Sections, Selected Sections,
    This Section, or This Page).
 2. Click the **Auto Footnote** button in the header.
-3. A list of all available pages appears (no local scanning needed).
-   - Each page shows a full-width thumbnail (scaled to fit, max height 340 pt) with a checkbox and "Page N" label below
+3. A scored list of footnote candidates appears (no local scanning needed).
+   - Each page shows a full-width thumbnail (scaled to fit, max height 340 pt) with a checkbox, "Page N" label, confidence score, and short detection note
    - Click a thumbnail to open a popup window showing the full PDF page scaled to fit the screen
    - Click the red **×** button to remove a page entirely from the list
 4. **Select pages**: A sub-menu bar above the list shows **"X of Y selected"** count,
-   **Select All**, and **Unselect All** buttons. All pages are checked by default.
+   **Select All**, and **Unselect All** buttons. Pages that pass the threshold are checked by default.
 5. Press **Process Codex** (enabled only when ≥ 1 page is checked).
    - Before sending to Codex, the app checks whether any selected **section+page** already
      has a saved `footnote` or `refmark` rule in `layout-areas.json`. Conflict detection is
@@ -1706,16 +1705,19 @@ Future OCR runs will use these rules to format footnotes and ref marks automatic
 Auto-detect quote is integrated into **Define Layout** to identify blockquote regions before OCR.
 
 Click the **Auto Quote** button (purple, quote bubble icon) in the Define Layout header to activate quote detection. The scope (All/Selected/Section/Page) controls which sections/pages appear in the candidate list. Pages are enumerated directly from the PDF so Auto Quote works before OCR has been run — no existing Markdown files are required.
+Only pages that cross the detection threshold are shown in the candidate list.
+If `TYPHOON_OCR_API_KEY` is set in `config.txt`, Typhoon OCR is used first to
+produce the markdown that feeds the candidate scorer.
 
 ### Workflow
 
 1. Open **Define Layout** and set your scope.
 2. Click the **Auto Quote** button in the header (also sets the type selector to "blockquote").
-3. A list of all available pages appears based on scope.
-   - Each row shows a full-width thumbnail (scaled to fit, max height 340 pt) with a checkbox and "Page N" label below
+3. A scored list of quote candidates appears based on scope.
+   - Each row shows a full-width thumbnail (scaled to fit, max height 340 pt) with a checkbox, "Page N" label, confidence score, and short detection note
    - Click a thumbnail to open a popup window showing the full PDF page scaled to fit the screen
    - Click the red **×** button to remove a page from the list
-4. **Select pages**: A sub-menu bar above the list shows **"X of Y selected"** count, **Select All**, and **Unselect All** buttons. All pages are checked by default.
+4. **Select pages**: A sub-menu bar above the list shows **"X of Y selected"** count, **Select All**, and **Unselect All** buttons. Pages that pass the threshold are checked by default.
 5. Press **Process Codex** (enabled only when ≥ 1 page is checked).
    - Before sending to Codex, checks whether any selected page's section already has a saved `blockquote` rule in `layout-areas.json`. If conflicts exist, an alert blocks the scan — remove those rules first from **View Rules**.
    - Renders selected pages to PNG and sends a batch request to Codex
