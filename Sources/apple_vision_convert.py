@@ -145,6 +145,15 @@ def footnote_fragment_id(label, fallback):
     return slugify_epub_id(label, fallback)
 
 
+def ol_start_attr(first_label):
+    """Return ' start="N"' when first_label is an integer > 1, else ''."""
+    try:
+        n = int(first_label.strip())
+        return f' start="{n}"' if n > 1 else ""
+    except (ValueError, AttributeError):
+        return ""
+
+
 def extract_markdown_footnotes(text):
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     content_lines = []
@@ -220,7 +229,8 @@ def footnotes_to_html(footnote_state):
     if not items:
         return ""
 
-    return '<section class="footnotes">\n<ol>\n' + "\n".join(items) + "\n</ol>\n</section>"
+    start = ol_start_attr(footnote_state["used"][0] if footnote_state["used"] else "")
+    return f'<section class="footnotes">\n<ol{start}>\n' + "\n".join(items) + "\n</ol>\n</section>"
 
 
 def markdown_image_to_html(stripped, source_path=None, image_map=None, image_prefix="", caption=""):
@@ -437,7 +447,8 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
                 else:
                     break
             if items:
-                body_parts.append('<section class="footnotes">\n<ol>\n' + "\n".join(items) + "\n</ol>\n</section>")
+                start = ol_start_attr(def_match.group(1))
+                body_parts.append(f'<section class="footnotes">\n<ol{start}>\n' + "\n".join(items) + "\n</ol>\n</section>")
             continue
 
         paragraph_lines.append(stripped)

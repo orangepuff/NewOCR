@@ -279,6 +279,7 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var selectedScope: String = "page"
     @Published var selectedLayoutSectionPaths: Set<String> = []
     @Published var sectionSelectionMode: String = "single"
+    @Published var previewZoom: CGFloat = 0.75
     @Published var selectionRect: CGRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
     @Published var status: String = ""
     @Published var savedRuleCount: Int = 0
@@ -378,21 +379,14 @@ final class LayoutAreaEditorState: ObservableObject {
             return rules
         case "selected_sections":
             let selectedNames = Set(selectedLayoutSectionNames)
-            guard !selectedNames.isEmpty else {
-                let fallbackSection = primarySelectedLayoutSectionName ?? selectedPDFName
-                return rules.filter { rule in
-                    rule.scope == "all_sections" || rule.section == fallbackSection
-                }
-            }
+            guard !selectedNames.isEmpty else { return [] }
             return rules.filter { rule in
-                if rule.scope == "all_sections" {
-                    return true
-                }
+                if rule.scope == "all_sections" { return true }
                 guard let section = rule.section else { return false }
                 return selectedNames.contains(section)
             }
         default:
-            let sectionName = primarySelectedLayoutSectionName ?? selectedPDFName
+            guard let sectionName = primarySelectedLayoutSectionName else { return [] }
             return rules.filter { rule in
                 rule.scope == "all_sections" || rule.section == sectionName
             }
@@ -427,11 +421,11 @@ final class LayoutAreaEditorState: ObservableObject {
 
         if let scope = rule.scope {
             self.selectedScope = scope
-            self.selectedLayoutSectionPaths = []
+            // all_sections rules don't need a specific section checked
         } else if let section = rule.section {
             self.selectedScope = rule.page != nil ? "page" : "section"
-            self.selectedLayoutSectionPaths = []
             if let pdfItem = pdfItems.first(where: { $0.url.lastPathComponent == section }) {
+                self.selectedLayoutSectionPaths = [pdfItem.url.path]
                 self.selectPDFPath(pdfItem.url.path)
             }
         }
@@ -715,6 +709,7 @@ final class AppState: ObservableObject {
 
     @Published var ocrRenderScale: CGFloat = 4.0
     @Published var pdfListMinHeight: CGFloat = 420
+    var layoutPreviewZoomDefault: CGFloat = 0.75
     @Published var mainWindowWidth: CGFloat = 780
     @Published var mainWindowHeight: CGFloat = 520
     @Published var shouldOpenMainWindowFullScreen: Bool = false
@@ -2998,7 +2993,8 @@ final class AppState: ObservableObject {
         return urls.contains { sectionPDFIndex($0) != nil }
     }
 
-    var layoutAreaPreviewCache: [String: NSImage] = [:]
+    private var layoutAreaPreviewCache: [String: NSImage] = [:]
+    private let layoutAreaPreviewCacheLock = NSLock()
 
     private func layoutThumbCacheDir() -> URL? {
         guard !selectedFolderPath.isEmpty else { return nil }
@@ -3024,13 +3020,20 @@ final class AppState: ObservableObject {
 
     func layoutAreaPreviewImage(pdfURL: URL, pageNumber: Int) -> NSImage? {
         let key = "\(pdfURL.path):\(pageNumber)"
-        if let cached = layoutAreaPreviewCache[key] { return cached }
+        layoutAreaPreviewCacheLock.lock()
+        if let cached = layoutAreaPreviewCache[key] {
+            layoutAreaPreviewCacheLock.unlock()
+            return cached
+        }
+        layoutAreaPreviewCacheLock.unlock()
         // Check disk cache
         if let diskURL = layoutThumbFileURL(pdfURL: pdfURL, pageNumber: pageNumber),
            FileManager.default.fileExists(atPath: diskURL.path),
            let data = try? Data(contentsOf: diskURL),
            let image = NSImage(data: data) {
+            layoutAreaPreviewCacheLock.lock()
             layoutAreaPreviewCache[key] = image
+            layoutAreaPreviewCacheLock.unlock()
             return image
         }
         // Render and cache
@@ -3038,7 +3041,9 @@ final class AppState: ObservableObject {
               let page = document.page(at: max(pageNumber - 1, 0)),
               let cgImage = try? renderPDFPageToCGImage(page, scale: 2.0) else { return nil }
         let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        layoutAreaPreviewCacheLock.lock()
         layoutAreaPreviewCache[key] = nsImage
+        layoutAreaPreviewCacheLock.unlock()
         saveLayoutThumbToDisk(nsImage, pdfURL: pdfURL, pageNumber: pageNumber)
         return nsImage
     }
@@ -3225,6 +3230,7 @@ final class AppState: ObservableObject {
         d.set(state.selectedType, forKey: layoutEditorDefaultsKey("selectedType"))
         d.set(Array(state.selectedLayoutSectionPaths), forKey: layoutEditorDefaultsKey("selectedLayoutSectionPaths"))
         d.set(state.sectionSelectionMode, forKey: layoutEditorDefaultsKey("sectionSelectionMode"))
+        d.set(Double(state.previewZoom), forKey: layoutEditorDefaultsKey("previewZoom"))
     }
 
     func restoreLayoutEditorState(into state: LayoutAreaEditorState) {
@@ -3254,10 +3260,16 @@ final class AppState: ObservableObject {
         }
 
         // Restore checked section paths (only those still valid).
-        // Always apply even when restored is empty so that "all_sections" scope
-        // correctly shows no individual section as checked.
         if let paths = d.stringArray(forKey: layoutEditorDefaultsKey("selectedLayoutSectionPaths")) {
-            state.selectedLayoutSectionPaths = Set(paths).intersection(validPaths)
+            let restored = Set(paths).intersection(validPaths)
+            // If all saved paths are now invalid (e.g. files renamed), fall back to the
+            // current preview section so "X of Y selected" and the rule count stay in sync.
+            if restored.isEmpty && state.selectedScope != "all_sections" {
+                state.selectedLayoutSectionPaths = validPaths.contains(state.selectedPDFPath)
+                    ? [state.selectedPDFPath] : []
+            } else {
+                state.selectedLayoutSectionPaths = restored
+            }
         } else if state.selectedScope == "all_sections" {
             state.selectedLayoutSectionPaths = []
         }
@@ -3267,6 +3279,10 @@ final class AppState: ObservableObject {
            mode == "single" || mode == "multiple" {
             state.sectionSelectionMode = mode
         }
+
+        // Restore zoom (falls back to config default if never saved)
+        let savedZoom = d.double(forKey: layoutEditorDefaultsKey("previewZoom"))
+        state.previewZoom = savedZoom > 0 ? CGFloat(savedZoom) : layoutPreviewZoomDefault
     }
 
     func reloadAllSavedRules(into state: LayoutAreaEditorState) {
@@ -4233,6 +4249,7 @@ final class AppState: ObservableObject {
 
         let defRegex = try? NSRegularExpression(pattern: #"^\[\^([^\]]+)\]:\s*(.*)"#)
         var items: [String] = []
+        var firstLabel: String? = nil
         for line in lines {
             let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
             guard let match = defRegex?.firstMatch(in: line, range: nsRange),
@@ -4241,6 +4258,7 @@ final class AppState: ObservableObject {
                 return nil  // non-definition line in this paragraph — don't handle it here
             }
             let label = String(line[labelRange])
+            if firstLabel == nil { firstLabel = label }
             let noteText = definitions[label] ?? {
                 if let bodyRange = Range(match.range(at: 2), in: line) { return String(line[bodyRange]) }
                 return ""
@@ -4250,7 +4268,8 @@ final class AppState: ObservableObject {
             renderedLabels.insert(label)
         }
         guard !items.isEmpty else { return nil }
-        return "<section class=\"footnotes\">\n<ol>\n\(items.joined(separator: "\n"))\n</ol>\n</section>"
+        let startAttr = olStartAttribute(for: firstLabel)
+        return "<section class=\"footnotes\">\n<ol\(startAttr)>\n\(items.joined(separator: "\n"))\n</ol>\n</section>"
     }
 
     private func markdownHeadingHTML(from text: String, usedFootnotes: inout [String]) -> String? {
@@ -4421,6 +4440,14 @@ final class AppState: ObservableObject {
         return slug.isEmpty ? fallback : slug
     }
 
+    // Returns " start=\"N\"" when the label is a positive integer > 1, otherwise "".
+    private func olStartAttribute(for firstLabel: String?) -> String {
+        guard let label = firstLabel,
+              let n = Int(label.trimmingCharacters(in: .whitespacesAndNewlines)),
+              n > 1 else { return "" }
+        return " start=\"\(n)\""
+    }
+
     private func footnotesPreviewHTML(definitions: [String: String], usedLabels: [String]) -> String? {
         var items: [String] = []
         for (index, label) in usedLabels.enumerated() {
@@ -4429,7 +4456,8 @@ final class AppState: ObservableObject {
             items.append("<li id=\"fn-\(htmlEscaped(fragment))\">\(markdownInlinePreviewHTML(noteText)) <a href=\"#fnref-\(htmlEscaped(fragment))\" class=\"footnote-back\">&#8617;</a></li>")
         }
         guard !items.isEmpty else { return nil }
-        return "<section class=\"footnotes\">\n<ol>\n\(items.joined(separator: "\n"))\n</ol>\n</section>"
+        let startAttr = olStartAttribute(for: usedLabels.first)
+        return "<section class=\"footnotes\">\n<ol\(startAttr)>\n\(items.joined(separator: "\n"))\n</ol>\n</section>"
     }
 
     private func markdownInlinePreviewHTML(_ text: String) -> String {
@@ -8516,6 +8544,7 @@ final class AppState: ObservableObject {
         let values = readKeyValueConfig(from: configFileURL)
         newProjectsFolderPath = expandedPath(values["NEW_PROJECTS_FOLDER"] ?? "~/Downloads")
         pdfListMinHeight = CGFloat(parseDouble(values["PDF_LIST_MIN_HEIGHT"], defaultValue: 420, minimum: 200))
+        layoutPreviewZoomDefault = CGFloat(parseDouble(values["LAYOUT_PREVIEW_ZOOM"], defaultValue: 75, minimum: 25)) / 100.0
         shouldOpenMainWindowFullScreen = (values["MAIN_WINDOW_WIDTH"] ?? "FULL").trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
         if !shouldOpenMainWindowFullScreen {
             mainWindowWidth = CGFloat(parseDouble(values["MAIN_WINDOW_WIDTH"], defaultValue: 780, minimum: 640))
@@ -15261,6 +15290,8 @@ struct LayoutAreaEditorWindowView: View {
     @State private var isPreviewLoading: Bool = false
     @State private var previewImageKey: String = ""
     @State private var displayedImageKey: String = ""
+    @State private var isProgrammaticScroll = false
+    @State private var isUserScrollDriven = false
 
     private let areaTypes: [(id: String, label: String, icon: String)] = [
         ("header", "Section Title", "book.closed"),
@@ -15415,6 +15446,7 @@ struct LayoutAreaEditorWindowView: View {
     private func toggleSectionCheck(_ item: PDFFileItem) {
         let path = item.url.path
         state.selectPDFPath(path)
+        state.selectedPage = 1  // always start from page 1 on a manual section switch
 
         if state.sectionSelectionMode == "single" {
             // Single mode: always select exactly the tapped section.
@@ -15507,6 +15539,20 @@ struct LayoutAreaEditorWindowView: View {
                 clearRules()
             }
             .disabled(state.loadedRule != nil)
+
+            if state.loadedRule != nil {
+                OCRIconButton(
+                    title: "Cancel",
+                    systemImage: "arrow.uturn.left",
+                    backgroundColor: Color(red: 100/255, green: 110/255, blue: 130/255),
+                    foregroundColor: .white,
+                    size: 44
+                ) {
+                    state.clearLoadedRule()
+                    isLayoutAreasReportPresented = true
+                }
+                .help("Cancel editing and return to View Rules")
+            }
 
             OCRIconButton(
                 title: state.loadedRule != nil ? "Update Rule" : "Save Area",
@@ -15623,7 +15669,7 @@ struct LayoutAreaEditorWindowView: View {
                         LayoutAreaSectionRow(
                             item: item,
                             isChecked: state.selectedLayoutSectionPaths.contains(item.url.path),
-                            isCurrentPreview: item.url.path == state.selectedPDFPath && state.selectedScope != "all_sections",
+                            isCurrentPreview: state.selectedLayoutSectionPaths.contains(item.url.path) && item.url.path == state.selectedPDFPath && state.selectedScope != "all_sections",
                             pageCount: state.pageCount(for: item)
                         ) {
                             toggleSectionCheck(item)
@@ -15651,50 +15697,61 @@ struct LayoutAreaEditorWindowView: View {
         )
     }
 
+    @ViewBuilder
     private var statusBar: some View {
-        let totalPages = max(state.pageCount, 1)
-        guard let pdfURL = state.selectedPDFURL else {
-            return AnyView(EmptyView())
-        }
-
-        return AnyView(
-            ScrollView(.vertical, showsIndicators: true) {
-                LazyVStack(spacing: 10) {
-                    ForEach(1...totalPages, id: \.self) { page in
-                        let isSelected = state.selectedPage == page
-                        let thumb = appState.layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: page)
-                        VStack(spacing: 6) {
-                            Group {
-                                if let thumb {
-                                    Image(nsImage: thumb)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(maxWidth: .infinity)
-                                } else {
-                                    NewOCRMainPalette.fieldBackground
-                                        .frame(maxWidth: .infinity, minHeight: 100)
+        if let pdfURL = state.selectedPDFURL {
+            let totalPages = max(state.pageCount, 1)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(spacing: 10) {
+                        ForEach(1...totalPages, id: \.self) { page in
+                            let isSelected = state.selectedPage == page
+                            let thumb = appState.layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: page)
+                            VStack(spacing: 6) {
+                                Group {
+                                    if let thumb {
+                                        Image(nsImage: thumb)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(maxWidth: .infinity)
+                                    } else {
+                                        NewOCRMainPalette.fieldBackground
+                                            .frame(maxWidth: .infinity, minHeight: 100)
+                                    }
                                 }
-                            }
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(isSelected ? Color.accentColor : NewOCRMainPalette.stroke,
-                                            lineWidth: isSelected ? 2.5 : 1)
-                            )
-                            .shadow(color: Color.black.opacity(isSelected ? 0.25 : 0.08), radius: isSelected ? 6 : 2)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(isSelected ? Color.accentColor : NewOCRMainPalette.stroke,
+                                                lineWidth: isSelected ? 2.5 : 1)
+                                )
+                                .shadow(color: Color.black.opacity(isSelected ? 0.25 : 0.08), radius: isSelected ? 6 : 2)
 
-                            Text("Page \(page)")
-                                .font(.system(size: 11, weight: isSelected ? .bold : .regular).monospacedDigit())
-                                .foregroundStyle(isSelected ? Color.accentColor : NewOCRMainPalette.secondaryText)
+                                Text("Page \(page)")
+                                    .font(.system(size: 11, weight: isSelected ? .bold : .regular).monospacedDigit())
+                                    .foregroundStyle(isSelected ? Color.accentColor : NewOCRMainPalette.secondaryText)
+                            }
+                            .padding(8)
+                            .background(isSelected ? Color.accentColor.opacity(0.08) : NewOCRMainPalette.panelBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .id(page)
+                            .onTapGesture { state.selectedPage = page }
+                            .pointingHandCursor()
                         }
-                        .padding(8)
-                        .background(isSelected ? Color.accentColor.opacity(0.08) : NewOCRMainPalette.panelBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .onTapGesture { state.selectedPage = page }
-                        .pointingHandCursor()
+                    }
+                    .padding(8)
+                }
+                .onChange(of: state.selectedPage) { _, page in
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(page, anchor: .center)
                     }
                 }
-                .padding(8)
+                .onChange(of: state.selectedPDFPath) { _, _ in
+                    proxy.scrollTo(state.selectedPage, anchor: .center)
+                }
+                .onAppear {
+                    proxy.scrollTo(state.selectedPage, anchor: .center)
+                }
             }
             .frame(width: 140)
             .frame(maxHeight: .infinity)
@@ -15704,7 +15761,7 @@ struct LayoutAreaEditorWindowView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
             )
-        )
+        }
     }
 
     private var controls: some View {
@@ -15986,50 +16043,144 @@ struct LayoutAreaEditorWindowView: View {
         )
     }
 
+    @ViewBuilder
     private var preview: some View {
-        Group {
-            if let image = previewImage {
-                GeometryReader { proxy in
-                    let scaledWidth = max(proxy.size.width - 6, 1)
-                    let scaledHeight = scaledWidth * (image.size.height / max(image.size.width, 1))
-                    let imageFrame = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)
-                    ScrollView(.vertical, showsIndicators: true) {
-                        ZStack(alignment: .topLeading) {
-                            Image(nsImage: image)
-                                .resizable()
-                                .interpolation(.high)
-                                .scaledToFit()
-                                .frame(width: scaledWidth, height: scaledHeight, alignment: .topLeading)
-                                .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: 1)
-                                .id(displayedImageKey)
-                                .transition(.opacity)
-                            LayoutAreaOverlayView(selectionRect: $state.selectionRect, imageFrame: imageFrame)
-                        }
-                        .frame(width: scaledWidth, height: scaledHeight, alignment: .topLeading)
-                        .padding(.bottom, 18)
-                        .overlay(alignment: .topTrailing) {
-                            if isPreviewLoading {
-                                ProgressView().controlSize(.small).padding(8)
-                                    .background(NewOCRMainPalette.panelBackground.opacity(0.85))
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                    .padding(8)
+        if let pdfURL = state.selectedPDFURL {
+            let totalPages = max(state.pageCount, 1)
+            GeometryReader { container in
+                let pageWidth = max(container.size.width - 48, 100) * state.previewZoom
+                ScrollViewReader { scrollProxy in
+                    ScrollView([.vertical, .horizontal], showsIndicators: true) {
+                        LazyVStack(spacing: 20) {
+                            ForEach(1...totalPages, id: \.self) { page in
+                                LayoutAreaPageCard(
+                                    page: page,
+                                    pdfURL: pdfURL,
+                                    pageWidth: pageWidth,
+                                    isActive: state.loadedRule != nil
+                                        ? page == (state.loadedRule?.page ?? 1)
+                                        : state.selectedPage == page,
+                                    isLoading: state.selectedPage == page && isPreviewLoading,
+                                    selectionRect: $state.selectionRect,
+                                    appState: appState
+                                ) {
+                                    if state.selectedPage != page { state.selectedPage = page }
+                                }
+                                .id(page)
+                                .background(
+                                    GeometryReader { geo in
+                                        let minY = geo.frame(in: .named("mainScroll")).minY
+                                        // Page whose top edge is nearest the visible top wins
+                                        let isAtTop = minY > -60 && minY < 160
+                                        Color.clear.preference(
+                                            key: LayoutScrollPageKey.self,
+                                            value: isAtTop ? page : nil
+                                        )
+                                    }
+                                )
                             }
                         }
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 16)
                     }
-                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                    .coordinateSpace(name: "mainScroll")
+                    .onPreferenceChange(LayoutScrollPageKey.self) { page in
+                        guard let page, !isProgrammaticScroll, page != state.selectedPage else { return }
+                        isUserScrollDriven = true
+                        state.selectedPage = page
+                        DispatchQueue.main.async { isUserScrollDriven = false }
+                    }
+                    .onChange(of: state.selectedPage) { _, newPage in
+                        guard !isUserScrollDriven else { return }
+                        isProgrammaticScroll = true
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            scrollProxy.scrollTo(newPage, anchor: .top)
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            isProgrammaticScroll = false
+                        }
+                    }
+                    .onChange(of: state.selectedPDFPath) { _, _ in
+                        isProgrammaticScroll = true
+                        DispatchQueue.main.async {
+                            scrollProxy.scrollTo(state.selectedPage, anchor: .top)
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            isProgrammaticScroll = false
+                        }
+                    }
+                    .onAppear {
+                        isProgrammaticScroll = true
+                        DispatchQueue.main.async {
+                            scrollProxy.scrollTo(state.selectedPage, anchor: .top)
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            isProgrammaticScroll = false
+                        }
+                    }
                 }
-            } else {
-                ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
             }
+            .frame(minWidth: 0, minHeight: 460)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+            .overlay(alignment: .bottom) { previewZoomBar }
+        } else {
+            ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(NewOCRMainPalette.fieldBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .frame(minWidth: 0, minHeight: 460)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(NewOCRMainPalette.fieldBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
     }
 
+    private var previewZoomBar: some View {
+        HStack(spacing: 4) {
+            Button {
+                state.previewZoom = max(0.25, state.previewZoom - 0.25)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(state.previewZoom <= 0.25)
+            .opacity(state.previewZoom <= 0.25 ? 0.4 : 1)
+
+            Button {
+                state.previewZoom = 1.0
+            } label: {
+                Text("\(Int((state.previewZoom * 100).rounded()))%")
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .frame(minWidth: 42)
+            }
+            .buttonStyle(.plain)
+            .help("Click to reset to 100%")
+
+            Button {
+                state.previewZoom = min(4.0, state.previewZoom + 0.25)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(state.previewZoom >= 4.0)
+            .opacity(state.previewZoom >= 4.0 ? 0.4 : 1)
+        }
+        .foregroundStyle(NewOCRMainPalette.primaryText)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(NewOCRMainPalette.panelBackground.opacity(0.94))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.14), radius: 4, x: 0, y: 2)
+        .padding(.bottom, 10)
+        .pointingHandCursor()
+    }
 
     private func saveCurrentArea() {
         guard let url = state.selectedPDFURL else { return }
@@ -16172,6 +16323,81 @@ struct LayoutAreaEditorWindowView: View {
     }
 }
 
+private struct LayoutScrollPageKey: PreferenceKey {
+    static let defaultValue: Int? = nil
+    static func reduce(value: inout Int?, nextValue: () -> Int?) {
+        if value == nil { value = nextValue() }
+    }
+}
+
+private struct LayoutAreaPageCard: View {
+    let page: Int
+    let pdfURL: URL
+    let pageWidth: CGFloat
+    let isActive: Bool
+    let isLoading: Bool
+    @Binding var selectionRect: CGRect
+    let appState: AppState
+    let onActivate: () -> Void
+
+    var body: some View {
+        let thumb = appState.layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: page)
+        let aspectRatio = thumb.map { $0.size.height / max($0.size.width, 1) } ?? 1.41
+        let pageHeight = pageWidth * aspectRatio
+        let imageFrame = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+
+        ZStack(alignment: .topLeading) {
+            if let img = thumb {
+                Image(nsImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: pageWidth, height: pageHeight)
+            } else {
+                NewOCRMainPalette.panelBackground
+                    .frame(width: pageWidth, height: pageHeight)
+            }
+
+            if isActive {
+                LayoutAreaOverlayView(selectionRect: $selectionRect, imageFrame: imageFrame)
+            }
+
+            Text("p\(page)")
+                .font(.system(size: 11, weight: .bold).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(isActive ? Color.accentColor : Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(8)
+
+            if isLoading {
+                ProgressView().controlSize(.small)
+                    .padding(8)
+                    .background(NewOCRMainPalette.panelBackground.opacity(0.85))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .allowsHitTesting(false)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(8)
+            }
+        }
+        .frame(width: pageWidth, height: pageHeight)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(isActive ? Color.accentColor : NewOCRMainPalette.stroke.opacity(0.5),
+                        lineWidth: isActive ? 2.5 : 1)
+        )
+        .shadow(
+            color: Color.black.opacity(isActive ? 0.22 : 0.10),
+            radius: isActive ? 8 : 3, x: 0, y: 2
+        )
+        .onTapGesture(perform: onActivate)
+        .pointingHandCursor()
+    }
+}
 
 private struct NewOCRPageSlider: View {
     @Binding var page: Int

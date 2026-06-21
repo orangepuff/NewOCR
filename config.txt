@@ -1,4 +1,6 @@
 PDF_LIST_MIN_HEIGHT=420
+# Default zoom level (%) for the Define Layout PDF preview. Remembered per project after first open. Range: 25–400. Default: 50
+LAYOUT_PREVIEW_ZOOM=75
 # Set MAIN_WINDOW_WIDTH=FULL to open the main window at full screen size.
 MAIN_WINDOW_WIDTH=FULL
 MAIN_WINDOW_HEIGHT=FULL

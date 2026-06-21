@@ -683,8 +683,10 @@ with other NewOCR confirmations, and displays each rule with:
 
 - **Type icon and label** (Section Title, Quote, Image, Image Description, Footnote, Ignore)
 - **Scope information** (All Sections, specific section, or page number)
-- **Load button** (blue pencil icon) to load the rule's settings for editing
+- **Load button** (blue pencil icon) to load the rule's settings for editing — closes View Rules and populates the editor controls with that rule's values; the header button changes to **Update Rule**
 - **Delete button** (trash icon) to remove individual rules
+
+**Cancel edit flow**: while a rule is loaded for editing (`state.loadedRule != nil`) a **Cancel** button (grey, `arrow.uturn.left`) appears in the Define Layout header to the left of **Update Rule**. Clicking it clears the loaded rule and re-opens the View Rules sheet so the user can pick a different rule without closing and re-opening the panel manually.
 
 **Row Styling**: Each rule row features:
 - **Alternating dark/light backgrounds** for visual rhythm and scannability
@@ -695,11 +697,15 @@ with other NewOCR confirmations, and displays each rule with:
 **Loading Rules for Editing**: Clicking the blue pencil icon loads that rule's settings into the editor:
 - The rule type, scope, and rectangular selection are populated in the editor
 - The correct scope button (All/Selected/Section/Page) is highlighted based on the rule's scope
-- If the rule targets a specific section, that section is selected in the section list
+- If the rule targets a specific section, `selectedLayoutSectionPaths` is set to `[pdfItem.url.path]` so that section stays checked and highlighted (no longer clears the selection)
+- The PDF preview scrolls to the rule's page and shows the saved region rectangle
+- While editing, the region rectangle is pinned to the rule's original page: `isActive` is `page == (loadedRule.page ?? 1)` instead of `page == selectedPage`, so scrolling through other pages does not move or hide the region — it stays until the user explicitly moves or redraws it
+- Both `preview` and `statusBar` vars are `@ViewBuilder` (not `AnyView`) so SwiftUI preserves the `ScrollViewReader`/`ScrollView` structural identity across re-renders; previously, `AnyView` caused the scroll view to be recreated on every state change (sheet dismiss, etc.), resetting to page 1
+- `onChange(of: state.selectedPDFPath)` scrolls to `state.selectedPage` (already set to `rule.page` synchronously by `loadRule`) rather than hardcoded 1
+- Manual section clicks in `toggleSectionCheck` explicitly set `selectedPage = 1` so normal section switches still start at page 1
 - The **View Rules** button becomes disabled (grayed out) to prevent opening another rule set while editing
 - The **Save Area** button changes to **Update Rule** with an orange pencil icon
-- After editing, click **Update Rule** to save changes or **Close** to discard
-- Once saved or discarded, the **View Rules** button becomes enabled again
+- After editing, click **Update Rule** to save changes or **Cancel** to return to View Rules
 
 **Auto-load on page/section navigation**: When the user slides to a different page or switches
 section, the editor automatically looks up any saved rule matching the current type + scope +
@@ -729,18 +735,29 @@ when attempting to delete a rule.
 
 ### Define Layout PDF Preview
 
-The PDF preview in Define Layout shows one page at a time, fitted to the available area. There is no zoom — the page always fills the preview container.
+The PDF preview in Define Layout shows **all pages stacked vertically** in a continuous-scroll view — like a real PDF viewer. Each page fills the available width; scrolling down reveals subsequent pages.
 
-**Page navigation:**
-- The status bar shows **⬆ Page X / Y ⬇** — chevron buttons step one page at a time
-- If the section has more than one page, a slim vertical **page scrollbar** appears on the right edge of the preview; drag or click it to jump to any page
-- Drawing the selection rectangle and moving/resizing handles work normally at the fit-to-area scale
+**Page navigation (two-way sync):**
+- Scroll down/up through the main preview area — the thumbnail strip glides in sync, always keeping the current page centred
+- Click any page card in the main view to activate it (blue border + rectangle editor appear)
+- The **thumbnail strip** also lists all pages; clicking one scrolls the main view to that page
+- The page slider in the controls row jumps directly to any page and the main view scrolls to it
+- Programmatic scrolls (thumbnail click, slider, section change) set `isProgrammaticScroll` for 0.4 s to prevent write-back loops; user-initiated scroll sets `isUserScrollDriven` for one tick to suppress the reverse `scrollProxy.scrollTo` call
 
-The Define Layout PDF preview crossfades smoothly when switching between sections.
-The previous section's page stays visible while the new page loads in the background;
-once ready, the image transitions with a short `.easeInOut` opacity fade (0.18 s) and any
-layout shift from differing page dimensions is also animated. A small loading spinner appears
-in the top-right corner of the preview while loading is in progress.
+**Zoom:**
+- A floating `− 75% +` pill is overlaid at the bottom-centre of the preview area (`previewZoomBar`)
+- Steps are 25%; range is 25 %–400 %. Clicking the percentage label resets to 100%
+- At > 100% pages exceed the container width and horizontal scrolling is enabled (`ScrollView([.vertical, .horizontal])`)
+- Zoom is stored in `LayoutAreaEditorState.previewZoom` (`@Published`), saved to UserDefaults via `layoutEditorDefaultsKey("previewZoom")` when the window closes, and restored on next open — so each project remembers its own zoom level
+- **Default zoom** comes from `config.txt` key `LAYOUT_PREVIEW_ZOOM` (integer percent, default 75, minimum 25). On first open of a project the config value is used; after that the saved UserDefaults value takes over
+- The `pageWidth` inside `GeometryReader` is `max(container.size.width - 48, 100) * state.previewZoom`
+
+**Rectangle editing:**
+- The selection rectangle and resize handles are only active on the currently selected page
+- Clicking a non-active page activates it; the editor then appears on that page
+- Drawing the selection rectangle and moving/resizing handles work correctly at any zoom level (normalised 0–1 coordinates scale with `pageWidth`)
+
+A small loading spinner appears in the top-right corner of the active page card while the cached thumbnail is being read.
 
 When **Define Layout** is opened, NewOCR checks whether page thumbnails have been
 cached for all section pages. If any are missing, a modal progress panel appears
@@ -755,6 +772,22 @@ On subsequent opens the thumbnails are loaded from disk instantly (in-memory
 cache is also populated so the same session never re-reads disk). The cache is
 used by the Define Layout preview. Delete the `LayoutThumbs/` folder to force a
 full regeneration.
+
+**Thread safety:** `layoutAreaPreviewCache` is accessed from both the main thread
+(via `LayoutAreaPageCard.body` and the thumbnail strip) and background threads
+(via `loadPreviewImageAsync`). Access is serialised with `layoutAreaPreviewCacheLock`
+(`NSLock`) inside `layoutAreaPreviewImage` to prevent data-race crashes.
+
+**Section selection / rule count consistency:** The "X saved" header count and
+`filteredSavedRulesForSelectedScope` both return **0** when no sections are checked
+(`selectedLayoutSectionPaths` is empty and scope is not `all_sections`). The old
+`?? selectedPDFName` fallback that caused a non-zero count with nothing checked has
+been removed. The blue "current preview" highlight on a section row is also cleared
+when that section is not in `selectedLayoutSectionPaths` (e.g. after Unselect All).
+
+`restoreLayoutEditorState` also ensures that if all previously saved section paths
+are now invalid (files renamed/moved), it falls back to `[selectedPDFPath]` so the
+state remains consistent after reopening.
 
 Define Layout remembers the last-used selection state per project. When closed and
 reopened, it restores: the previewed section, scope (All/Selected/Section/Page),
@@ -1048,7 +1081,7 @@ UI notes:
   tooltips on hover, matching the other NewOCR icon controls. Section Title is
   saved internally as rule type `header` for compatibility with existing
   layout-areas JSON files.
-- Page navigation in Define Layout uses **⬆ / ⬇ chevron buttons** with a `Page n / total` readout. When the section has multiple pages, a slim vertical scrollbar on the right edge of the preview also allows dragging to any page. Action status text appears in the top header, not in this row.
+- Page navigation in Define Layout: the main preview shows all pages stacked and scrollable. The page slider and thumbnail strip both jump-and-scroll to any page. Action status text appears in the top header.
 - Define Layout does not show scope tabs. The `Select All | Unselect All`
   strip above the left section list only controls the section list selection.
   Define Layout saves the rule as `scope: page` for the current section/page.
@@ -1074,7 +1107,7 @@ UI notes:
   and the default scope is **Page** (since Quote is a page-only type). Page-only
   types (Quote, Image, Image Description, Footnote, Ref Mark) always start with
   scope set to Page.
-- The Define Layout PDF preview always fits the current page to the available area (no zoom). One page is shown at a time. Navigate between pages with the ⬆/⬇ buttons, the thumbnail side scrollbar, or by scrolling the mouse wheel / two-finger swiping on the trackpad while the cursor is over the preview panel (scroll down = next page, scroll up = previous page).
+- The Define Layout PDF preview shows all pages stacked vertically (continuous scroll). Each page is fitted to the available width. Click any page to activate its rectangle editor. The thumbnail strip on the left auto-scrolls to track the active page. The page slider and thumbnail clicks both scroll the main view to the target page.
 
 ### User-Added Images
 
@@ -1939,6 +1972,18 @@ These are intentional and should not be changed casually:
   footnotes not already rendered inline fall back to the end-of-document
   `<section class="footnotes">` block. This allows the EPUB to reflect the
   original book's per-page footnote layout.
+- **Footnote `<ol>` start value**: each `<section class="footnotes"><ol>` now
+  carries a `start="N"` attribute when the first footnote label is a number
+  greater than 1. This ensures footnotes 7, 8, 9 on page 2 display as `7.`,
+  `8.`, `9.` rather than resetting to `1.`, `2.`, `3.` for every new page group.
+  Fixed in four places:
+  - Swift `markdownInlineFootnoteDefinitionsHTML` (inline per-page blocks in preview)
+  - Swift `footnotesPreviewHTML` (end-of-document remainder in preview)
+  - Python `apple_vision_convert.py` inline block (EPUB per-page footnote sections)
+  - Python `apple_vision_convert.py` `footnotes_to_html` (EPUB end-of-document remainder)
+  The preview HTML is regenerated each time the preview window is opened, so
+  re-running OCR is not required — just reopen the preview. EPUB output requires
+  re-building the EPUB to pick up the fix.
 - **Rules can store `codexText`.** When a rule with a non-empty `codexText` override
   is saved, that text is stored in the `codexText` field of the rule in its
   layout-areas JSON file. During OCR, if `codexText` is present the Vision-recognized
@@ -2137,18 +2182,20 @@ Check:
 
 ## Define Layout PDF Preview
 
-The PDF preview in the Define Layout window (`LayoutAreaEditorWindowView.preview`) renders the
-current PDF page as an `NSImage` (via `loadPreviewImageAsync`) and displays it inside a
-`ScrollView(.vertical)`:
+The PDF preview in `LayoutAreaEditorWindowView.preview` is a **continuous multi-page scroll view**.
+All pages for the selected section are stacked vertically inside a `GeometryReader` →
+`ScrollViewReader` → `ScrollView` → `LazyVStack`. Each page is rendered by `LayoutAreaPageCard`.
 
-- The image is scaled to fill the full **width** of the preview panel. Height follows the page
-  aspect ratio, so the full page height extends below the visible area when the window is short.
-- Scroll down within the panel to see the bottom of the page.
-- The `LayoutAreaOverlayView` (selection rectangle and drag handles) is positioned over the image
-  using `imageFrame = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)`, which maps
-  normalised coordinates directly to screen coordinates without any centering offset.
-- The previous `NSEvent` scroll-wheel monitor that hijacked scroll events for page navigation has
-  been removed; use the page navigation buttons (← →) instead.
+- Each `LayoutAreaPageCard` calls `appState.layoutAreaPreviewImage(pdfURL:pageNumber:)` to get the
+  cached thumbnail and computes `pageHeight = pageWidth * (thumb.height / thumb.width)`.
+- `LayoutAreaOverlayView` (selection rectangle + drag handles) appears **only on the active page**
+  (`state.selectedPage`). Clicking a non-active page card updates `state.selectedPage`.
+- `imageFrame = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)` maps normalised
+  coordinates directly to screen coordinates without any centering offset.
+- When `state.selectedPage` changes (slider, thumbnail click, or card tap), the scroll view
+  calls `scrollProxy.scrollTo(page, anchor: .top)` with a 0.25 s ease animation.
+- The thumbnail strip (`statusBar`, 140 px wide) wraps its `ScrollView` in a `ScrollViewReader`
+  and auto-scrolls (`.center` anchor) to keep the active thumbnail visible.
 
 ## OCR Editor PDF Preview
 
