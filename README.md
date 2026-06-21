@@ -1040,6 +1040,9 @@ UI notes:
     View Rules shows the same filtered list.
   This keeps the header count and View Rules popup always consistent with
   what the user has selected on the left.
+  When the View Rules panel is dismissed (after any deletions), the header
+  count is refreshed immediately via `reloadAllSavedRules` so the badge
+  always reflects the current on-disk state.
 - The layout-type commands, Section Title, Quote, Image, Footnote, and Ignore,
   are icon-only buttons. Show their text labels in floating `NSPopover`
   tooltips on hover, matching the other NewOCR icon controls. Section Title is
@@ -2000,6 +2003,17 @@ on the current selection mode and scope:
   unchecked section adds it to the set. Unchecking is blocked on the last remaining
   checked section. When the set drops to one section, scope automatically reverts
   to **Section**.
+
+**Save Area scope in Multiple mode**:
+- When 2+ sections are checked (scope = **Selected**), pressing **Save Area** writes one
+  rule per selected section to each section's own `layout-areas-{stem}.json` file.
+  The saved rule has `scope: nil` and `page: nil`, so it matches every page of each
+  target section during OCR.
+- Page-only rule types (Quote, Image, Image Description, Footnote, Ref Mark) always force
+  scope to **Page** when selected via the type buttons, so they are always saved to the
+  current section/page regardless of how many sections are checked.
+- Duplicate detection in **Selected** mode checks every selected section for an overlapping
+  rule; if any section already has a duplicate it raises the warning before saving.
 - When a rule is loaded for editing, the **View Rules** and **Clear Rules** buttons
   become disabled (grayed out) to prevent conflicting actions mid-edit. The user must
   save the current rule changes (**Update Rule**) or discard them (**Close**) before

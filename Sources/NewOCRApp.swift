@@ -15314,6 +15314,9 @@ struct LayoutAreaEditorWindowView: View {
         .sheet(isPresented: $isLayoutAreasReportPresented) {
             LayoutAreasReportView(isPresented: $isLayoutAreasReportPresented, state: state, sectionFileName: state.selectedScope == "all_sections" ? nil : state.primarySelectedLayoutSectionName)
                 .environmentObject(appState)
+                .onDisappear {
+                    appState.reloadAllSavedRules(into: state)
+                }
         }
         .sheet(item: $pendingDuplicateRule) { duplicate in
             DuplicateRuleWarningView(
@@ -16031,8 +16034,7 @@ struct LayoutAreaEditorWindowView: View {
     private func saveCurrentArea() {
         guard let url = state.selectedPDFURL else { return }
         let normalizedRect = state.normalizedOCRRect
-        state.selectedScope = "page"
-        let cleanScope = "page"
+        let cleanScope = state.selectedScope
 
         var duplicateFound: OCRLayoutAreaRule? = nil
 
@@ -16046,6 +16048,20 @@ struct LayoutAreaEditorWindowView: View {
                 rect: normalizedRect,
                 excludingRule: state.loadedRule
             )
+        case "selected_sections":
+            for sectionURL in state.selectedLayoutSectionItems.map(\.url) {
+                if let dup = appState.findDuplicateRule(
+                    type: state.selectedType,
+                    scope: nil,
+                    section: sectionURL.lastPathComponent,
+                    page: nil,
+                    rect: normalizedRect,
+                    excludingRule: state.loadedRule
+                ) {
+                    duplicateFound = dup
+                    break
+                }
+            }
         case "page":
             duplicateFound = appState.findDuplicateRule(
                 type: state.selectedType,
@@ -16055,7 +16071,7 @@ struct LayoutAreaEditorWindowView: View {
                 rect: normalizedRect,
                 excludingRule: state.loadedRule
             )
-        default:
+        default: // "section"
             duplicateFound = appState.findDuplicateRule(
                 type: state.selectedType,
                 scope: nil,
