@@ -33,25 +33,5 @@ CODEX_FINALIZE_MAX_SECTIONS=5
 # Set a different value only if your account and provider support it.
 CODEX_FINALIZE_MODEL=gpt-5.4-mini
 
-# Typhoon OCR API key used by Auto Detect Quote / Footnote when available.
-# Leave blank to keep using local heuristics and Apple Vision OCR fallbacks.
-TYPHOON_OCR_API_KEY=sk-Aj56dxfXFB2Sd2qSt6bW1stDriqtgLpub4PTGKPF44CP5a53
-# Optional Typhoon OCR base URL.
-TYPHOON_OCR_BASE_URL=https://api.opentyphoon.ai/v1
-# Optional Typhoon OCR model id.
-TYPHOON_OCR_MODEL=typhoon-ocr
-
 # New projects made from the New button are created here.
 NEW_PROJECTS_FOLDER=~/Downloads
-
-# Render scale used when rasterising PDF pages for Auto Detect Codex scans
-# (Header, Quote, Footnote, Image). Codex only needs to see layout regions so a
-# lower scale renders and uploads much faster than OCR_RENDER_SCALE.
-# Range: 1.0–8.0. Default: 2.0 (≈ 144 DPI — fast and sufficient for layout detection).
-AUTO_DETECT_RENDER_SCALE=2.0
-
-# Thumbnail size (points) shown in Auto Detect candidate lists (Header, Quote, etc.).
-# Width and height are applied to all auto-detect panels so thumbnails are consistent.
-# Minimum: width 40, height 52. Default: 80 x 104.
-AUTO_DETECT_THUMB_WIDTH=350
-AUTO_DETECT_THUMB_HEIGHT=350
