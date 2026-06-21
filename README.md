@@ -1059,6 +1059,14 @@ UI notes:
   "Section"/"Page" checks only the current preview section. Clicking a section
   row always updates the PDF preview to that section, in addition to toggling its
   checkbox. The last remaining checked section cannot be unchecked.
+- Above the section list a **Single / Multiple** segmented control (default: Single)
+  determines how many sections can be checked at once.
+  - **Single**: clicking any row checks only that row and unchecks all others.
+    **Select All** is disabled. The mode is saved per project and restored when
+    Define Layout is reopened.
+  - **Multiple**: original toggle behaviour — clicking a row adds or removes it
+    from the checked set; **Select All** is enabled. Switching from Multiple back
+    to Single trims the selection to the currently previewed section.
 - When Define Layout opens fresh (no rule loaded), the default type is **Quote**
   and the default scope is **Page** (since Quote is a page-only type). Page-only
   types (Quote, Image, Image Description, Footnote, Ref Mark) always start with
@@ -1977,8 +1985,13 @@ These are intentional and should not be changed casually:
 ### Define Layout Section List — Click Behavior by Scope
 
 Clicking a section row in the Define Layout section list behaves differently depending
-on the current scope:
+on the current selection mode and scope:
 
+**Single mode** (default):
+- Clicking any row selects only that row and deselects all others. Scope stays at
+  **Section** or **Page** (never **Selected**).
+
+**Multiple mode**:
 - **All Sections** checked: clicking a row transitions out of all-sections scope,
   sets the clicked section as the only checked item, and switches scope to **Section**.
 - **Section** or **Page** scope: clicking a row switches the preview to that section

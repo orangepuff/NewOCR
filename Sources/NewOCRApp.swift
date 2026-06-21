@@ -278,6 +278,7 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var selectedType: String = "blockquote"
     @Published var selectedScope: String = "page"
     @Published var selectedLayoutSectionPaths: Set<String> = []
+    @Published var sectionSelectionMode: String = "single"
     @Published var selectionRect: CGRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
     @Published var status: String = ""
     @Published var savedRuleCount: Int = 0
@@ -3223,6 +3224,7 @@ final class AppState: ObservableObject {
         d.set(state.selectedPage, forKey: layoutEditorDefaultsKey("selectedPage"))
         d.set(state.selectedType, forKey: layoutEditorDefaultsKey("selectedType"))
         d.set(Array(state.selectedLayoutSectionPaths), forKey: layoutEditorDefaultsKey("selectedLayoutSectionPaths"))
+        d.set(state.sectionSelectionMode, forKey: layoutEditorDefaultsKey("sectionSelectionMode"))
     }
 
     func restoreLayoutEditorState(into state: LayoutAreaEditorState) {
@@ -3258,6 +3260,12 @@ final class AppState: ObservableObject {
             state.selectedLayoutSectionPaths = Set(paths).intersection(validPaths)
         } else if state.selectedScope == "all_sections" {
             state.selectedLayoutSectionPaths = []
+        }
+
+        // Restore section selection mode (single/multiple).
+        if let mode = d.string(forKey: layoutEditorDefaultsKey("sectionSelectionMode")),
+           mode == "single" || mode == "multiple" {
+            state.sectionSelectionMode = mode
         }
     }
 
@@ -15405,6 +15413,16 @@ struct LayoutAreaEditorWindowView: View {
         let path = item.url.path
         state.selectPDFPath(path)
 
+        if state.sectionSelectionMode == "single" {
+            // Single mode: always select exactly the tapped section.
+            state.selectedLayoutSectionPaths = [path]
+            if state.selectedScope == "selected_sections" || state.selectedScope == "all_sections" {
+                state.selectedScope = "section"
+            }
+            return
+        }
+
+        // Multiple mode: original toggle behaviour.
         if state.selectedScope == "all_sections" {
             state.selectedLayoutSectionPaths = [path]
             state.selectedScope = "section"
@@ -15524,6 +15542,39 @@ struct LayoutAreaEditorWindowView: View {
                     .foregroundStyle(NewOCRMainPalette.secondaryText)
             }
 
+            // Single / Multiple selection mode picker
+            HStack(spacing: 0) {
+                ForEach(["Single", "Multiple"], id: \.self) { mode in
+                    let isActive = state.sectionSelectionMode == mode.lowercased()
+                    Button(mode) {
+                        guard state.sectionSelectionMode != mode.lowercased() else { return }
+                        state.sectionSelectionMode = mode.lowercased()
+                        if mode.lowercased() == "single", state.selectedLayoutSectionPaths.count > 1 {
+                            state.selectedLayoutSectionPaths = [state.selectedPDFPath]
+                            if state.selectedScope == "selected_sections" {
+                                state.selectedScope = "section"
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isActive ? Color.black : NewOCRMainPalette.secondaryText)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(isActive ? Color.white.opacity(0.88) : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .animation(.easeInOut(duration: 0.12), value: isActive)
+                }
+            }
+            .padding(2)
+            .frame(maxWidth: .infinity)
+            .background(NewOCRMainPalette.fieldBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 10) {
@@ -15533,13 +15584,16 @@ struct LayoutAreaEditorWindowView: View {
 
                         Spacer()
 
+                        let isSelectAllDisabled = state.sectionSelectionMode == "single"
+                            || state.pdfItems.isEmpty
+                            || state.selectedLayoutSectionPaths.count == state.pdfItems.count
                         Button("Select All") {
                             state.setAllLayoutSectionsSelected(true)
                         }
                         .buttonStyle(.plain)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(state.selectedLayoutSectionPaths.count == state.pdfItems.count ? NewOCRMainPalette.tertiaryText : Color.white)
-                        .disabled(state.pdfItems.isEmpty || state.selectedLayoutSectionPaths.count == state.pdfItems.count)
+                        .foregroundStyle(isSelectAllDisabled ? NewOCRMainPalette.tertiaryText : Color.white)
+                        .disabled(isSelectAllDisabled)
 
                         Rectangle()
                             .fill(NewOCRMainPalette.stroke)
