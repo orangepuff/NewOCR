@@ -25,6 +25,9 @@ OCR_RENDER_SCALE=8.0
 OCR_TITLE_MATCH_TOP_LINES=3
 # Preview-only text scale percent. This does not affect EPUB output.
 PREVIEW_TEXT_SCALE_PERCENT=170
+# Font size (%) of the footnote popup shown in Preview when clicking a reference mark.
+# Default: 120. Range: 60–300. Does not affect EPUB output.
+FOOTNOTE_POPUP_FONT_PERCENT=120
 # Codex executable used by Edit PDF > Finalize with Codex.
 CODEX_EXECUTABLE_PATH=/Applications/Codex.app/Contents/Resources/codex
 # Prompt file used by Edit PDF > Finalize with Codex.

@@ -1547,7 +1547,8 @@ Styles/stylesheet.css
 It upserts NewOCR-managed CSS blocks for:
 
 - image pages
-- footnotes
+- footnotes (`a.fn-noteref` for reference marks, `aside.fn-aside` for popup
+  definitions hidden from the main flow)
 - blockquotes
 - alignment classes
 - page-break helpers
@@ -1649,6 +1650,7 @@ OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
 OCR_TITLE_MATCH_TOP_LINES=3
 OCR_RENDER_SCALE=4.0
 PREVIEW_TEXT_SCALE_PERCENT=170
+FOOTNOTE_POPUP_FONT_PERCENT=120
 CODEX_EXECUTABLE_PATH=/Applications/Codex.app/Contents/Resources/codex
 CODEX_FINALIZE_PROMPT_FILE=codex-finalize-prompt.txt
 CODEX_FINALIZE_MAX_SECTIONS=5
@@ -1675,6 +1677,9 @@ Key notes:
   run log.
 - `CODEX_FINALIZE_PROMPT_FILE` — legacy key, no longer used by the current
   Codex OCR feature. Kept for compatibility; may be removed in a future version.
+- `FOOTNOTE_POPUP_FONT_PERCENT` — font size percentage for the footnote popup
+  shown in Preview when clicking a reference mark. Default `120`. Range: 60–300.
+  The value is read each time Preview opens. Does not affect EPUB output.
 
 ## Current UI Principles
 
@@ -1965,25 +1970,39 @@ These are intentional and should not be changed casually:
   footnotes together with the body text that references them, instead of
   floating all definitions to the end of the chapter.
 - Both the Preview renderer (Swift) and the EPUB builder (Python) render
-  `[^N]:` definition lines at their literal position in the Markdown rather
-  than collecting them at the end of the document. When a footnote definition
-  paragraph appears before a `<!-- page-break-after -->` marker, the
-  definitions are rendered inline immediately above the page break, and only
-  footnotes not already rendered inline fall back to the end-of-document
-  `<section class="footnotes">` block. This allows the EPUB to reflect the
-  original book's per-page footnote layout.
-- **Footnote `<ol>` start value**: each `<section class="footnotes"><ol>` now
-  carries a `start="N"` attribute when the first footnote label is a number
-  greater than 1. This ensures footnotes 7, 8, 9 on page 2 display as `7.`,
-  `8.`, `9.` rather than resetting to `1.`, `2.`, `3.` for every new page group.
-  Fixed in four places:
-  - Swift `markdownInlineFootnoteDefinitionsHTML` (inline per-page blocks in preview)
-  - Swift `footnotesPreviewHTML` (end-of-document remainder in preview)
-  - Python `apple_vision_convert.py` inline block (EPUB per-page footnote sections)
-  - Python `apple_vision_convert.py` `footnotes_to_html` (EPUB end-of-document remainder)
-  The preview HTML is regenerated each time the preview window is opened, so
-  re-running OCR is not required — just reopen the preview. EPUB output requires
-  re-building the EPUB to pick up the fix.
+  `[^N]:` definition lines at their literal position in the Markdown as popup
+  footnotes rather than as inline blocks after the paragraph. Footnote
+  definitions (`[^N]: text`) are rendered as hidden `<aside>` elements at
+  their position in the markdown flow. Footnotes not rendered inline (whose
+  definition paragraph did not appear before a `<!-- page-break-after -->`)
+  are rendered as hidden asides at the end of the document. No footnote
+  content is ever displayed as an inline `<section class="footnotes">` list.
+- **Preview popup footnotes**: clicking a footnote reference mark (`[^N]` in
+  body text, rendered as `<sup class="fn-ref" data-fn="fn-N">`) shows a
+  floating popup centered on screen with the footnote text. The popup is
+  created by JavaScript injected into `preview.html`. Clicking the same ref
+  again, or anywhere outside the popup, closes it. The hidden
+  `<aside id="fn-N" class="fn-aside">` elements provide the text to the popup
+  via `getElementById`. The popup font size is controlled by
+  `FOOTNOTE_POPUP_FONT_PERCENT` in `config.txt` (default 120, range 60–300).
+  The config value is read when Preview opens, so changes take effect without
+  rebuilding the app. The popup font size does not affect EPUB output.
+- **EPUB popup footnotes**: the EPUB builder uses EPUB 3 popup footnote
+  semantics. Reference marks are rendered as
+  `<a epub:type="noteref" class="fn-noteref" href="#fn-N"><sup>N</sup></a>`
+  and definitions as `<aside epub:type="footnote" class="fn-aside" id="fn-N">`.
+  Apple Books reads `epub:type="noteref"` on a tap and shows the matching
+  `epub:type="footnote"` aside as a native popup card. The EPUB chapter XHTML
+  files include `xmlns:epub="http://www.idpf.org/2007/ops"` so the
+  `epub:type` attributes are valid. The project stylesheet (via **Apply CSS**)
+  sets `aside.fn-aside { display: none }` so the aside does not appear inline
+  in readers that do not support EPUB 3 popup footnotes, and styles
+  `a.fn-noteref` as a superscript reference mark.
+- The `<!-- page-break-after -->` marker that follows footnote definition
+  paragraphs in OCR output continues to be written by OCR and rendered in
+  both Preview and EPUB unchanged. In the EPUB the aside preceding the page
+  break is hidden by the reader, so the page break still fires cleanly at the
+  end of each PDF page's content.
 - **Rules can store `codexText`.** When a rule with a non-empty `codexText` override
   is saved, that text is stored in the `codexText` field of the rule in its
   layout-areas JSON file. During OCR, if `codexText` is present the Vision-recognized

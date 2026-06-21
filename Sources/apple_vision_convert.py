@@ -196,9 +196,9 @@ def markdown_inline_to_html(text, footnote_state=None):
             if label not in footnote_state["used"]:
                 footnote_state["used"].append(label)
             return (
-                f'<sup id="fnref-{html.escape(fragment)}" class="footnote-ref">'
-                f'<a href="#fn-{html.escape(fragment)}">{html.escape(label)}</a>'
-                f'</sup>'
+                f'<a epub:type="noteref" class="fn-noteref" id="fnref-{html.escape(fragment)}" href="#fn-{html.escape(fragment)}">'
+                f'<sup>{html.escape(label)}</sup>'
+                f'</a>'
             )
 
         escaped = FOOTNOTE_REF_RE.sub(replace_footnote, escaped)
@@ -220,17 +220,12 @@ def footnotes_to_html(footnote_state):
             continue
         fragment = footnote_fragment_id(label, f"note-{index}")
         items.append(
-            f'<li id="fn-{html.escape(fragment)}">'
-            f'{markdown_inline_to_html(note_text)} '
-            f'<a href="#fnref-{html.escape(fragment)}" class="footnote-back">&#8617;</a>'
-            f'</li>'
+            f'<aside id="fn-{html.escape(fragment)}" epub:type="footnote" class="fn-aside">'
+            f'<p>{markdown_inline_to_html(note_text)}</p>'
+            f'</aside>'
         )
 
-    if not items:
-        return ""
-
-    start = ol_start_attr(footnote_state["used"][0] if footnote_state["used"] else "")
-    return f'<section class="footnotes">\n<ol{start}>\n' + "\n".join(items) + "\n</ol>\n</section>"
+    return "\n".join(items)
 
 
 def markdown_image_to_html(stripped, source_path=None, image_map=None, image_prefix="", caption=""):
@@ -435,10 +430,9 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
                     note_text = footnote_definitions.get(label) or m.group(2).strip()
                     fragment = footnote_fragment_id(label, f"fn-{label}")
                     items.append(
-                        f'<li id="fn-{html.escape(fragment)}">'
-                        f'{markdown_inline_to_html(note_text, footnote_state)} '
-                        f'<a href="#fnref-{html.escape(fragment)}" class="footnote-back">&#8617;</a>'
-                        f'</li>'
+                        f'<aside id="fn-{html.escape(fragment)}" epub:type="footnote" class="fn-aside">'
+                        f'<p>{markdown_inline_to_html(note_text, footnote_state)}</p>'
+                        f'</aside>'
                     )
                     inline_rendered.add(label)
                     index += 1
@@ -447,8 +441,7 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
                 else:
                     break
             if items:
-                start = ol_start_attr(def_match.group(1))
-                body_parts.append(f'<section class="footnotes">\n<ol{start}>\n' + "\n".join(items) + "\n</ol>\n</section>")
+                body_parts.extend(items)
             continue
 
         paragraph_lines.append(stripped)
@@ -576,7 +569,7 @@ p { margin: 0 0 1em 0; }
 </style>"""
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="th" xml:lang="th">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="th" xml:lang="th">
 <head>
 <title>{html.escape(book_title)}</title>
 {styles}

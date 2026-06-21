@@ -719,6 +719,7 @@ final class AppState: ObservableObject {
     @Published var ocrWindowHeight: CGFloat = 620
     @Published var shouldOpenOCRWindowFullScreen: Bool = false
     @Published var previewTextScalePercent: Double = 130
+    @Published var footnotePopupFontPercent: Double = 120
     @Published var cropPDFWindowWidth: CGFloat = 920
     @Published var cropPDFWindowHeight: CGFloat = 720
     @Published var shouldOpenCropPDFWindowFullScreen: Bool = true
@@ -3799,37 +3800,26 @@ final class AppState: ObservableObject {
     private var footnoteStylesheetBlock: String {
         """
         /* NewOCR footnote stylesheet: begin */
-        .footnote-ref {
+        a.fn-noteref {
           font-size: 0.75em;
           line-height: 0;
           vertical-align: super;
-        }
-
-        .footnote-ref a {
-          color: inherit;
           text-decoration: none;
+          color: inherit;
         }
 
-        .footnotes {
-          margin-top: 2rem;
-          padding-top: 1rem;
-          border-top: 1px solid #d0d0d0;
+        a.fn-noteref sup {
+          font-size: 1em;
+        }
+
+        aside.fn-aside {
+          display: none;
+        }
+
+        aside.fn-aside p {
+          margin: 0;
           font-size: 0.9em;
           line-height: 1.5;
-        }
-
-        .footnotes ol {
-          margin: 0;
-          padding-left: 1.5rem;
-        }
-
-        .footnotes li {
-          margin-bottom: 0.5rem;
-        }
-
-        .footnote-back {
-          margin-left: 0.25rem;
-          text-decoration: none;
         }
         /* NewOCR footnote stylesheet: end */
         """
@@ -4102,6 +4092,29 @@ final class AppState: ObservableObject {
         <main class="newocr-preview-content">
         \(markdownToPreviewHTML(markdown))
         </main>
+        <script>
+        (function() {
+          var pop = null;
+          document.addEventListener('click', function(e) {
+            var ref = e.target.closest ? e.target.closest('.fn-ref') : null;
+            if (ref) {
+              e.stopPropagation();
+              var id = ref.getAttribute('data-fn');
+              var aside = document.getElementById(id);
+              if (!aside) return;
+              if (pop && pop.getAttribute('data-fn-id') === id) { pop.remove(); pop = null; return; }
+              if (pop) { pop.remove(); pop = null; }
+              pop = document.createElement('div');
+              pop.className = 'fn-popup';
+              pop.setAttribute('data-fn-id', id);
+              pop.innerHTML = aside.innerHTML;
+              document.body.appendChild(pop);
+              return;
+            }
+            if (pop && !pop.contains(e.target)) { pop.remove(); pop = null; }
+          });
+        })();
+        </script>
         </body>
         </html>
         """
@@ -4109,6 +4122,7 @@ final class AppState: ObservableObject {
 
     private func previewStylesHTML() -> String {
         let scalePercent = Int(previewTextScalePercent.rounded())
+        let popupFontPercent = Int(footnotePopupFontPercent.rounded())
         guard !selectedPDFPath.isEmpty else {
             return fallbackPreviewStyleHTML()
         }
@@ -4135,6 +4149,8 @@ final class AppState: ObservableObject {
         .page-break-before::after { content: "Page break before"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
         .page-break-after::after { content: "Page break after"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
         .empty-paragraph { min-height: 1.65em; text-indent: 0; }
+        .fn-ref { cursor: pointer; font-size: 0.75em; line-height: 0; vertical-align: super; }
+        .fn-popup { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #fff; border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,0.22); padding: 14px 18px; max-width: 420px; width: calc(100vw - 48px); font-size: \(popupFontPercent)%; line-height: 1.6; z-index: 9999; color: #222; }
         </style>
         """
         }
@@ -4144,6 +4160,7 @@ final class AppState: ObservableObject {
 
     private func fallbackPreviewStyleHTML() -> String {
         let scalePercent = Int(previewTextScalePercent.rounded())
+        let popupFontPercent = Int(footnotePopupFontPercent.rounded())
         return """
         <style>
         body { font-family: serif; line-height: 1.55; padding: 24px; }
@@ -4161,12 +4178,8 @@ final class AppState: ObservableObject {
         .page-break-before::after { content: "Page break before"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
         .page-break-after::after { content: "Page break after"; position: absolute; top: -0.75em; left: 50%; transform: translateX(-50%); background: Canvas; color: #666; font-size: 0.78em; padding: 0 0.6em; }
         .empty-paragraph { min-height: 1.65em; text-indent: 0; }
-        .footnote-ref { font-size: 0.75em; line-height: 0; vertical-align: super; }
-        .footnote-ref a { color: inherit; text-decoration: none; }
-        .footnotes { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #d0d0d0; font-size: 0.9em; }
-        .footnotes ol { margin: 0; padding-left: 1.5rem; }
-        .footnotes li { margin-bottom: 0.5rem; }
-        .footnote-back { margin-left: 0.25rem; text-decoration: none; }
+        .fn-ref { cursor: pointer; font-size: 0.75em; line-height: 0; vertical-align: super; }
+        .fn-popup { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #fff; border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 4px 24px rgba(0,0,0,0.22); padding: 14px 18px; max-width: 420px; width: calc(100vw - 48px); font-size: \(popupFontPercent)%; line-height: 1.6; z-index: 9999; color: #222; }
         </style>
         """
     }
@@ -4249,7 +4262,6 @@ final class AppState: ObservableObject {
 
         let defRegex = try? NSRegularExpression(pattern: #"^\[\^([^\]]+)\]:\s*(.*)"#)
         var items: [String] = []
-        var firstLabel: String? = nil
         for line in lines {
             let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
             guard let match = defRegex?.firstMatch(in: line, range: nsRange),
@@ -4258,18 +4270,16 @@ final class AppState: ObservableObject {
                 return nil  // non-definition line in this paragraph — don't handle it here
             }
             let label = String(line[labelRange])
-            if firstLabel == nil { firstLabel = label }
             let noteText = definitions[label] ?? {
                 if let bodyRange = Range(match.range(at: 2), in: line) { return String(line[bodyRange]) }
                 return ""
             }()
             let fragment = footnoteFragmentID(label, fallback: "fn-\(label)")
-            items.append("<li id=\"fn-\(htmlEscaped(fragment))\">\(markdownInlinePreviewHTML(noteText, usedFootnotes: &usedFootnotes)) <a href=\"#fnref-\(htmlEscaped(fragment))\" class=\"footnote-back\">&#8617;</a></li>")
+            items.append("<aside id=\"fn-\(htmlEscaped(fragment))\" class=\"fn-aside\" hidden>\(markdownInlinePreviewHTML(noteText, usedFootnotes: &usedFootnotes))</aside>")
             renderedLabels.insert(label)
         }
         guard !items.isEmpty else { return nil }
-        let startAttr = olStartAttribute(for: firstLabel)
-        return "<section class=\"footnotes\">\n<ol\(startAttr)>\n\(items.joined(separator: "\n"))\n</ol>\n</section>"
+        return items.joined(separator: "\n")
     }
 
     private func markdownHeadingHTML(from text: String, usedFootnotes: inout [String]) -> String? {
@@ -4453,11 +4463,10 @@ final class AppState: ObservableObject {
         for (index, label) in usedLabels.enumerated() {
             guard let noteText = definitions[label] else { continue }
             let fragment = footnoteFragmentID(label, fallback: "note-\(index + 1)")
-            items.append("<li id=\"fn-\(htmlEscaped(fragment))\">\(markdownInlinePreviewHTML(noteText)) <a href=\"#fnref-\(htmlEscaped(fragment))\" class=\"footnote-back\">&#8617;</a></li>")
+            items.append("<aside id=\"fn-\(htmlEscaped(fragment))\" class=\"fn-aside\" hidden>\(markdownInlinePreviewHTML(noteText))</aside>")
         }
         guard !items.isEmpty else { return nil }
-        let startAttr = olStartAttribute(for: usedLabels.first)
-        return "<section class=\"footnotes\">\n<ol\(startAttr)>\n\(items.joined(separator: "\n"))\n</ol>\n</section>"
+        return items.joined(separator: "\n")
     }
 
     private func markdownInlinePreviewHTML(_ text: String) -> String {
@@ -4488,7 +4497,7 @@ final class AppState: ObservableObject {
                       let labelRange = Range(match.range(at: 1), in: escaped) else { continue }
                 let label = String(escaped[labelRange])
                 let fragment = footnoteFragmentID(label, fallback: "note-\(usedFootnotes.count)")
-                let replacement = "<sup id=\"fnref-\(htmlEscaped(fragment))\" class=\"footnote-ref\"><a href=\"#fn-\(htmlEscaped(fragment))\">\(htmlEscaped(label))</a></sup>"
+                let replacement = "<sup class=\"fn-ref\" data-fn=\"fn-\(htmlEscaped(fragment))\">\(htmlEscaped(label))</sup>"
                 escaped.replaceSubrange(fullRange, with: replacement)
             }
         }
@@ -8554,6 +8563,7 @@ final class AppState: ObservableObject {
         ocrParagraphTextAreaMinHeight = CGFloat(parseDouble(values["OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT"], defaultValue: 58, minimum: 40))
         ocrTitleMatchTopLineCount = Int(parseDouble(values["OCR_TITLE_MATCH_TOP_LINES"], defaultValue: 3, minimum: 0))
         previewTextScalePercent = min(parseDouble(values["PREVIEW_TEXT_SCALE_PERCENT"], defaultValue: 170, minimum: 80), 220)
+        footnotePopupFontPercent = min(parseDouble(values["FOOTNOTE_POPUP_FONT_PERCENT"], defaultValue: 120, minimum: 60), 300)
         shouldOpenOCRWindowFullScreen = (values["OCR_WINDOW_WIDTH"] ?? "FULL").trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
         if !shouldOpenOCRWindowFullScreen {
             ocrWindowWidth = CGFloat(parseDouble(values["OCR_WINDOW_WIDTH"], defaultValue: 820, minimum: 640))
