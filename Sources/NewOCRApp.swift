@@ -2895,6 +2895,7 @@ final class AppState: ObservableObject {
         window.makeKeyAndOrderFront(nil)
     }
 
+    // Global file — holds only all_sections rules.
     func layoutAreasFileURL() -> URL? {
         guard !selectedFolderPath.isEmpty else { return nil }
         return URL(fileURLWithPath: selectedFolderPath)
@@ -2902,16 +2903,87 @@ final class AppState: ObservableObject {
             .appendingPathComponent("layout-areas.json")
     }
 
-    private func ensureLayoutAreasFile() throws -> URL {
-        guard let url = layoutAreasFileURL() else {
+    // Per-section file — holds rules that target a specific section PDF.
+    func layoutAreasSectionFileURL(forStem stem: String) -> URL? {
+        guard !selectedFolderPath.isEmpty else { return nil }
+        return URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("AppleVision", isDirectory: true)
+            .appendingPathComponent("layout-areas-\(stem).json")
+    }
+
+    // All layout-areas*.json files that currently exist on disk.
+    private func allLayoutAreaFileURLs() -> [URL] {
+        guard !selectedFolderPath.isEmpty else { return [] }
+        let dir = URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("AppleVision", isDirectory: true)
+        let contents = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
+        return contents.filter { url in
+            let name = url.lastPathComponent
+            return (name == "layout-areas.json" || name.hasPrefix("layout-areas-"))
+                && url.pathExtension == "json"
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    // Load all rules from every layout-areas file, migrating old single-file format first.
+    func loadAllLayoutAreaRules() -> [OCRLayoutAreaRule] {
+        migrateLayoutAreasFileIfNeeded()
+        return allLayoutAreaFileURLs().flatMap { url in
+            (try? loadLayoutAreasFileForEditing(from: url))?.rules ?? []
+        }
+    }
+
+    // One-time migration: if the global layout-areas.json contains section-specific rules,
+    // split them into per-section files.
+    private func migrateLayoutAreasFileIfNeeded() {
+        guard let globalURL = layoutAreasFileURL(),
+              FileManager.default.fileExists(atPath: globalURL.path) else { return }
+        guard var globalAreas = try? loadLayoutAreasFileForEditing(from: globalURL) else { return }
+        let sectionRules = globalAreas.rules.filter { $0.section != nil }
+        guard !sectionRules.isEmpty else { return }
+        globalAreas.rules.removeAll { $0.section != nil }
+        try? writeLayoutAreasFile(globalAreas, to: globalURL)
+        var bySection: [String: [OCRLayoutAreaRule]] = [:]
+        for rule in sectionRules {
+            guard let section = rule.section else { continue }
+            let stem = URL(fileURLWithPath: section).deletingPathExtension().lastPathComponent
+            bySection[stem, default: []].append(rule)
+        }
+        for (stem, rules) in bySection {
+            guard let url = layoutAreasSectionFileURL(forStem: stem) else { continue }
+            var existing = (try? loadLayoutAreasFileForEditing(from: url)) ?? OCRLayoutAreasFile(rules: [])
+            existing.rules.append(contentsOf: rules)
+            try? writeLayoutAreasFile(existing, to: url)
+        }
+    }
+
+    private func ensureLayoutAreasDir() throws -> URL {
+        guard !selectedFolderPath.isEmpty else {
             throw NSError(domain: "NewOCR.LayoutAreas", code: 1, userInfo: [NSLocalizedDescriptionKey: "No project folder selected."])
         }
-        let folder = url.deletingLastPathComponent()
-        if !FileManager.default.fileExists(atPath: folder.path) {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let dir = URL(fileURLWithPath: selectedFolderPath)
+            .appendingPathComponent("AppleVision", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        return dir
+    }
+
+    private func ensureLayoutAreasFile() throws -> URL {
+        let dir = try ensureLayoutAreasDir()
+        let url = dir.appendingPathComponent("layout-areas.json")
         if !FileManager.default.fileExists(atPath: url.path) {
             try defaultLayoutAreasJSON.write(to: url, atomically: true, encoding: .utf8)
+        }
+        return url
+    }
+
+    private func ensureLayoutAreasSectionFile(stem: String) throws -> URL {
+        let dir = try ensureLayoutAreasDir()
+        let url = dir.appendingPathComponent("layout-areas-\(stem).json")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            let empty = try JSONEncoder().encode(OCRLayoutAreasFile(rules: []))
+            try empty.write(to: url, options: .atomic)
         }
         return url
     }
@@ -3025,72 +3097,62 @@ final class AppState: ObservableObject {
     }
 
     func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil, anchorWord: String? = nil, codexText: String? = nil, isAuto: Bool = false) throws -> Int {
-        let url = try ensureLayoutAreasFile()
-        var areas = try loadLayoutAreasFileForEditing(from: url)
         let cleanScope = scope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let cleanMarkers = markers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let cleanAnchorWord = anchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let cleanCodexText = codexText.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
-            rules = [
-                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
-            ]
+            let url = try ensureLayoutAreasFile()
+            var areas = try loadLayoutAreasFileForEditing(from: url)
+            areas.rules.append(OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto))
+            try writeLayoutAreasFile(areas, to: url)
         case "selected_sections":
-            rules = selectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+            for sectionURL in selectedSectionURLs {
+                let stem = sectionURL.deletingPathExtension().lastPathComponent
+                let url = try ensureLayoutAreasSectionFile(stem: stem)
+                var areas = try loadLayoutAreasFileForEditing(from: url)
+                areas.rules.append(OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto))
+                try writeLayoutAreasFile(areas, to: url)
             }
         case "page":
-            rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
-            ]
-        default:
-            rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
-            ]
+            let stem = currentSectionURL.deletingPathExtension().lastPathComponent
+            let url = try ensureLayoutAreasSectionFile(stem: stem)
+            var areas = try loadLayoutAreasFileForEditing(from: url)
+            areas.rules.append(OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto))
+            try writeLayoutAreasFile(areas, to: url)
+        default: // "section"
+            let stem = currentSectionURL.deletingPathExtension().lastPathComponent
+            let url = try ensureLayoutAreasSectionFile(stem: stem)
+            var areas = try loadLayoutAreasFileForEditing(from: url)
+            areas.rules.append(OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto))
+            try writeLayoutAreasFile(areas, to: url)
         }
-        areas.rules.append(contentsOf: rules)
-        try writeLayoutAreasFile(areas, to: url)
-        return areas.rules.count
+        return loadAllLayoutAreaRules().count
     }
 
     func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect, newMarkers: String? = nil, newAnchorWord: String? = nil, newCodexText: String? = nil, isAuto: Bool = false) throws -> Int {
-        let url = try ensureLayoutAreasFile()
-        var areas = try loadLayoutAreasFileForEditing(from: url)
-        if let index = areas.rules.firstIndex(of: oldRule) {
-            areas.rules.remove(at: index)
-        }
-        let cleanScope = newScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let cleanMarkers = newMarkers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let cleanAnchorWord = newAnchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let cleanCodexText = newCodexText.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let rules: [OCRLayoutAreaRule]
-        switch cleanScope {
-        case "all_sections":
-            rules = [
-                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
-            ]
-        case "selected_sections":
-            rules = newSelectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
-            }
-        case "page":
-            rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
-            ]
-        default:
-            rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
-            ]
-        }
-        areas.rules.append(contentsOf: rules)
-        try writeLayoutAreasFile(areas, to: url)
-        return areas.rules.count
+        // Remove the old rule from its file.
+        try deleteLayoutAreaRule(oldRule)
+        // Save the replacement using the standard per-file logic.
+        return try saveLayoutAreaRules(
+            type: newType, scope: newScope,
+            currentSectionURL: newCurrentSectionURL,
+            selectedSectionURLs: newSelectedSectionURLs,
+            pageNumber: newPageNumber, rect: newRect,
+            markers: newMarkers, anchorWord: newAnchorWord,
+            codexText: newCodexText, isAuto: isAuto)
     }
 
     func patchRuleRect(matching oldRule: OCRLayoutAreaRule, newRect: OCRLayoutAreaRect) throws {
-        let url = try ensureLayoutAreasFile()
+        let url: URL
+        if let section = oldRule.section {
+            let stem = URL(fileURLWithPath: section).deletingPathExtension().lastPathComponent
+            guard let sectionURL = layoutAreasSectionFileURL(forStem: stem) else { return }
+            url = sectionURL
+        } else {
+            url = try ensureLayoutAreasFile()
+        }
         var areas = try loadLayoutAreasFileForEditing(from: url)
         if let index = areas.rules.firstIndex(of: oldRule) {
             areas.rules[index].rect = newRect
@@ -3099,52 +3161,53 @@ final class AppState: ObservableObject {
     }
 
     func clearLayoutAreaRules() throws {
-        let url = try ensureLayoutAreasFile()
-        try writeLayoutAreasFile(OCRLayoutAreasFile(rules: []), to: url)
+        for url in allLayoutAreaFileURLs() {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+    }
+
+    func deleteLayoutAreaRule(_ rule: OCRLayoutAreaRule) throws {
+        let url: URL
+        if let section = rule.section {
+            let stem = URL(fileURLWithPath: section).deletingPathExtension().lastPathComponent
+            guard let sectionURL = layoutAreasSectionFileURL(forStem: stem) else { return }
+            url = sectionURL
+        } else {
+            url = try ensureLayoutAreasFile()
+        }
+        var areas = try loadLayoutAreasFileForEditing(from: url)
+        areas.rules.removeAll { $0 == rule }
+        try writeLayoutAreasFile(areas, to: url)
     }
 
     func findDuplicateRule(type: String, scope: String?, section: String?, page: Int?, rect: OCRLayoutAreaRect, excludingRule: OCRLayoutAreaRule? = nil) -> OCRLayoutAreaRule? {
-        guard let url = layoutAreasFileURL(),
-              let areas = try? loadLayoutAreasFileForEditing(from: url) else {
-            return nil
-        }
+        let allRules = loadAllLayoutAreaRules()
 
         print("[DupCheck] Looking for: type=\(type) scope=\(scope ?? "nil") section=\(section ?? "nil") page=\(page.map(String.init) ?? "nil") rect=(\(rect.left),\(rect.right),\(rect.top),\(rect.bottom))")
-        for rule in areas.rules {
+        for rule in allRules {
             print("[DupCheck] Existing: type=\(rule.type) scope=\(rule.scope ?? "nil") section=\(rule.section ?? "nil") page=\(rule.page.map(String.init) ?? "nil") rect=(\(rule.rect.left),\(rule.rect.right),\(rule.rect.top),\(rule.rect.bottom))")
         }
 
-        return areas.rules.first { rule in
+        return allRules.first { rule in
             if let excludingRule = excludingRule, rule == excludingRule {
                 return false
             }
-            if rule.type != type {
-                return false
-            }
-            if rule.scope != scope {
-                return false
-            }
-            if rule.section != section {
-                return false
-            }
-            if rule.page != page {
-                return false
-            }
+            if rule.type != type { return false }
+            if rule.scope != scope { return false }
+            if rule.section != section { return false }
+            if rule.page != page { return false }
             let rectTolerance: CGFloat = 0.01
-            let isDuplicateRect = abs(rule.rect.left - rect.left) <= rectTolerance &&
-                                  abs(rule.rect.right - rect.right) <= rectTolerance &&
-                                  abs(rule.rect.top - rect.top) <= rectTolerance &&
-                                  abs(rule.rect.bottom - rect.bottom) <= rectTolerance
-            return isDuplicateRect
+            return abs(rule.rect.left - rect.left) <= rectTolerance &&
+                   abs(rule.rect.right - rect.right) <= rectTolerance &&
+                   abs(rule.rect.top - rect.top) <= rectTolerance &&
+                   abs(rule.rect.bottom - rect.bottom) <= rectTolerance
         }
     }
 
     func currentLayoutAreaRuleCount() -> Int {
-        guard let url = layoutAreasFileURL(),
-              let areas = try? loadLayoutAreasFileForEditing(from: url) else {
-            return 0
-        }
-        return areas.rules.count
+        loadAllLayoutAreaRules().count
     }
 
     // MARK: - Layout Editor Preference Persistence
@@ -3199,12 +3262,7 @@ final class AppState: ObservableObject {
     }
 
     func reloadAllSavedRules(into state: LayoutAreaEditorState) {
-        guard let url = layoutAreasFileURL(),
-              let areas = try? loadLayoutAreasFileForEditing(from: url) else {
-            state.allSavedRules = []
-            return
-        }
-        state.allSavedRules = areas.rules
+        state.allSavedRules = loadAllLayoutAreaRules()
     }
 
     func loadLayoutAreasFilePublic(from url: URL) throws -> OCRLayoutAreasFile {
@@ -7576,14 +7634,23 @@ final class AppState: ObservableObject {
     }
 
     private func loadOCRLayoutAreaRules(for pdfURL: URL) -> [OCRLayoutAreaRule] {
-        guard let url = layoutAreasFileURL(),
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) else {
-            return []
+        // Load global (all_sections) rules + rules specific to this section's file.
+        var rules: [OCRLayoutAreaRule] = []
+        if let url = layoutAreasFileURL(),
+           let data = try? Data(contentsOf: url),
+           let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
+            rules += decoded.rules
         }
-        return decoded.rules.filter { rule in
+        let stem = pdfURL.deletingPathExtension().lastPathComponent
+        if let url = layoutAreasSectionFileURL(forStem: stem),
+           let data = try? Data(contentsOf: url),
+           let decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
+            rules += decoded.rules
+        }
+        let validTypes: Set<String> = ["header", "h2", "header3", "blockquote", "image", "image_desc", "footnote", "ignore", "refmark"]
+        return rules.filter { rule in
             let type = rule.type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard ["header", "h2", "header3", "blockquote", "image", "image_desc", "footnote", "ignore", "refmark"].contains(type) else { return false }
+            guard validTypes.contains(type) else { return false }
             return rule.rect.left < rule.rect.right && rule.rect.bottom < rule.rect.top
         }
     }
@@ -10213,35 +10280,17 @@ private struct LayoutAreasReportView: View {
     private func loadRules() {
         isLoading = true
         DispatchQueue.global().async {
-            if let url = appState.layoutAreasFileURL(),
-               let data = try? Data(contentsOf: url),
-               var decoded = try? JSONDecoder().decode(OCRLayoutAreasFile.self, from: data) {
-                decoded.rules = decoded.rules.map { rule in
-                    var r = rule
-                    if r.isAuto == nil { r.isAuto = true }
-                    return r
-                }
-                DispatchQueue.main.async {
-                    rules = decoded.rules
-                    isLoading = false
-                }
-            } else {
-                DispatchQueue.main.async {
-                    rules = []
-                    isLoading = false
-                }
+            let loaded = appState.loadAllLayoutAreaRules()
+            DispatchQueue.main.async {
+                rules = loaded
+                isLoading = false
             }
         }
     }
 
     private func deleteRule(for rule: OCRLayoutAreaRule) {
         rules.removeAll { $0 == rule }
-        saveRules()
-    }
-
-    private func saveRules() {
-        let file = OCRLayoutAreasFile(rules: rules)
-        try? appState.writeLayoutAreasFile(file)
+        try? appState.deleteLayoutAreaRule(rule)
     }
 }
 

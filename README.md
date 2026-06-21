@@ -642,14 +642,14 @@ collapses into the same paragraph. `replacingMarkdownParagraphAtRange` appends
 **Define Layout** (`Edit PDF > Define Layout`) is the editor for managing layout
 rules. It is a manual editor for drawing rectangles and saving rules by hand — use
 it for precise rules like marking an image region or ignoring a specific page
-element. It is backed by `LayoutAreaEditorState` and writes to `layout-areas.json`.
+element. It is backed by `LayoutAreaEditorState` and writes rules to per-section JSON files under `AppleVision/`.
 
 ### `isAuto` Field in OCRLayoutAreaRule
 
-Every rule in `layout-areas.json` carries an optional `isAuto: Bool` field
+Every layout area rule carries an optional `isAuto: Bool` field
 (default `false`). Rules drawn in Define Layout are saved with `isAuto: false`.
 
-**Migration**: when loading `layout-areas.json`, any rule where `isAuto` was never
+**Migration**: when loading a layout-areas file, any rule where `isAuto` was never
 written (older files, value `nil`) is treated as `isAuto: true` on load, so
 pre-existing project files remain valid.
 
@@ -663,11 +663,16 @@ sample section/page, select **Section Title**, **Quote**, **Image**,
 the page area, then click **Save Area**. Define Layout saves rules as
 page-scoped entries for the currently selected section/page.
 
-The editor writes the project layout rules automatically to:
+The editor writes the project layout rules automatically to per-section files:
 
 ```text
-AppleVision/layout-areas.json
+AppleVision/layout-areas.json          ← all_sections rules
+AppleVision/layout-areas-section-001.json  ← rules for section-001.pdf
+AppleVision/layout-areas-section-002.json  ← rules for section-002.pdf
+…
 ```
+
+**Existing projects** with a single `layout-areas.json` are migrated automatically on first open: section-specific rules are split out into their per-section files and removed from the global file.
 
 ### Layout Area Rules Report
 
@@ -874,7 +879,7 @@ Define Layout editor shows a **Codex Text Override** panel below the type/scope
 controls. The panel contains a multi-line text editor pre-filled with the saved
 Codex text. The panel border highlights in the type's accent color when text is
 present. A **Clear** button removes the override. Saving or Updating the rule
-persists the current text in the panel back to `layout-areas.json`.
+persists the current text in the panel back to the rule's layout-areas JSON file.
 
 When a rule is created in Define Layout, the Codex Text Override panel is empty
 by default and can be filled by typing or pasting text. This lets users manually
@@ -892,7 +897,7 @@ area. During OCR:
   blockquote → `>`, footnote → `[^label]: …`, image_desc caption).
 - Rules without `codexText` (the default for drawn rules) continue to use Apple
   Vision OCR as before.
-- `codexText` may be edited directly in `layout-areas.json` when a correction is
+- `codexText` may be edited directly in the rule's layout-areas JSON file when a correction is
   needed.
 
 Advanced JSON example:
@@ -970,7 +975,7 @@ Rule scope:
 
 When OCR processes a section PDF, NewOCR:
 
-1. Loads all layout area rules from `layout-areas.json`
+1. Loads layout area rules from `layout-areas.json` (all_sections) and `layout-areas-{stem}.json` (section-specific)
 2. For each page, filters rules using `matchingLayoutAreaRules()` which checks:
    - **Page number**: if the rule has a `page` field, it must match the current page
    - **Section filename**: if the rule has a `section` field, it must match the current PDF
@@ -1039,7 +1044,7 @@ UI notes:
   are icon-only buttons. Show their text labels in floating `NSPopover`
   tooltips on hover, matching the other NewOCR icon controls. Section Title is
   saved internally as rule type `header` for compatibility with existing
-  `layout-areas.json` files.
+  layout-areas JSON files.
 - Page navigation in Define Layout uses **⬆ / ⬇ chevron buttons** with a `Page n / total` readout. When the section has multiple pages, a slim vertical scrollbar on the right edge of the preview also allows dragging to any page. Action status text appears in the top header, not in this row.
 - Define Layout does not show scope tabs. The `Select All | Unselect All`
   strip above the left section list only controls the section list selection.
@@ -1409,7 +1414,7 @@ Markdown text is shown alongside for comparison only.
 
 ### Workflow
 
-1. Open a project that has `image_desc` rules in `layout-areas.json` and
+1. Open a project that has `image_desc` rules in the layout-areas JSON files and
    existing `page*.md` files for those sections (i.e., OCR has already run).
 2. Open **Edit PDF > Codex OCR (Image Description)**.
 3. The window lists all matching image description areas found across all
@@ -1909,7 +1914,7 @@ These are intentional and should not be changed casually:
     `1,2,3`). OCR assigns labels to captured lines in top-to-bottom order.
   Both styles strip any leading digit/superscript prefix that OCR may capture
   from the original text so it is not duplicated in the definition body.
-  The `markers` field is saved in `layout-areas.json`.
+  The `markers` field is saved in the rule's layout-areas JSON file.
 - When a page's forced-layout OCR produces footnote definitions (from any
   `footnote` layout area rule), a `<!-- page-break-after -->` comment is
   automatically appended after the definitions. This keeps each PDF page's
@@ -1924,8 +1929,8 @@ These are intentional and should not be changed casually:
   `<section class="footnotes">` block. This allows the EPUB to reflect the
   original book's per-page footnote layout.
 - **Rules can store `codexText`.** When a rule with a non-empty `codexText` override
-  is saved, that text is stored in the `codexText` field of the rule in
-  `layout-areas.json`. During OCR, if `codexText` is present the Vision-recognized
+  is saved, that text is stored in the `codexText` field of the rule in its
+  layout-areas JSON file. During OCR, if `codexText` is present the Vision-recognized
   lines overlapping that rectangle are discarded and replaced by the saved text. For
   `image_desc` rules the saved `codexText` is returned directly as the caption without
   re-running Vision on the caption area. Rules with no `codexText` continue to use
@@ -1955,8 +1960,8 @@ These are intentional and should not be changed casually:
   titles from repeating on every page. When a header rule rectangle detects multiple
   lines, each line becomes its own heading with `##` prefix, allowing multi-line
   section titles to render as consecutive headings.
-- Define Layout scope selection (All/Selected/Section/Page) is saved in
-  `layout-areas.json` and used to filter rules during OCR. Rules respect their
+- Define Layout scope selection (All/Selected/Section/Page) determines which layout-areas
+  JSON file the rule is written to and is used to filter rules during OCR. Rules respect their
   defined scope: All rules apply to all sections, Selected rules apply only to
   their specified sections, Section rules apply only to that section on all pages,
   and Page rules apply only to that specific page of that section.
