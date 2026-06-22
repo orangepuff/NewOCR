@@ -1299,6 +1299,10 @@ Text with note.[^1]
 [^1]: Footnote text
 ```
 
+Compact numeric headings such as `#1` or `##1` are treated as real headings
+during EPUB export and app preview, with numeric-only titles promoted to a
+subordinate heading level so they do not stay as raw text.
+
 Page breaks:
 
 ```md
@@ -1480,6 +1484,8 @@ Expected EPUB behavior:
 - create per-chapter XHTML files
 - create navigation/TOC
 - preserve supported Markdown and supported HTML classes
+- render blockquotes with the shipped quote styling in both EPUB output and
+  Preview, including `.blockquote` and `blockquote`
 - after a successful build, show a dark NewOCR-styled popup saying
   `EPUB was created successfully` with **Open** and **Close**, without showing
   the EPUB file path
@@ -1498,6 +1504,8 @@ The Python converter supports:
 - page break markers
 - empty paragraphs as `<p class="empty-paragraph"><br/></p>`
 - `<p class="left|center|right">...</p>`
+- compact numeric headings like `#1` and `##1`, which are promoted to real
+  heading levels instead of being left as literal text
 
 ## Covers
 

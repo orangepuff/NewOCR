@@ -253,17 +253,24 @@ h4 {
 }
 
 /* Quotes */
+.blockquote,
 blockquote,
 .quote {
-  margin: 1.2em 1.5em;
-  padding: 0;
+  margin: 1em 1.5em;
+  padding: 0.6em 1em;
+  border-left: 0.18em solid #999;
   font-style: italic;
-  line-height: 1.65;
+  line-height: 1.55;
+  text-indent: 0;
+  break-inside: avoid;
+  page-break-inside: avoid;
 }
 
+.blockquote p,
 blockquote p,
 .quote p {
-  margin: 0.4em 0;
+  margin: 0;
+  text-indent: 0;
 }
 
 .quote-source {

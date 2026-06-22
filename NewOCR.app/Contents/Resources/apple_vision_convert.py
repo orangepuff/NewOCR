@@ -281,11 +281,17 @@ def image_caption_from_lines(lines, start_index):
 
 
 def markdown_heading_parts(stripped):
-    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
+    match = re.match(r"^(#{1,6})(\s*)(.+?)\s*$", stripped)
     if not match:
         return None
     level = min(len(match.group(1)), 6)
-    title = re.sub(r"\s+#{1,6}\s*$", "", match.group(2).strip()).strip()
+    space = match.group(2)
+    title = re.sub(r"\s+#{1,6}\s*$", "", match.group(3).strip()).strip()
+    # Some OCR/editing paths can leave compact numeric headings like "#1".
+    # Treat those as a subordinate heading level so they render as a real title
+    # instead of raw text in the EPUB.
+    if not space and title.isdigit():
+        level = max(level, 3)
     return (level, title) if title else None
 
 
@@ -566,6 +572,18 @@ def make_content_xhtml(book_title, body_html, assets=None, stylesheet_prefix="")
     fallback_style = "" if styles else """<style>
 body { font-family: serif; line-height: 1.55; }
 p { margin: 0 0 1em 0; }
+blockquote, .blockquote, .quote {
+  margin: 1em 1.5em;
+  padding: 0.6em 1em;
+  border-left: 0.18em solid #999;
+  font-style: italic;
+  line-height: 1.55;
+  text-indent: 0;
+}
+blockquote p, .blockquote p, .quote p {
+  margin: 0;
+  text-indent: 0;
+}
 </style>"""
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>

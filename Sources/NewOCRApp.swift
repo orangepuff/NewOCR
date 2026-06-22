@@ -3987,11 +3987,22 @@ final class AppState: ObservableObject {
 
     private func markdownHeadingParts(from text: String) -> (level: Int, title: String)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("#") else { return nil }
-        let level = min(trimmed.prefix(while: { $0 == "#" }).count, 6)
-        var title = trimmed.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let regex = try? NSRegularExpression(pattern: #"^(#{1,6})(\s*)(.+?)\s*$"#),
+              let nsMatch = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..<trimmed.endIndex, in: trimmed)),
+              nsMatch.numberOfRanges >= 4,
+              let hashRange = Range(nsMatch.range(at: 1), in: trimmed),
+              let spaceRange = Range(nsMatch.range(at: 2), in: trimmed),
+              let titleRange = Range(nsMatch.range(at: 3), in: trimmed) else {
+            return nil
+        }
+        let level = min(trimmed[hashRange].count, 6)
+        let space = trimmed[spaceRange]
+        var title = String(trimmed[titleRange]).trimmingCharacters(in: .whitespacesAndNewlines)
         while title.hasSuffix("#") {
             title = title.dropLast().trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if space.isEmpty, title.allSatisfy(\.isNumber) {
+            return title.isEmpty ? nil : (max(level, 3), title)
         }
         return title.isEmpty ? nil : (level, title)
     }
@@ -4742,10 +4753,13 @@ final class AppState: ObservableObject {
     private func firstMarkdownHeading(in text: String) -> String? {
         for rawLine in text.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard line.hasPrefix("#") else { continue }
-            let title = line
-                .drop(while: { $0 == "#" })
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let regex = try? NSRegularExpression(pattern: #"^(#{1,6})(\s*)(.+?)\s*$"#),
+                  let nsMatch = regex.firstMatch(in: line, range: NSRange(line.startIndex..<line.endIndex, in: line)),
+                  nsMatch.numberOfRanges >= 4,
+                  let titleRange = Range(nsMatch.range(at: 3), in: line) else {
+                continue
+            }
+            let title = String(line[titleRange]).trimmingCharacters(in: .whitespacesAndNewlines)
             if !title.isEmpty {
                 return title
             }
