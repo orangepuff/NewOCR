@@ -172,24 +172,6 @@ private struct OCRLine: Codable {
     }
 }
 
-private struct OCRReviewItem: Codable {
-    let page: Int
-    let line: Int
-    let text: String        // final text (already corrected when reason == "auto_corrected")
-    let confidence: Float
-    let reason: String      // "low_confidence" | "auto_corrected"
-    var original: String? = nil  // raw OCR text before auto-correction (nil for low_confidence)
-}
-
-private struct OCRReviewReport: Codable {
-    let section: String
-    let generatedAt: String
-    let confidenceThreshold: Float
-    let totalLines: Int
-    let flaggedCount: Int
-    let correctedCount: Int
-    let items: [OCRReviewItem]
-}
 
 private struct OCRLineCachePage: Codable {
     let key: String
@@ -716,7 +698,6 @@ final class AppState: ObservableObject {
     private var isRestoring = false
     private var ocrWindows: [NSWindow] = []
     private var ocrCompareWindows: [NSWindow] = []
-    private var ocrReviewWindows: [NSWindow] = []
     private var finalizeAIWindows: [NSWindow] = []
     private var finalizeAIInstructionWindows: [NSWindow] = []
     private var layoutAreaWindows: [NSWindow] = []
@@ -1557,11 +1538,6 @@ final class AppState: ObservableObject {
             forceCloseWindowAndAttachedSheets(window)
         }
         ocrCompareWindows.removeAll()
-
-        for window in ocrReviewWindows {
-            forceCloseWindowAndAttachedSheets(window)
-        }
-        ocrReviewWindows.removeAll()
 
         for window in finalizeAIWindows {
             forceCloseWindowAndAttachedSheets(window)
@@ -3775,7 +3751,6 @@ final class AppState: ObservableObject {
             closedWindow.contentView = nil
             self.ocrWindows.removeAll { $0 === closedWindow }
             self.ocrCompareWindows.removeAll { $0 === closedWindow }
-            self.ocrReviewWindows.removeAll { $0 === closedWindow }
             self.finalizeAIWindows.removeAll { $0 === closedWindow }
             self.finalizeAIInstructionWindows.removeAll { $0 === closedWindow }
             self.layoutAreaWindows.removeAll { $0 === closedWindow }
@@ -3784,37 +3759,6 @@ final class AppState: ObservableObject {
         }
         retainedWindowDelegates[key] = delegate
         window.delegate = delegate
-    }
-
-    private func loadOCRReviewReport(from mdFolder: URL) -> OCRReviewReport? {
-        let url = mdFolder.appendingPathComponent("ocr-review.json")
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(OCRReviewReport.self, from: data)
-    }
-
-    fileprivate func openOCRReviewReport(sections: [(name: String, report: OCRReviewReport)]) {
-        let totalFlagged = sections.reduce(0) { $0 + $1.report.flaggedCount }
-        let windowTitle = sections.count == 1
-            ? "OCR Review — \(sections[0].name)"
-            : "OCR Review — \(sections.count) sections"
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 680),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = windowTitle
-        window.center()
-        window.isReleasedWhenClosed = false
-        let hostingView = NSHostingView(
-            rootView: OCRReviewReportWindowView(sections: sections, totalFlagged: totalFlagged)
-        )
-        hostingView.sizingOptions = []
-        window.contentView = hostingView
-        window.setFrame(NSScreen.main?.visibleFrame ?? window.frame, display: true)
-        ocrReviewWindows.append(window)
-        trackRetainedWindow(window)
-        window.makeKeyAndOrderFront(nil)
     }
 
     private func previewHTML(for markdown: String) -> String {
@@ -5601,7 +5545,6 @@ final class AppState: ObservableObject {
         let filteredTextValue = filteredText
         DispatchQueue.global(qos: .userInitiated).async {
             var completed = 0
-            var totalFlagged = 0
             var logs: [String] = []
 
             do {
@@ -5630,9 +5573,7 @@ final class AppState: ObservableObject {
                         documentTitle: ""
                     )
                     completed += 1
-                    totalFlagged += result.flaggedLines
-                    let flagNote = result.flaggedLines > 0 ? ", \(result.flaggedLines) flagged" : ""
-                    logs.append("\(item.url.lastPathComponent): \(result.pages) pages, \(result.characters) characters\(flagNote)")
+                    logs.append("\(item.url.lastPathComponent): \(result.pages) pages, \(result.characters) characters")
                 }
 
                 DispatchQueue.main.async {
@@ -5640,18 +5581,9 @@ final class AppState: ObservableObject {
                     self.isOCRCancelling = false
                     self.ocrProgressPercent = 100
                     self.ocrStatus = "Processed OCR for \(completed) sections."
-                    var logText = logs.joined(separator: "\n")
-                    if totalFlagged > 0 {
-                        logText += "\n\n⚠ OCR Review: \(totalFlagged) low-confidence line(s) flagged across \(completed) section(s).\nOpen each section's OCR Log or check ocr-review.json for details."
-                    } else {
-                        logText += "\n\nOCR Review: No low-confidence lines detected."
-                    }
-                    self.logOutput = logText
-                    let flagSummary = totalFlagged > 0
-                        ? "\(totalFlagged) low-confidence line(s) need review."
-                        : "No OCR issues detected."
+                    self.logOutput = logs.joined(separator: "\n")
                     self.bulkOCRProgressTitle = "Finished Successfully"
-                    self.bulkOCRProgressMessage = "Finished OCR for \(completed) sections. \(flagSummary)"
+                    self.bulkOCRProgressMessage = "Finished OCR for \(completed) sections."
                     self.bulkOCRCurrentFile = ""
                     self.bulkOCRCompletedCount = completed
                     self.isBulkOCRFinished = true
@@ -5701,20 +5633,6 @@ final class AppState: ObservableObject {
                     self.isOCRCancelling = false
                     self.ocrProgressPercent = 100
                     self.ocrStatus = "AppleVision OCR completed and Markdown files saved."
-                    let reviewNote: String
-                    if result.flaggedLines > 0 {
-                        if let data = try? Data(contentsOf: URL(fileURLWithPath: result.mdFolder).appendingPathComponent("ocr-review.json")),
-                           let rep = try? JSONDecoder().decode(OCRReviewReport.self, from: data) {
-                            var parts: [String] = []
-                            if rep.correctedCount > 0 { parts.append("\(rep.correctedCount) auto-corrected") }
-                            if rep.flaggedCount > 0 { parts.append("\(rep.flaggedCount) low-confidence") }
-                            reviewNote = "\n\nOCR Review: \(parts.joined(separator: ", ")) — see Review window."
-                        } else {
-                            reviewNote = "\n\nOCR Review: \(result.flaggedLines) issue(s) — see Review window."
-                        }
-                    } else {
-                        reviewNote = "\n\nOCR Review: No issues detected."
-                    }
                     self.logOutput = """
                     AppleVision used Apple's Vision framework only.
 
@@ -5724,13 +5642,7 @@ final class AppState: ObservableObject {
                     Pages: \(result.pages)
                     Characters: \(result.characters)
                     Header/footer lines removed: \(result.removedLines)
-                    """ + reviewNote
-                    if result.flaggedLines > 0 {
-                        let mdFolderURL = URL(fileURLWithPath: result.mdFolder)
-                        if let report = self.loadOCRReviewReport(from: mdFolderURL) {
-                            self.openOCRReviewReport(sections: [(name: self.selectedPDFName, report: report)])
-                        }
-                    }
+                    """
                     if let text = self.loadAppleVisionMarkdownText() {
                         self.ocrText = text
                         self.updateSelectedPDFTitleFromOCRText(text)
@@ -5754,7 +5666,7 @@ final class AppState: ObservableObject {
         filterBottomLines: String,
         filteredText: String,
         documentTitle: String
-    ) throws -> (mdFolder: String, pages: Int, characters: Int, removedLines: Int, flaggedLines: Int) {
+    ) throws -> (mdFolder: String, pages: Int, characters: Int, removedLines: Int) {
         let pdfURL = URL(fileURLWithPath: pdfPath)
         guard let document = PDFDocument(url: pdfURL) else {
             throw NSError(domain: "NewOCR", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not open PDF: \(pdfPath)"])
@@ -5809,10 +5721,6 @@ final class AppState: ObservableObject {
         let repeatedHeaderFooterKeys = repeatedHeaderFooterKeys(for: pdfURL)
         var removedLines = 0
         var pageMarkdownItems: [OCRPageMarkdown] = []
-        let confidenceThreshold: Float = 0.75
-        var reviewItems: [OCRReviewItem] = []
-        var totalLineCount = 0
-        var correctedCount = 0
 
         for (pageIndex, rawLines) in rawPages.enumerated() {
             let pageNumber = pageIndex + 1
@@ -5861,24 +5769,12 @@ final class AppState: ObservableObject {
             removedLines += rawLines.count - filteredTextLines.count
             let noSuperscriptLines = removeSuperscriptLines(filteredTextLines)
             removedLines += filteredTextLines.count - noSuperscriptLines.count
-            totalLineCount += noSuperscriptLines.count
 
-            // Apply underscore-artifact cleanup and collect review items.
+            // Apply underscore-artifact cleanup.
             var cleanedLines: [OCRLine] = []
-            for (lineIndex, line) in noSuperscriptLines.enumerated() {
+            for line in noSuperscriptLines {
                 let cleaned = cleanOCRLineText(line.text)
-                let wasChanged = cleaned != line.text
-
-                if wasChanged {
-                    correctedCount += 1
-                    reviewItems.append(OCRReviewItem(
-                        page: pageNumber,
-                        line: lineIndex + 1,
-                        text: cleaned,
-                        confidence: line.confidence,
-                        reason: "auto_corrected",
-                        original: line.text
-                    ))
+                if cleaned != line.text {
                     cleanedLines.append(OCRLine(
                         text: cleaned,
                         left: line.left, right: line.right,
@@ -5887,15 +5783,6 @@ final class AppState: ObservableObject {
                     ))
                 } else {
                     cleanedLines.append(line)
-                    if line.confidence < confidenceThreshold {
-                        reviewItems.append(OCRReviewItem(
-                            page: pageNumber,
-                            line: lineIndex + 1,
-                            text: line.text,
-                            confidence: line.confidence,
-                            reason: "low_confidence"
-                        ))
-                    }
                 }
             }
             let builtPageText = buildMarkdownPage(from: cleanedLines, imageRegions: imageRegions, layoutRules: pageLayoutRules, indentFraction: calibratedIndentFraction)
@@ -5940,22 +5827,7 @@ final class AppState: ObservableObject {
 
         let fullText = applyMarkdownTitle(cleanDocumentTitle, to: buildMarkdownPage(from: allPageLines, imageRegions: allPageImageRegions, indentFraction: calibratedIndentFraction), replaceExistingHeading: true)
 
-        let lowConfidenceCount = reviewItems.filter { $0.reason == "low_confidence" }.count
-        let report = OCRReviewReport(
-            section: pdfURL.deletingPathExtension().lastPathComponent,
-            generatedAt: ISO8601DateFormatter().string(from: Date()),
-            confidenceThreshold: confidenceThreshold,
-            totalLines: totalLineCount,
-            flaggedCount: lowConfidenceCount,
-            correctedCount: correctedCount,
-            items: reviewItems
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let reportURL = mdFolder.appendingPathComponent("ocr-review.json")
-        try encoder.encode(report).write(to: reportURL)
-
-        return (mdFolder.path, pageCount, fullText.count, removedLines, lowConfidenceCount + correctedCount)
+        return (mdFolder.path, pageCount, fullText.count, removedLines)
     }
 
     private func renderPDFPageToCGImage(_ page: PDFPage, scale: CGFloat = 2.0) throws -> CGImage {
@@ -12621,325 +12493,6 @@ private struct OCRCompareDifferenceRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.07))
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-    }
-}
-
-private struct OCRReviewReportWindowView: View {
-    let sections: [(name: String, report: OCRReviewReport)]
-    let totalFlagged: Int
-
-    private var totalCorrected: Int {
-        sections.reduce(0) { $0 + $1.report.correctedCount }
-    }
-    private var totalIssues: Int { totalFlagged + totalCorrected }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .center, spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                    Image(systemName: "exclamationmark.magnifyingglass")
-                        .font(.system(size: 27, weight: .semibold))
-                        .foregroundStyle(Color.black)
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("OCR Review")
-                        .font(.system(size: 31, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text(sections.count == 1 ? sections[0].name : "\(sections.count) sections")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Spacer(minLength: 10)
-
-                if totalCorrected > 0 {
-                    HStack(spacing: 5) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("\(totalCorrected) auto-corrected")
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(Color(red: 40/255, green: 150/255, blue: 220/255))
-                    .clipShape(Capsule())
-                }
-
-                if totalFlagged > 0 {
-                    HStack(spacing: 5) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("\(totalFlagged) low-confidence")
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(Color(red: 220/255, green: 130/255, blue: 30/255))
-                    .clipShape(Capsule())
-                }
-
-                OCRIconButton(
-                    title: "Close",
-                    systemImage: "xmark",
-                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
-                    foregroundColor: .white
-                ) {
-                    NSApp.keyWindow?.close()
-                }
-            }
-
-            if totalIssues == 0 {
-                VStack(spacing: 10) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 42, weight: .semibold))
-                        .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
-                    Text("No OCR issues detected")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text("Apple Vision OCR returned clean, high-confidence results for all lines.")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(22)
-                .background(NewOCRMainPalette.panelBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                )
-            } else {
-                let allCorrected  = sections.flatMap { s in s.report.items.filter { $0.reason == "auto_corrected" }.map { (name: s.name, item: $0) } }
-                let allFlagged    = sections.flatMap { s in s.report.items.filter { $0.reason == "low_confidence" }.map { (name: s.name, item: $0) } }
-
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 20) {
-
-                        // ── Section 1: Corrections ──────────────────────────
-                        if !allCorrected.isEmpty {
-                            reviewSection(
-                                title: "Corrections",
-                                subtitle: "Underscore artifacts auto-removed from the saved Markdown",
-                                icon: "checkmark.circle.fill",
-                                accentColor: Color(red: 40/255, green: 150/255, blue: 220/255),
-                                entries: allCorrected
-                            )
-                        }
-
-                        // ── Section 2: Low-Confidence ───────────────────────
-                        if !allFlagged.isEmpty {
-                            reviewSection(
-                                title: "Low-Confidence",
-                                subtitle: "Lines where Vision confidence < 75% — review manually",
-                                icon: "exclamationmark.triangle.fill",
-                                accentColor: Color(red: 220/255, green: 130/255, blue: 30/255),
-                                entries: allFlagged
-                            )
-                        }
-                    }
-                    .padding(2)
-                }
-            }
-        }
-        .padding(22)
-        .frame(minWidth: 860, minHeight: 560)
-        .background(NewOCRMainPalette.windowBackground)
-        .buttonStyle(NewOCRButtonStyle())
-    }
-
-    @ViewBuilder
-    private func reviewSection(
-        title: String,
-        subtitle: String,
-        icon: String,
-        accentColor: Color,
-        entries: [(name: String, item: OCRReviewItem)]
-    ) -> some View {
-        let multiSection = sections.count > 1
-        let groupedBySectionThenPage: [(sectionName: String, pages: [(page: Int, items: [OCRReviewItem])])] = {
-            let bySection = Dictionary(grouping: entries, by: \.name)
-            return sections
-                .map { $0.name }
-                .filter { bySection[$0] != nil }
-                .map { name -> (String, [(Int, [OCRReviewItem])]) in
-                    let pages = Dictionary(grouping: bySection[name]!.map(\.item), by: \.page)
-                        .map { (page: $0.key, items: $0.value) }
-                        .sorted { $0.page < $1.page }
-                    return (name, pages)
-                }
-        }()
-
-        VStack(alignment: .leading, spacing: 12) {
-            // Section header bar
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(accentColor)
-                Text(title)
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(NewOCRMainPalette.headingText)
-                Text("\(entries.count)")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(accentColor)
-                    .clipShape(Capsule())
-                Spacer()
-                Text(subtitle)
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-            }
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(accentColor.opacity(0.10))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(accentColor.opacity(0.30), lineWidth: 1)
-            )
-
-            ForEach(groupedBySectionThenPage, id: \.sectionName) { sectionGroup in
-                VStack(alignment: .leading, spacing: 10) {
-                    if multiSection {
-                        HStack(spacing: 8) {
-                            Image(systemName: "doc.fill")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(NewOCRMainPalette.secondaryText)
-                            Text(sectionGroup.sectionName)
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(NewOCRMainPalette.headingText)
-                            Spacer()
-                        }
-                    }
-
-                    ForEach(sectionGroup.pages, id: \.page) { group in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(spacing: 8) {
-                                Text("Page \(group.page)")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(NewOCRMainPalette.headingText)
-                                Text("\(group.items.count)")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(Color.black)
-                                    .frame(minWidth: 22, minHeight: 18)
-                                    .background(Color.white.opacity(0.85))
-                                    .clipShape(Capsule())
-                                Spacer()
-                            }
-                            ForEach(group.items.sorted { $0.line < $1.line }, id: \.line) { item in
-                                OCRReviewItemRow(item: item)
-                            }
-                        }
-                        .padding(12)
-                        .background(NewOCRMainPalette.fieldBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                        )
-                    }
-                }
-                .padding(14)
-                .background(NewOCRMainPalette.panelBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                )
-            }
-        }
-    }
-}
-
-private struct OCRReviewItemRow: View {
-    let item: OCRReviewItem
-
-    private var isAutoCorrection: Bool { item.reason == "auto_corrected" }
-
-    private var confidenceColor: Color {
-        switch item.confidence {
-        case 0.65...: return Color(red: 220/255, green: 150/255, blue: 30/255)
-        case 0.50...: return Color(red: 220/255, green: 90/255, blue: 30/255)
-        default:      return Color(red: 210/255, green: 50/255, blue: 50/255)
-        }
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // Badge column
-            VStack(spacing: 4) {
-                if isAutoCorrection {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text("Fixed")
-                            .font(.system(size: 12, weight: .bold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(Color(red: 40/255, green: 150/255, blue: 220/255))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                } else {
-                    Text("\(Int(item.confidence * 100))%")
-                        .font(.system(size: 13, weight: .bold).monospacedDigit())
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 44)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(confidenceColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                }
-                Text("Line \(item.line)")
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
-                    .foregroundStyle(NewOCRMainPalette.tertiaryText)
-            }
-
-            // Text column
-            VStack(alignment: .leading, spacing: 6) {
-                if isAutoCorrection, let original = item.original {
-                    // Show original (struck-through) → corrected
-                    Text(original)
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
-                        .strikethrough(true, color: NewOCRMainPalette.tertiaryText)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color(red: 40/255, green: 150/255, blue: 220/255))
-                        Text(item.text)
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                } else {
-                    Text(item.text)
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(NewOCRMainPalette.primaryText)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.vertical, 4)
     }
 }
 

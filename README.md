@@ -482,22 +482,6 @@ Image crops are written to:
 AppleVision/MD/section-001/Images/
 ```
 
-After each OCR run, an **OCR confidence review report** is written to:
-
-```text
-AppleVision/MD/section-001/ocr-review.json
-```
-
-The report lists every OCR line where Apple Vision's confidence score fell below 75%. Each
-flagged item includes the page number, line number within that page, the recognized text,
-and the confidence percentage. The report is regenerated on every OCR run and deleted when
-**Clear OCR** removes the section folder.
-
-After OCR finishes the **OCR Review** window opens automatically when any issues are found.
-The window is dark-styled (matching Compare/Log windows) and is split into two clearly
-labelled sections:
-
-**1. Corrections** (shown first, blue header)
 During OCR, two automatic cleanup passes run before layout rules are applied:
 
 - **Superscript removal** — two complementary passes:
@@ -505,17 +489,6 @@ During OCR, two automatic cleanup passes run before layout rules are applied:
   - *Inline Unicode superscript stripping*: Apple Vision sometimes embeds superscript reference numbers directly inside a text observation rather than emitting a separate small line. Characters in the Unicode superscript digit block (⁰ ¹ ² ³ ⁴ ⁵ ⁶ ⁷ ⁸ ⁹) and common superscript letters (ⁱ ⁿ ᵃ ᵇ … ᶻ) are stripped from every OCR line before layout rules are applied. These characters are unambiguous — they never appear in normal body text.
 
 - **Underscore artifact removal**: underscore characters that appear at word boundaries are removed from the text of each remaining line. This corrects a common Vision OCR artifact where italic-styled text is misread as Markdown italic syntax (e.g. `_บทที่ 1` → `บทที่ 1`).
-
-Each auto-corrected line is flagged in the OCR Review window showing the original and corrected versions so the user can verify every fix. The corrections are already applied to the saved `page*.md` files.
-
-**2. Low-Confidence** (shown second, amber header)
-Lines where Vision's recognition confidence score fell below 75% are flagged for manual
-review. The badge colour indicates severity: amber ≥ 65%, orange ≥ 50%, red < 50%.
-
-Within each section, items are grouped by section (when running *Process OCR All*) then by
-page, with a count badge showing how many lines are in that group. The window header shows
-separate totals: **N auto-corrected** (blue) and **M low-confidence** (amber). The OCR Log
-window shows a one-line summary count for reference.
 
 ### Process OCR All
 
@@ -538,10 +511,7 @@ Expected behavior:
 - keep `AppleVision/LineCache/header-footer-review.txt`; it is shared review
   input used by OCR to remove approved header/footer lines
 - replace existing Markdown with newly generated Markdown
-- after OCR, automatically collect low-confidence lines (Vision confidence < 75%) and save
-  `AppleVision/MD/<section>/ocr-review.json` per section
-- show finished successfully when done, with a count of low-confidence lines flagged across all sections
-- do **not** auto-open the OCR Review report window after OCR All finishes — rendering thousands of flagged lines from 15+ sections at once causes a UI hang. The user can open the review report per section individually.
+- show finished successfully when done
 
 ### Scan Header All
 
