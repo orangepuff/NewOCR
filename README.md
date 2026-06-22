@@ -169,8 +169,6 @@ Important actions:
 - **Apply CSS**: update `Styles/stylesheet.css` with NewOCR required CSS blocks.
 - **Define Layout**: draw project-wide OCR layout-area rules manually for forcing
   header, blockquote, image, footnote, or ignore behavior across sections.
-- **Codex OCR (Image Description)**: use Codex vision to re-OCR image caption
-  areas from PDF crops and selectively replace them in existing Markdown files.
 - **Build EPUB**: create EPUB from available section/manual Markdown.
 - **Process OCR All**: OCR existing section PDF files that are not checked
   **Ready for EPUB**.
@@ -1446,96 +1444,6 @@ scale is applied to a preview-only content wrapper inside `preview.html`, on top
 of the project stylesheet; EPUB output must not inherit this preview-only font
 size.
 
-## Codex OCR (Image Description)
-
-**Edit PDF > Codex OCR (Image Description)** sends cropped PDF image caption
-areas to Codex for vision-based OCR, then lets the user review and selectively
-save the results back into the existing page Markdown files.
-
-This feature does **not** send existing Markdown to Codex. It sends only the
-cropped image from the PDF for each `image_desc` layout area. The current
-Markdown text is shown alongside for comparison only.
-
-### Workflow
-
-1. Open a project that has `image_desc` rules in the layout-areas JSON files and
-   existing `page*.md` files for those sections (i.e., OCR has already run).
-2. Open **Edit PDF > Codex OCR (Image Description)**.
-3. The window lists all matching image description areas found across all
-   sections that have Markdown **and are not marked as completed**. Sections
-   already marked complete (epub-ready) are skipped entirely. Each row shows:
-   section name, page number, image label, and the current OCR text from the
-   `.md` file.
-4. Press **Run OCR**. NewOCR crops each `image_desc` rectangle from the PDF
-   page (at scale 4.0), saves the crops as PNG files to
-   `AppleVision/codex-ocr-temp/`, and runs a single `codex exec` call asking
-   Codex to OCR every image and write results to
-   `AppleVision/codex-ocr-temp/ocr-results.json`.
-5. After Codex finishes, each row shows the Codex OCR result alongside the
-   original text. Selected rows have a green border.
-6. Check or uncheck rows (all start selected). Press **Save Selected (N)** to
-   replace the `*...*` description text in each corresponding `page*.md` file
-   with Codex's result.
-
-The PNG crops are deleted after a successful run. The `ocr-results.json` is
-kept for debugging.
-
-### Candidate Matching
-
-Only `image_desc` rules with:
-- a `section` field matching an existing PDF in the project folder
-- a `page` field matching an existing `page{N}.md` in
-  `AppleVision/MD/<section>/`
-- a non-empty `markers` label (e.g. `"2"`)
-
-…are shown as candidates. Rules without an existing `.md` file are silently
-skipped.
-
-### How Save Replaces Text
-
-The save step looks for the pattern `![label](Images/...)\n\n*old text*` in
-the `.md` file and replaces only the `*old text*` part with `*new text*`.
-If the pattern is not found (e.g. the `.md` was regenerated since the window
-opened), a per-item error is reported without touching the file.
-
-### Codex Exec Command
-
-The same `runCodexExec` path used elsewhere:
-
-```sh
-codex exec \
-  --skip-git-repo-check \
-  --sandbox workspace-write \
-  -c shell_environment_policy.inherit=all \
-  -m <CODEX_FINALIZE_MODEL> \
-  --cd <project-folder> \
-  "<prompt>"
-```
-
-The prompt lists the PNG filenames and asks Codex to write
-`AppleVision/codex-ocr-temp/ocr-results.json` with a `{filename: text}` map.
-
-### Model Selection
-
-Uses `CODEX_FINALIZE_MODEL` from `config.txt` (same key as before):
-
-```text
-CODEX_FINALIZE_MODEL=gpt-5.4-mini
-```
-
-### Known Behavioral Decisions — Codex OCR (Image Description)
-
-- The feature is read-only until the user presses **Save Selected**. Nothing
-  in the `.md` files is changed by opening the window or pressing Run OCR.
-- All candidates start pre-selected (checkbox on). Deselect rows before saving
-  to skip them.
-- If Codex returns no result for a candidate, that row shows a warning and is
-  excluded from Save even if checked.
-- Pressing Run OCR a second time is blocked after the first run completes
-  (`isDone = true`). Close and reopen the window to run again.
-- PNG crops are saved at scale 4.0 (≈ 288 DPI) regardless of
-  `OCR_RENDER_SCALE`; this balances image quality vs. file size for vision OCR.
-
 ## Apply CSS
 
 Apply CSS updates:
@@ -1669,14 +1577,13 @@ Key notes:
   (≈ 432 DPI) for better recognition accuracy. Range: 1.0–8.0. Higher values
   increase memory use and OCR time proportionally. The Define Layout preview
   thumbnails always render at 2.0 regardless of this setting.
-- `CODEX_FINALIZE_MODEL` — model used by Codex OCR (Image Description). If the
-  key is missing or blank, NewOCR uses `gpt-5.4-mini`. Set another model name
-  only when your Codex account and provider support it. ChatGPT accounts do not
-  support API model names such as `gpt-4o-mini`; use names available in ChatGPT
-  (e.g. `gpt-5.5`, `gpt-5.4-mini`). An unsupported name shows an error in the
-  run log.
-- `CODEX_FINALIZE_PROMPT_FILE` — legacy key, no longer used by the current
-  Codex OCR feature. Kept for compatibility; may be removed in a future version.
+- `CODEX_FINALIZE_MODEL` — model used by Finalize with Codex. If the key is
+  missing or blank, NewOCR uses `gpt-5.4-mini`. Set another model name only when
+  your Codex account and provider support it. ChatGPT accounts do not support API
+  model names such as `gpt-4o-mini`; use names available in ChatGPT (e.g.
+  `gpt-5.5`, `gpt-5.4-mini`). An unsupported name shows an error in the run log.
+- `CODEX_FINALIZE_PROMPT_FILE` — path to the instruction file used by Finalize
+  with Codex. Defaults to `codex-finalize-prompt.txt` in the project folder.
 - `FOOTNOTE_POPUP_FONT_PERCENT` — font size percentage for the footnote popup
   shown in Preview when clicking a reference mark. Default `120`. Range: 60–300.
   The value is read each time Preview opens. Does not affect EPUB output.
