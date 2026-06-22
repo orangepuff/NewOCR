@@ -5363,11 +5363,11 @@ final class AppState: ObservableObject {
 
     func ocrPDFPreviewZoomPercent(for path: String) -> Double {
         let stored = ocrPDFPreviewZoomPercents[path] ?? ocrPDFPreviewLastZoomPercent
-        return min(max(stored, 100), 220)
+        return min(max(stored, 50), 220)
     }
 
     func setOCRPDFPreviewZoomPercent(_ value: Double, for path: String) {
-        let clampedValue = min(max(value, 100), 220)
+        let clampedValue = min(max(value, 50), 220)
         ocrPDFPreviewLastZoomPercent = clampedValue
         if !path.isEmpty {
             ocrPDFPreviewZoomPercents[path] = clampedValue
@@ -7915,7 +7915,7 @@ final class AppState: ObservableObject {
         logOutput = ""
         pdfTitles = defaults.dictionary(forKey: "pdfTitles") as? [String: String] ?? [:]
         ocrPDFPreviewZoomPercents = loadDoubleDictionary(forKey: "ocrPDFPreviewZoomPercents")
-        ocrPDFPreviewLastZoomPercent = min(max(defaults.double(forKey: "ocrPDFPreviewLastZoomPercent"), 100), 220)
+        ocrPDFPreviewLastZoomPercent = min(max(defaults.double(forKey: "ocrPDFPreviewLastZoomPercent"), 50), 220)
         frontCoverImagePath = defaults.string(forKey: "frontCoverImagePath") ?? ""
         backCoverImagePath = defaults.string(forKey: "backCoverImagePath") ?? ""
         epubStatus = ""
@@ -11138,6 +11138,25 @@ struct EmptyStateView: View {
     }
 }
 
+private struct SplitViewAutosaver: NSViewRepresentable {
+    let name: String
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            var candidate: NSView? = view.superview
+            while let v = candidate {
+                if let split = v as? NSSplitView, split.autosaveName != name {
+                    split.autosaveName = name
+                    return
+                }
+                candidate = v.superview
+            }
+        }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 struct StepTwoOCRView: View {
     @EnvironmentObject private var appState: AppState
     @State private var isFilesPopoverPresented = false
@@ -11304,10 +11323,11 @@ struct StepTwoOCRView: View {
 
             HSplitView {
                 markdownPane
-                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+                    .background(SplitViewAutosaver(name: "NewOCR.ocrEditorSplit"))
 
                 sidePane
-                    .frame(minWidth: 260, idealWidth: 300, maxWidth: 400, maxHeight: .infinity)
+                    .frame(minWidth: 260, idealWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -11587,7 +11607,7 @@ struct OCRPDFPreviewPanel: View {
                 OCRIconButton(title: "Zoom Out", systemImage: "minus.magnifyingglass", backgroundColor: Color.white.opacity(0.92), size: 34) {
                     setZoomPercent(zoomPercent - 15)
                 }
-                .disabled(pdfURL == nil || zoomPercent <= 100)
+                .disabled(pdfURL == nil || zoomPercent <= 50)
 
                 Text("\(Int(zoomPercent))%")
                     .font(.system(size: 13, weight: .semibold).monospacedDigit())
@@ -11652,7 +11672,7 @@ struct OCRPDFPreviewView: NSViewRepresentable {
     func makeNSView(context: Context) -> PDFView {
         let pdfView = DraggablePDFView()
         context.coordinator.pdfView = pdfView
-        pdfView.displayMode = .singlePage
+        pdfView.displayMode = .singlePageContinuous
         pdfView.displayBox = .cropBox
         pdfView.autoScales = false
         pdfView.backgroundColor = NSColor(calibratedWhite: 0.20, alpha: 1)
@@ -11671,12 +11691,11 @@ struct OCRPDFPreviewView: NSViewRepresentable {
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
         context.coordinator.pageIndex = $pageIndex
+        let draggablePDFView = pdfView as? DraggablePDFView
         if context.coordinator.url != url {
             context.coordinator.url = url
             context.coordinator.document = PDFDocument(url: url)
-            if let draggablePDFView = pdfView as? DraggablePDFView {
-                draggablePDFView.resetRememberedHorizontalOrigin()
-            }
+            draggablePDFView?.resetRememberedHorizontalOrigin()
             pdfView.document = context.coordinator.document
         }
 
@@ -11687,11 +11706,9 @@ struct OCRPDFPreviewView: NSViewRepresentable {
         }
 
         let clampedIndex = min(max(pageIndex, 0), document.pageCount - 1)
-        let draggablePDFView = pdfView as? DraggablePDFView
-        draggablePDFView?.rememberCurrentScrollOriginIfNeeded()
-        var changedPage = false
+        draggablePDFView?.rememberCurrentHorizontalOriginIfNeeded()
+
         if let page = document.page(at: clampedIndex), pdfView.currentPage !== page {
-            changedPage = true
             context.coordinator.isProgrammaticPageChange = true
             pdfView.go(to: page)
             context.coordinator.isProgrammaticPageChange = false
@@ -11703,7 +11720,7 @@ struct OCRPDFPreviewView: NSViewRepresentable {
             if abs(pdfView.scaleFactor - targetScale) > 0.01 {
                 pdfView.scaleFactor = targetScale
             }
-            draggablePDFView?.restoreRememberedScrollOrigin(preserveVertical: !changedPage)
+            draggablePDFView?.restoreRememberedHorizontalOrigin()
         }
     }
 
@@ -11734,51 +11751,38 @@ struct OCRPDFPreviewView: NSViewRepresentable {
 
 private final class DraggablePDFView: PDFView {
     private var rememberedHorizontalOrigin: CGFloat?
-    private var rememberedVerticalOrigin: CGFloat?
 
     override func scrollWheel(with event: NSEvent) {
         super.scrollWheel(with: event)
         DispatchQueue.main.async { [weak self] in
-            self?.rememberCurrentScrollOrigin()
+            self?.rememberCurrentHorizontalOrigin()
         }
     }
 
     func resetRememberedHorizontalOrigin() {
         rememberedHorizontalOrigin = nil
-        rememberedVerticalOrigin = nil
     }
 
-    func rememberCurrentScrollOriginIfNeeded() {
-        guard rememberedHorizontalOrigin == nil || rememberedVerticalOrigin == nil else { return }
-        rememberCurrentScrollOrigin()
+    func rememberCurrentHorizontalOriginIfNeeded() {
+        guard rememberedHorizontalOrigin == nil else { return }
+        rememberCurrentHorizontalOrigin()
     }
 
-    func restoreRememberedScrollOrigin(preserveVertical: Bool) {
+    func restoreRememberedHorizontalOrigin() {
         guard let rememberedHorizontalOrigin,
               let clipView = enclosingScrollView?.contentView,
-              let documentView = enclosingScrollView?.documentView else {
-            return
-        }
+              let documentView = enclosingScrollView?.documentView else { return }
         let maxX = max(documentView.bounds.width - clipView.bounds.width, 0)
-        let maxY = max(documentView.bounds.height - clipView.bounds.height, 0)
         let restoredX = min(max(rememberedHorizontalOrigin, 0), maxX)
         let currentOrigin = clipView.bounds.origin
-        let restoredY = preserveVertical
-            ? min(max(rememberedVerticalOrigin ?? currentOrigin.y, 0), maxY)
-            : currentOrigin.y
-        guard abs(currentOrigin.x - restoredX) > 0.5 || abs(currentOrigin.y - restoredY) > 0.5 else { return }
-        clipView.scroll(to: NSPoint(x: restoredX, y: restoredY))
+        guard abs(currentOrigin.x - restoredX) > 0.5 else { return }
+        clipView.scroll(to: NSPoint(x: restoredX, y: currentOrigin.y))
         enclosingScrollView?.reflectScrolledClipView(clipView)
     }
 
-    private func rememberCurrentScrollOrigin() {
+    private func rememberCurrentHorizontalOrigin() {
         guard let clipView = enclosingScrollView?.contentView else { return }
-        rememberScrollOrigin(clipView.bounds.origin)
-    }
-
-    private func rememberScrollOrigin(_ origin: NSPoint) {
-        rememberedHorizontalOrigin = origin.x
-        rememberedVerticalOrigin = origin.y
+        rememberedHorizontalOrigin = clipView.bounds.origin.x
     }
 }
 
@@ -12559,9 +12563,22 @@ struct FilesPopoverView: View {
     }
 }
 
+private struct ParagraphScrollPositionItem: Equatable {
+    let index: Int
+    let minY: CGFloat
+}
+
+private struct ParagraphScrollPositionKey: PreferenceKey {
+    static var defaultValue: [ParagraphScrollPositionItem] = []
+    static func reduce(value: inout [ParagraphScrollPositionItem], nextValue: () -> [ParagraphScrollPositionItem]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
 struct ParagraphEditorView: View {
     @EnvironmentObject private var appState: AppState
     @State private var handledOpenFocusRequestID = 0
+    @State private var scrollSyncTask: Task<Void, Never>?
 
     var body: some View {
         let visibleIndexes = appState.visibleOCRParagraphIndexes
@@ -12576,6 +12593,17 @@ struct ParagraphEditorView: View {
                         )
                         .environmentObject(appState)
                         .id(index)
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: ParagraphScrollPositionKey.self,
+                                    value: [ParagraphScrollPositionItem(
+                                        index: index,
+                                        minY: geo.frame(in: .named("ocrParagraphScroll")).minY
+                                    )]
+                                )
+                            }
+                        )
                     }
 
                     if visibleIndexes.isEmpty {
@@ -12601,6 +12629,22 @@ struct ParagraphEditorView: View {
                     }
                 }
             }
+            .onPreferenceChange(ParagraphScrollPositionKey.self) { items in
+                guard appState.ocrSearchText.isEmpty else { return }
+                // Find the paragraph nearest the top of the scroll view (minY closest to 0 from above)
+                let nearTop = items.filter { $0.minY >= -40 }
+                guard let topmost = nearTop.min(by: { abs($0.minY) < abs($1.minY) }) else { return }
+                let idx = topmost.index
+                scrollSyncTask?.cancel()
+                scrollSyncTask = Task {
+                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        guard appState.ocrSearchText.isEmpty else { return }
+                        appState.previewOCRParagraphSourcePage(idx)
+                    }
+                }
+            }
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -12608,6 +12652,9 @@ struct ParagraphEditorView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
         )
+        .onDisappear {
+            scrollSyncTask?.cancel()
+        }
     }
 
     private func focusFirstParagraph(with proxy: ScrollViewProxy) {

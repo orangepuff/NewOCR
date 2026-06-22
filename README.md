@@ -1182,7 +1182,8 @@ The window is a split editor:
 - left pane: Search Text, badges, paragraph/plain-text editor
 - right pane: PDF preview only
 - the split is resizable so the user can give more width to the text editor or
-  to the PDF preview as needed
+  to the PDF preview as needed; the divider position is remembered across sessions
+  via `NSSplitView.autosaveName` ("NewOCR.ocrEditorSplit")
 - the PDF preview control row shows the current source page as
   `Page 3 / 12` style text, alongside up/down page and zoom buttons
 - the `Page n / total` text updates when the user scrolls or drags the PDF
@@ -1196,9 +1197,9 @@ The window is a split editor:
   paragraph editor to paragraph 1, and show paragraph 1's source page in the PDF
   preview
 - OCR PDF preview zoom is remembered per selected section PDF file and persists
-  after closing and reopening the app. Default zoom is `100%` (fit to container).
-  If a section has no saved zoom yet, use the last OCR PDF preview zoom the user
-  chose. The OCR PDF preview zoom range is `100%` to `220%`.
+  after closing and reopening the app. Default zoom is `100%` (fit to container
+  width). If a section has no saved zoom yet, use the last OCR PDF preview zoom
+  the user chose. The OCR PDF preview zoom range is `50%` to `220%`.
 - Closed OCR and Compare windows must be removed from retained window lists and
   release their hosted views so editing many sections does not get slower over
   time.
@@ -1215,8 +1216,9 @@ Features:
 - Search Text
 - Replace All
 - icon-only status/focus shortcuts for Image, Footnote, and Blockquote
-- scrolling, focusing, or editing the paragraph list must not switch the PDF
-  preview page
+- scrolling the paragraph list automatically updates the PDF preview page: as the
+  user scrolls, the topmost visible paragraph's source page is sent to the PDF
+  preview (debounced 180 ms). This sync is suppressed while search text is active.
 - paragraph labels show source page numbers only for paragraphs known to come
   from OCR page output, for example `Paragraph 1 (Page 1)`; manual sections,
   newly inserted paragraphs, and paragraphs without a known OCR page keep the
@@ -1267,9 +1269,9 @@ Paragraph-to-PDF preview sync uses the per-page Markdown files in
 and gives the most accurate source-page mapping. Existing OCR output can still
 drive the preview when the original `page*.md` files are present; if older edits
 were previously flattened into one file, the preview falls back to that available
-page. Search/filter results do not move the PDF preview while the filtered list
-is scrolled; in search mode, the jump happens only when a paragraph editor
-receives focus or is edited.
+page. Scrolling the paragraph list automatically updates the PDF preview page
+(debounced 180 ms); while search text is active this sync is suppressed and the
+PDF page only changes when a paragraph editor receives focus.
 
 ## Markdown And Supported HTML
 
@@ -1741,8 +1743,8 @@ Key notes:
   percent is stored per section PDF path so returning to a file restores that
   file's last OCR preview zoom.
 - The OCR editor keeps an in-memory paragraph-to-source-page map when it loads
-  `page*.md`. Paragraph-list scrolling must not request a PDF preview jump.
-  Paragraph text focus/editing must not request a PDF preview jump either.
+  `page*.md`. Scrolling the paragraph list updates the PDF preview page
+  automatically (debounced 180 ms, suppressed while search is active).
   Saving edited Markdown should preserve known source pages by writing
   paragraphs back to their mapped `page*.md` files where possible.
 - Paragraph row titles use the known OCR source-page flag before appending
@@ -2101,13 +2103,16 @@ All pages for the selected section are stacked vertically inside a `GeometryRead
 
 The PDF preview panel in the OCR editor uses `PDFView` via `OCRPDFPreviewView`.
 
-- **Display mode**: `.singlePage` — shows one complete page at a time, scaled to fit both the width
-  and height of the preview panel. Previously `.singlePageContinuous` was used, which only fitted
-  the page width and required scrolling to see the full page.
-- **Scale**: `scaleFactorForSizeToFit * zoomScale`. With `zoomScale = 1.0` (100%), the page fills
-  the panel exactly. Zoom in/out buttons adjust `zoomScale` in 15% increments (min 100%, max 220%).
-- **Navigation**: `pdfView.go(to: page)` at the clamped `pageIndex`; the `Coordinator` listens to
-  `PDFViewPageChanged` to sync page number back to the binding.
+- **Display mode**: `.singlePageContinuous` — all pages flow vertically in one continuous scrollable
+  view. The user can scroll smoothly between pages with trackpad or mouse wheel. The page number
+  counter updates automatically via `PDFViewPageChanged` as pages scroll into view.
+- **Scale**: `scaleFactorForSizeToFit * zoomScale`. With `zoomScale = 1.0` (100%), each page fills
+  the panel width. Zoom in/out buttons adjust `zoomScale` in 15% increments (min 100%, max 220%).
+- **Navigation**: `pdfView.go(to: page)` at the clamped `pageIndex` for programmatic jumps (page
+  buttons, paragraph jump button); the `Coordinator` listens to `PDFViewPageChanged` to sync the
+  page counter back when the user scrolls.
+- **Horizontal position preservation**: `DraggablePDFView` tracks only horizontal scroll origin
+  (restored after zoom changes). Vertical position is managed entirely by PDFKit's continuous scroll.
 
 ## Performance Notes
 
