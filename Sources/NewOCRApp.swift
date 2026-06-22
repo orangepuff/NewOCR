@@ -11151,71 +11151,163 @@ struct StepTwoOCRView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .center, spacing: 16) {
+            HStack(alignment: .center, spacing: 10) {
+                // Icon
                 ZStack {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
+                        .frame(width: 48, height: 48)
                         .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
                     Image(systemName: "text.viewfinder")
-                        .font(.system(size: 28, weight: .semibold))
+                        .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(Color.black)
                 }
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("OCR")
-                        .font(.system(size: 31, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
+                Text("OCR")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(NewOCRMainPalette.headingText)
+
+                Rectangle()
+                    .fill(NewOCRMainPalette.stroke)
+                    .frame(width: 1, height: 32)
+                    .padding(.horizontal, 4)
+
+                // OCR action buttons
+                OCRIconButton(title: "Files", systemImage: "folder", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
+                    isFilesPopoverPresented.toggle()
+                }
+                .popover(isPresented: $isFilesPopoverPresented) {
+                    FilesPopoverView().environmentObject(appState)
                 }
 
-                Spacer(minLength: 10)
-
-                HStack(spacing: 8) {
-                    OCRIconButton(title: "Markdown syntax", systemImage: "info.circle", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
-                        isMarkdownInfoPopoverPresented.toggle()
-                    }
-                    .popover(isPresented: $isMarkdownInfoPopoverPresented) {
-                        MarkdownSyntaxPopoverView()
-                    }
-
-                    OCRIconButton(title: "Preview", systemImage: "eye", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
-                        appState.openOCRMarkdownPreviewWindow()
-                    }
-                    .disabled(appState.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
-
-                    OCRIconButton(title: "Compare", systemImage: "doc.text.magnifyingglass", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
-                        if let item = appState.selectedPDFFileItem {
-                            appState.openOCRCompareReport(for: item)
-                        }
-                    }
-                    .disabled(
-                        appState.selectedPDFFileItem.map { item in
-                            item.isManualSection || !appState.pureOCRSnapshotExists(for: item)
-                        } ?? true
+                OCRIconButton(title: "View Rules", systemImage: "list.bullet.rectangle", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
+                    isViewRulesPresented = true
+                }
+                .disabled(appState.selectedPDFPath.isEmpty)
+                .sheet(isPresented: $isViewRulesPresented) {
+                    LayoutAreasReportView(
+                        isPresented: $isViewRulesPresented,
+                        sectionFileName: appState.selectedPDFFileItem?.url.lastPathComponent
                     )
+                    .environmentObject(appState)
+                }
 
-                    OCRIconButton(title: "Save", systemImage: "square.and.arrow.down", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
-                        windowToCloseAfterSave = NSApp.keyWindow
-                        if appState.saveOCRTextFile() {
-                            isSaveAlertPresented = true
-                        } else {
-                            windowToCloseAfterSave = nil
+                OCRIconButton(title: "Run OCR", systemImage: appState.isOCRRunning ? "hourglass" : "text.viewfinder", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
+                    appState.sendSelectedPDFToOCREngine()
+                }
+                .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
+
+                OCRIconButton(title: "Log", systemImage: "terminal", backgroundColor: Color.white.opacity(0.92)) {
+                    appState.openOCRLogWindow()
+                }
+
+                if appState.isOCRRunning {
+                    OCRIconButton(title: appState.isOCRCancelling ? "Cancelling" : "Cancel OCR", systemImage: "stop.fill", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255)) {
+                        appState.cancelOCR()
+                    }
+                    .disabled(appState.isOCRCancelling)
+                }
+
+                Rectangle()
+                    .fill(NewOCRMainPalette.stroke)
+                    .frame(width: 1, height: 32)
+                    .padding(.horizontal, 4)
+
+                // File chip
+                Button {
+                    if !appState.selectedPDFPath.isEmpty && !appState.selectedItemIsManualSection {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: appState.selectedPDFPath))
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: appState.selectedItemIsManualSection ? "doc.text" : "doc.richtext")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.orange)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(appState.selectedItemIsManualSection ? "Manual Section" : "Ready for OCR")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            Text(appState.selectedPDFName)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(NewOCRMainPalette.primaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                         }
+                        Spacer(minLength: 0)
                     }
-                    .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(NewOCRMainPalette.fieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Open PDF")
+                .disabled(appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
+                .frame(maxWidth: .infinity)
 
-                    OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
-                        appState.closeOCRWindowsAndPreview(NSApp.keyWindow)
+                // Inline progress
+                if appState.isOCRRunning {
+                    HStack(spacing: 6) {
+                        ProgressView(value: appState.ocrProgressPercent ?? 0, total: 100)
+                            .frame(width: 90)
+                        Text("\(Int(appState.ocrProgressPercent ?? 0))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(NewOCRMainPalette.secondaryText)
+                            .frame(width: 34, alignment: .trailing)
                     }
+                }
+
+                Rectangle()
+                    .fill(NewOCRMainPalette.stroke)
+                    .frame(width: 1, height: 32)
+                    .padding(.horizontal, 4)
+
+                // Window action buttons
+                OCRIconButton(title: "Markdown syntax", systemImage: "info.circle", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
+                    isMarkdownInfoPopoverPresented.toggle()
+                }
+                .popover(isPresented: $isMarkdownInfoPopoverPresented) {
+                    MarkdownSyntaxPopoverView()
+                }
+
+                OCRIconButton(title: "Preview", systemImage: "eye", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
+                    appState.openOCRMarkdownPreviewWindow()
+                }
+                .disabled(appState.ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
+
+                OCRIconButton(title: "Compare", systemImage: "doc.text.magnifyingglass", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
+                    if let item = appState.selectedPDFFileItem {
+                        appState.openOCRCompareReport(for: item)
+                    }
+                }
+                .disabled(
+                    appState.selectedPDFFileItem.map { item in
+                        item.isManualSection || !appState.pureOCRSnapshotExists(for: item)
+                    } ?? true
+                )
+
+                OCRIconButton(title: "Save", systemImage: "square.and.arrow.down", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
+                    windowToCloseAfterSave = NSApp.keyWindow
+                    if appState.saveOCRTextFile() {
+                        isSaveAlertPresented = true
+                    } else {
+                        windowToCloseAfterSave = nil
+                    }
+                }
+                .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.localAppleVisionOutputFolderPathIfExists == nil)
+
+                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
+                    appState.closeOCRWindowsAndPreview(NSApp.keyWindow)
                 }
             }
 
             HSplitView {
                 markdownPane
-                    .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
 
                 sidePane
-                    .frame(minWidth: 300, idealWidth: 340, maxWidth: 440, maxHeight: .infinity)
+                    .frame(minWidth: 260, idealWidth: 300, maxWidth: 400, maxHeight: .infinity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -11397,102 +11489,11 @@ struct StepTwoOCRView: View {
         )
     }
 
+
     private var sidePane: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 11) {
-                HStack(spacing: 8) {
-                    OCRIconButton(title: "Files", systemImage: "folder", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
-                        isFilesPopoverPresented.toggle()
-                    }
-                    .popover(isPresented: $isFilesPopoverPresented) {
-                        FilesPopoverView()
-                            .environmentObject(appState)
-                    }
-
-                    OCRIconButton(title: "View Rules", systemImage: "list.bullet.rectangle", backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255), foregroundColor: .white) {
-                        isViewRulesPresented = true
-                    }
-                    .disabled(appState.selectedPDFPath.isEmpty)
-                    .sheet(isPresented: $isViewRulesPresented) {
-                        LayoutAreasReportView(
-                            isPresented: $isViewRulesPresented,
-                            sectionFileName: appState.selectedPDFFileItem?.url.lastPathComponent
-                        )
-                        .environmentObject(appState)
-                    }
-
-                    OCRIconButton(title: "Run OCR", systemImage: appState.isOCRRunning ? "hourglass" : "text.viewfinder", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
-                        appState.sendSelectedPDFToOCREngine()
-                    }
-                    .disabled(appState.isOCRRunning || appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
-
-                    OCRIconButton(title: "Log", systemImage: "terminal", backgroundColor: Color.white.opacity(0.92)) {
-                        appState.openOCRLogWindow()
-                    }
-
-                    if appState.isOCRRunning {
-                        OCRIconButton(title: appState.isOCRCancelling ? "Cancelling" : "Cancel OCR", systemImage: "stop.fill", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255)) {
-                            appState.cancelOCR()
-                        }
-                        .disabled(appState.isOCRCancelling)
-                    }
-                }
-
-                Text(appState.selectedItemIsManualSection ? "Manual Section" : "Ready for OCR")
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.headingText)
-
-                Button {
-                    if !appState.selectedPDFPath.isEmpty && !appState.selectedItemIsManualSection {
-                        NSWorkspace.shared.open(URL(fileURLWithPath: appState.selectedPDFPath))
-                    }
-                } label: {
-                    HStack(spacing: 9) {
-                        Image(systemName: appState.selectedItemIsManualSection ? "doc.text" : "doc.richtext")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(.orange)
-                        Text(appState.selectedPDFName)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(11)
-                    .background(NewOCRMainPalette.fieldBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-                .help("Open PDF")
-                .disabled(appState.selectedPDFPath.isEmpty || appState.selectedItemIsManualSection)
-
-                if appState.isOCRRunning {
-                    HStack(spacing: 8) {
-                        ProgressView(value: appState.ocrProgressPercent ?? 0, total: 100)
-                            .frame(maxWidth: .infinity)
-                        Text("\(Int(appState.ocrProgressPercent ?? 0))%")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(NewOCRMainPalette.secondaryText)
-                            .frame(width: 42, alignment: .trailing)
-                    }
-                }
-            }
-            .padding(14)
-            .background(NewOCRMainPalette.panelBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
-
-            OCRPDFPreviewPanel()
-                .environmentObject(appState)
-        }
-        .padding(.leading, 14)
+        OCRPDFPreviewPanel()
+            .environmentObject(appState)
+            .padding(.leading, 14)
     }
 
     private var replacePopover: some View {

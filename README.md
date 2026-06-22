@@ -1176,10 +1176,13 @@ and larger OCR editing text.
 
 The window is a split editor:
 
+- header row (single line): OCR icon + title, then Files / View Rules / Run OCR /
+  Log / Cancel (when running), then the selected file chip (expands to fill space),
+  then Info / Preview / Compare / Save / Close — all on one line
 - left pane: Search Text, badges, paragraph/plain-text editor
-- right pane: file/OCR controls, selected PDF chip, and PDF preview
+- right pane: PDF preview only
 - the split is resizable so the user can give more width to the text editor or
-  to the OCR controls and preview as needed
+  to the PDF preview as needed
 - the PDF preview control row shows the current source page as
   `Page 3 / 12` style text, alongside up/down page and zoom buttons
 - the `Page n / total` text updates when the user scrolls or drags the PDF
@@ -1715,12 +1718,13 @@ Key notes:
   Verify the header icon/title are fully visible below the macOS title bar, top
   commands are visible, controls are not clipped, and the preview/work area is
   using the available space. Do not rely only on compilation.
-- The OCR editor content uses `HSplitView`: the Markdown editor is the left
-  pane and OCR controls/PDF preview are the right pane. Preserve this split-pane layout
-  when making UI-only changes so the user can resize text vs. controls.
-- The OCR side toolbar does not include a Load Markdown button. Existing
-  Markdown is loaded when opening a processed section; the OCR editor's primary
-  side actions are Files, Run OCR, Log, and Cancel while running.
+- The OCR editor layout: a single header row containing all controls (OCR icon/title,
+  OCR action buttons, file chip, window action buttons), then an `HSplitView` with
+  the Markdown editor on the left and the PDF preview panel on the right. Preserve
+  this single-row header when making UI-only changes.
+- The OCR header does not include a Load Markdown button. Existing Markdown is loaded
+  when opening a processed section; the primary OCR actions are Files, View Rules,
+  Run OCR, Log, and Cancel while running.
 - The OCR top toolbar includes a Compare icon before Save when the selected
   non-manual section has a pure OCR snapshot.
 - The OCR search row uses a white rounded `Search Text` field with larger black
