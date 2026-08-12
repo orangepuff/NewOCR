@@ -468,6 +468,9 @@ final class LayoutAreaEditorState: ObservableObject {
     // Codex-detected text override for the current rule (shown and editable in the editor)
     @Published var codexText: String = ""
 
+    // Preview zoom (persisted per project via saveLayoutEditorState)
+    @Published var previewZoomScale: Double = 1.0
+
     // Auto Detect Image state
     @Published var autoDetectImageCandidates: [AutoDetectLocalCandidate] = []
     @Published var autoDetectImageResults: [AutoDetectImageResult] = []
@@ -5693,6 +5696,7 @@ final class AppState: ObservableObject {
         d.set(state.selectedPage, forKey: layoutEditorDefaultsKey("selectedPage"))
         d.set(state.selectedType, forKey: layoutEditorDefaultsKey("selectedType"))
         d.set(Array(state.selectedLayoutSectionPaths), forKey: layoutEditorDefaultsKey("selectedLayoutSectionPaths"))
+        d.set(state.previewZoomScale, forKey: layoutEditorDefaultsKey("previewZoomScale"))
     }
 
     func restoreLayoutEditorState(into state: LayoutAreaEditorState) {
@@ -5728,6 +5732,12 @@ final class AppState: ObservableObject {
             state.selectedLayoutSectionPaths = Set(paths).intersection(validPaths)
         } else if state.selectedScope == "all_sections" {
             state.selectedLayoutSectionPaths = []
+        }
+
+        // Restore zoom scale
+        let savedZoom = d.double(forKey: layoutEditorDefaultsKey("previewZoomScale"))
+        if savedZoom > 0 {
+            state.previewZoomScale = max(0.25, min(4.0, savedZoom))
         }
     }
 
@@ -18897,7 +18907,6 @@ struct LayoutAreaEditorWindowView: View {
     @State private var isSelectedSectionsPopoverPresented = false
     @State private var isLayoutAreasReportPresented = false
     @State private var pendingDuplicateRule: OCRLayoutAreaRule?
-    @State private var layoutZoomScale: CGFloat = 1.0  // kept for legacy; preview now always fits page
     @State private var previewImage: NSImage? = nil
     @State private var isPreviewLoading: Bool = false
     @State private var previewImageKey: String = ""
@@ -18948,9 +18957,17 @@ struct LayoutAreaEditorWindowView: View {
         }
         .onChange(of: state.selectedPDFPath) { _, _ in
             loadPreviewImageAsync()
+            // Reset selection when switching sections (skip if loadRule just set loadedRule)
+            if state.loadedRule == nil {
+                state.selectionRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
+            }
         }
         .onChange(of: state.selectedPage) { _, _ in
             loadPreviewImageAsync()
+            // Reset selection on page navigation (skip if loadRule triggered the page change)
+            if state.loadedRule == nil {
+                state.selectionRect = CGRect(x: 0.18, y: 0.18, width: 0.64, height: 0.18)
+            }
         }
         .onAppear {
             loadPreviewImageAsync()
@@ -19229,53 +19246,93 @@ struct LayoutAreaEditorWindowView: View {
             return AnyView(EmptyView())
         }
 
+        let selectedPage = state.selectedPage
         return AnyView(
-            ScrollView(.vertical, showsIndicators: true) {
-                LazyVStack(spacing: 10) {
-                    ForEach(1...totalPages, id: \.self) { page in
-                        let isSelected = state.selectedPage == page
-                        let thumb = appState.layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: page)
-                        VStack(spacing: 6) {
-                            Group {
-                                if let thumb {
-                                    Image(nsImage: thumb)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(maxWidth: .infinity)
-                                } else {
-                                    NewOCRMainPalette.fieldBackground
-                                        .frame(maxWidth: .infinity, minHeight: 100)
-                                }
-                            }
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(isSelected ? Color.accentColor : NewOCRMainPalette.stroke,
-                                            lineWidth: isSelected ? 2.5 : 1)
-                            )
-                            .shadow(color: Color.black.opacity(isSelected ? 0.25 : 0.08), radius: isSelected ? 6 : 2)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(spacing: 6) {
+                        ForEach(1...totalPages, id: \.self) { page in
+                            let isSelected = selectedPage == page
+                            let thumb = appState.layoutAreaPreviewImage(pdfURL: pdfURL, pageNumber: page)
+                            VStack(spacing: 5) {
+                                ZStack(alignment: .topTrailing) {
+                                    Group {
+                                        if let thumb {
+                                            Image(nsImage: thumb)
+                                                .resizable()
+                                                .scaledToFit()
+                                                .frame(maxWidth: .infinity)
+                                        } else {
+                                            Color(white: 0.18)
+                                                .frame(maxWidth: .infinity, minHeight: 80)
+                                        }
+                                    }
+                                    .clipShape(RoundedRectangle(cornerRadius: 5))
 
-                            Text("Page \(page)")
-                                .font(.system(size: 11, weight: isSelected ? .bold : .regular).monospacedDigit())
-                                .foregroundStyle(isSelected ? Color.accentColor : NewOCRMainPalette.secondaryText)
+                                    if isSelected {
+                                        Image(systemName: "eye.fill")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .padding(3)
+                                            .background(Color(red: 0.18, green: 0.55, blue: 1.0))
+                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                            .padding(4)
+                                    }
+                                }
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .stroke(
+                                            isSelected ? Color(red: 0.18, green: 0.55, blue: 1.0) : Color.white.opacity(0.12),
+                                            lineWidth: isSelected ? 2.5 : 1
+                                        )
+                                )
+
+                                Text("Page \(page)")
+                                    .font(.system(size: 10, weight: isSelected ? .bold : .regular).monospacedDigit())
+                                    .foregroundStyle(isSelected ? Color(red: 0.18, green: 0.55, blue: 1.0) : Color.white.opacity(0.5))
+                            }
+                            .id(page)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 7)
+                            .background(
+                                isSelected
+                                    ? Color(red: 0.18, green: 0.55, blue: 1.0).opacity(0.22)
+                                    : Color.white.opacity(0.04)
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .stroke(
+                                        isSelected ? Color(red: 0.18, green: 0.55, blue: 1.0).opacity(0.7) : Color.clear,
+                                        lineWidth: 1.5
+                                    )
+                            )
+                            .onTapGesture { state.selectedPage = page }
+                            .pointingHandCursor()
+                            .animation(.none, value: isSelected)
                         }
-                        .padding(8)
-                        .background(isSelected ? Color.accentColor.opacity(0.08) : NewOCRMainPalette.panelBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .onTapGesture { state.selectedPage = page }
-                        .pointingHandCursor()
+                    }
+                    .padding(6)
+                }
+                .frame(width: 140)
+                .frame(maxHeight: .infinity)
+                .background(Color(white: 0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+                .onChange(of: state.selectedPage) { _, newPage in
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo(newPage, anchor: .center)
                     }
                 }
-                .padding(8)
+                .onAppear {
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(selectedPage, anchor: .center)
+                    }
+                }
             }
-            .frame(width: 140)
-            .frame(maxHeight: .infinity)
-            .background(NewOCRMainPalette.fieldBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
         )
     }
 
@@ -19552,50 +19609,96 @@ struct LayoutAreaEditorWindowView: View {
     }
 
     private var preview: some View {
-        Group {
-            if let image = previewImage {
-                GeometryReader { proxy in
-                    let scaledWidth = max(proxy.size.width - 6, 1)
-                    let scaledHeight = scaledWidth * (image.size.height / max(image.size.width, 1))
-                    let imageFrame = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)
-                    ScrollView(.vertical, showsIndicators: true) {
-                        ZStack(alignment: .topLeading) {
-                            Image(nsImage: image)
-                                .resizable()
-                                .interpolation(.high)
-                                .scaledToFit()
-                                .frame(width: scaledWidth, height: scaledHeight, alignment: .topLeading)
-                                .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: 1)
-                                .id(displayedImageKey)
-                                .transition(.opacity)
-                            LayoutAreaOverlayView(
-                                selectionRect: $state.selectionRect,
-                                imageFrame: imageFrame,
-                                savedRules: state.allSavedRules,
-                                currentSectionName: state.selectedPDFName,
-                                currentPage: state.selectedPage
-                            )
-                        }
-                        .frame(width: scaledWidth, height: scaledHeight, alignment: .topLeading)
-                        .padding(.bottom, 18)
-                        .overlay(alignment: .topTrailing) {
-                            if isPreviewLoading {
-                                ProgressView().controlSize(.small).padding(8)
-                                    .background(NewOCRMainPalette.panelBackground.opacity(0.85))
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                    .padding(8)
+        VStack(spacing: 0) {
+            // Zoom toolbar
+            HStack(spacing: 8) {
+                Spacer()
+                Button {
+                    state.previewZoomScale = max(0.25, state.previewZoomScale - 0.25)
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+                .help("Zoom out")
+                .pointingHandCursor()
+
+                Button {
+                    state.previewZoomScale = 1.0
+                } label: {
+                    Text("\(Int(state.previewZoomScale * 100))%")
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .frame(minWidth: 44)
+                }
+                .buttonStyle(.plain)
+                .help("Reset to 100%")
+                .pointingHandCursor()
+
+                Button {
+                    state.previewZoomScale = min(4.0, state.previewZoomScale + 0.25)
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(NewOCRMainPalette.primaryText)
+                .help("Zoom in")
+                .pointingHandCursor()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(NewOCRMainPalette.panelBackground)
+
+            Divider().overlay(NewOCRMainPalette.stroke)
+
+            Group {
+                if let image = previewImage {
+                    GeometryReader { proxy in
+                        let fitWidth = max(proxy.size.width - 6, 1)
+                        let scaledWidth = fitWidth * CGFloat(state.previewZoomScale)
+                        let scaledHeight = scaledWidth * (image.size.height / max(image.size.width, 1))
+                        let imageFrame = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)
+                        ScrollView([.vertical, .horizontal], showsIndicators: true) {
+                            ZStack(alignment: .topLeading) {
+                                Image(nsImage: image)
+                                    .resizable()
+                                    .interpolation(.high)
+                                    .scaledToFit()
+                                    .frame(width: scaledWidth, height: scaledHeight, alignment: .topLeading)
+                                    .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: 1)
+                                    .id(displayedImageKey)
+                                    .transition(.opacity)
+                                LayoutAreaOverlayView(
+                                    selectionRect: $state.selectionRect,
+                                    imageFrame: imageFrame,
+                                    savedRules: state.allSavedRules,
+                                    currentSectionName: state.selectedPDFName,
+                                    currentPage: state.selectedPage
+                                )
+                            }
+                            .frame(width: scaledWidth, height: scaledHeight, alignment: .topLeading)
+                            .padding(.bottom, 18)
+                            .overlay(alignment: .topTrailing) {
+                                if isPreviewLoading {
+                                    ProgressView().controlSize(.small).padding(8)
+                                        .background(NewOCRMainPalette.panelBackground.opacity(0.85))
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .padding(8)
+                                }
                             }
                         }
+                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
                     }
-                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                } else {
+                    ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
+                        .foregroundStyle(NewOCRMainPalette.primaryText)
                 }
-            } else {
-                ContentUnavailableView("No PDF Preview", systemImage: "doc.richtext")
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
             }
+            .frame(minWidth: 0, minHeight: 420)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 0, minHeight: 460)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(NewOCRMainPalette.fieldBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
