@@ -26,55 +26,6 @@ private struct BookSectionEntry: Codable {
     var readyForEPUB: Bool?
 }
 
-struct FinalizeAIFileItem: Identifiable, Equatable {
-    let id: String
-    let markdownURL: URL
-    let sectionURL: URL
-    let sectionTitle: String
-
-    var displayName: String {
-        "\(sectionTitle) / \(markdownURL.lastPathComponent)"
-    }
-
-    var folderPath: String {
-        markdownURL.deletingLastPathComponent().path
-    }
-}
-
-final class FinalizeAISelectionState: ObservableObject {
-    @Published var items: [FinalizeAIFileItem]
-    @Published var selectedSectionTitles: Set<String> = []
-    @Published var status: String = ""
-    @Published var isRunning: Bool = false
-    @Published var codexLog: String = ""
-    @Published var codexReport: String = ""
-    @Published var savedLogURL: URL? = nil
-
-    init(items: [FinalizeAIFileItem]) {
-        self.items = items
-    }
-
-    var selectedItems: [FinalizeAIFileItem] {
-        items.filter { selectedSectionTitles.contains($0.sectionTitle) }
-    }
-
-    var selectedSectionCount: Int {
-        selectedSectionTitles.count
-    }
-
-    var sectionTitles: [String] {
-        var titles: [String] = []
-        for item in items where !titles.contains(item.sectionTitle) {
-            titles.append(item.sectionTitle)
-        }
-        return titles
-    }
-
-    func items(in sectionTitle: String) -> [FinalizeAIFileItem] {
-        items.filter { $0.sectionTitle == sectionTitle }
-    }
-}
-
 struct ImageDescOCRCandidate: Identifiable {
     let id = UUID()
     let sectionFileName: String     // e.g. "section-004.pdf"
@@ -84,7 +35,6 @@ struct ImageDescOCRCandidate: Identifiable {
     let mdFileURL: URL
     let rect: OCRLayoutAreaRect
     var originalText: String        // current *...* text from .md
-    var codexText: String = ""
     var isSelected: Bool = true
     var errorMessage: String = ""
 }
@@ -94,60 +44,6 @@ private struct SuperscriptCandidate {
     let label: String
     let rect: OCRLayoutAreaRect  // Y increases upward (top > bottom), Vision native coords
 }
-
-private struct TyphoonOCRChatResponse: Decodable {
-    struct Choice: Decodable {
-        struct Message: Decodable {
-            let content: String?
-        }
-        let message: Message
-    }
-
-    let choices: [Choice]
-}
-
-private let defaultCodexFinalizePrompt = """
-You are correcting existing OCR Markdown files for a scanned book EPUB workflow.
-This is a correction task, not a new OCR task.
-
-Do not ask follow-up questions.
-Do not explain, summarize, or include notes.
-Edit the actual listed page*.md files in place only.
-Do not create extra files.
-Do not edit PDFs or unrelated files.
-When finished successfully, reply only with this concise report format:
-
-NEWOCR_REPORT_BEGIN
-Edited files:
-- page1.md
-Changes:
-- Text corrections: short summary or "None"
-- Blank paragraphs added: short summary or "None"
-- Blockquotes fixed: short summary or "None"
-- Footnotes fixed: short summary or "None"
-Uncertain or skipped:
-- short summary or "None"
-NEWOCR_REPORT_END
-
-Do not include reasoning, debug logs, command transcripts, or OCR output in the report.
-
-Use the existing Markdown as the source text. Do not OCR the PDF again, do not transcribe full pages from scratch, and do not rebuild the Markdown structure wholesale. Inspect the matching PDF page only to verify or correct the existing Markdown and to identify missing layout features. Make only changes that are clearly supported by the PDF. If a word, line, note, or layout feature is uncertain, leave the existing Markdown unchanged.
-
-Do not detect, extract, crop, add, remove, or rename images. Image detection belongs to NewOCR's OCR process, not Codex Review. Preserve existing image Markdown unless the PDF clearly shows its surrounding text/caption formatting is wrong.
-
-Tasks:
-1. Correct OCR spelling, punctuation, spacing, capitalization, and broken word joins when the intended text is unambiguous.
-2. Preserve visibly empty paragraph gaps between text blocks. Add only a blank paragraph marker, represented as a separate Markdown paragraph containing exactly:
-<br/>
-3. Detect blockquotes only when the PDF clearly shows quoted/excerpted layout, such as deeper indentation, narrower text width, distinct spacing, different font style, or a quotation marker, and format them with `>`.
-4. Detect footnotes and fix footnote formatting when the PDF clearly shows note markers and matching note text. Preserve or convert footnotes to Markdown footnote syntax, for example `text[^1]` and `[^1]: note text`. Do not invent missing note text or renumber notes unless the PDF clearly supports it.
-
-Rules:
-- Preserve the author's exact meaning and wording.
-- Do not rewrite, paraphrase, modernize, translate, simplify, or replace valid words.
-- If uncertain, leave the Markdown unchanged.
-- Preserve existing Markdown features unless the PDF clearly shows they are wrong.
-"""
 
 private let defaultLayoutAreasJSON = """
 {
@@ -244,9 +140,6 @@ struct OCRLayoutAreaRule: Codable, Equatable, Identifiable {
     var markers: String?
     // For refmark: the exact word in the selected area after which [^markers] is inserted.
     var anchorWord: String?
-    // Codex-detected text for this area. When present, OCR uses this text directly
-    // instead of re-running Apple Vision on the area rectangle.
-    var codexText: String? = nil
     var isAuto: Bool? = nil
 }
 
@@ -272,8 +165,6 @@ final class LayoutAreaEditorState: ObservableObject {
     @Published var loadedRule: OCRLayoutAreaRule?
     @Published var markers: String = ""
     @Published var anchorWord: String = ""
-    // Codex-detected text override for the current rule (shown and editable in the editor)
-    @Published var codexText: String = ""
 
     // Preview zoom (persisted per project via saveLayoutEditorState)
     @Published var previewZoomScale: Double = 1.0
@@ -429,7 +320,6 @@ final class LayoutAreaEditorState: ObservableObject {
         self.selectionRect = selRect
         self.markers = rule.markers ?? ""
         self.anchorWord = rule.anchorWord ?? ""
-        self.codexText = rule.codexText ?? ""
     }
 
     func clearLoadedRule() {
@@ -677,6 +567,7 @@ final class AppState: ObservableObject {
     @Published var epubStatus: String = ""
     @Published var builtEPUBPath: String = ""
     @Published var isEPUBBuiltAlertPresented: Bool = false
+    @Published var epubRecipientEmail: String = ""
     @Published var isOCRSaveAlertPresented: Bool = false
     @Published var ocrSaveAlertMessage: String = ""
     @Published var isCSSAppliedAlertPresented: Bool = false
@@ -709,20 +600,9 @@ final class AppState: ObservableObject {
     @Published var addSplitWindowWidth: CGFloat = 920
     @Published var addSplitWindowHeight: CGFloat = 720
     @Published var shouldOpenAddSplitWindowFullScreen: Bool = true
-    @Published var codexFinalizePromptFile: String = "codex-finalize-prompt.txt"
-    @Published var codexFinalizeMaxSections: Int = 5
-    @Published var codexExecutablePath: String = "/Applications/Codex.app/Contents/Resources/codex"
-    private let defaultCodexFinalizeModel = "gpt-5.4-mini"
-    @Published var codexFinalizeModel: String = "gpt-5.4-mini"
-    @Published var typhoonOCRAPIKey: String = ""
-    @Published var typhoonOCRBaseURL: String = "https://api.opentyphoon.ai/v1"
-    @Published var typhoonOCRModel: String = "typhoon-ocr"
     @Published var newProjectsFolderPath: String = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Downloads", isDirectory: true)
         .path
-    @Published var autoDetectThumbWidth: CGFloat = 80
-    @Published var autoDetectThumbHeight: CGFloat = 104
-    @Published var autoDetectRenderScale: CGFloat = 2.0
 
     @Published private(set) var pdfFiles: [PDFFileItem] = []
 
@@ -730,12 +610,9 @@ final class AppState: ObservableObject {
     private var isRestoring = false
     private var ocrWindows: [NSWindow] = []
     private var ocrCompareWindows: [NSWindow] = []
-    private var finalizeAIWindows: [NSWindow] = []
-    private var finalizeAIInstructionWindows: [NSWindow] = []
     private var layoutAreaWindows: [NSWindow] = []
     private var pageThumbPreviewWindows: [NSWindow] = []
     private var configEditorWindows: [NSWindow] = []
-    private weak var codexFinalizeLogWindow: NSWindow?
     private var retainedWindowDelegates: [ObjectIdentifier: WindowCleanupDelegate] = [:]
     private weak var ocrPreviewWindow: NSWindow?
     private weak var ocrLogWindow: NSWindow?
@@ -1573,16 +1450,6 @@ final class AppState: ObservableObject {
         }
         ocrCompareWindows.removeAll()
 
-        for window in finalizeAIWindows {
-            forceCloseWindowAndAttachedSheets(window)
-        }
-        finalizeAIWindows.removeAll()
-
-        for window in finalizeAIInstructionWindows {
-            forceCloseWindowAndAttachedSheets(window)
-        }
-        finalizeAIInstructionWindows.removeAll()
-
         for window in layoutAreaWindows {
             forceCloseWindowAndAttachedSheets(window)
         }
@@ -1592,11 +1459,6 @@ final class AppState: ObservableObject {
             forceCloseWindowAndAttachedSheets(window)
         }
         configEditorWindows.removeAll()
-
-        if let logWin = codexFinalizeLogWindow {
-            forceCloseWindowAndAttachedSheets(logWin)
-            codexFinalizeLogWindow = nil
-        }
 
         for plannerState in detachedSplitPlannerStates {
             plannerState.closeAllWindows()
@@ -1618,461 +1480,8 @@ final class AppState: ObservableObject {
         ocrLogWindow = nil
     }
 
-    func openCodexFinalizeLogWindow(state: FinalizeAISelectionState) {
-        if let codexFinalizeLogWindow {
-            codexFinalizeLogWindow.makeKeyAndOrderFront(nil)
-            return
-        }
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Codex Log"
-        window.center()
-        window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(
-            rootView: CodexFinalizeLogWindowView(state: state)
-                .environmentObject(self)
-        )
-        codexFinalizeLogWindow = window
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func closeCodexFinalizeLogWindow() {
-        codexFinalizeLogWindow?.close()
-        codexFinalizeLogWindow = nil
-    }
-
-    private func codexReviewLogURL() -> URL? {
-        guard !selectedFolderPath.isEmpty else { return nil }
-        return URL(fileURLWithPath: selectedFolderPath)
-            .appendingPathComponent("AppleVision")
-            .appendingPathComponent("codex-review-log.txt")
-    }
-
-    private func writeCodexLog(_ log: String) throws -> URL {
-        guard let url = codexReviewLogURL() else {
-            throw NSError(
-                domain: "NewOCR.CodexFinalize",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "No project folder selected."]
-            )
-        }
-        let folder = url.deletingLastPathComponent()
-        if !FileManager.default.fileExists(atPath: folder.path) {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        }
-        try log.write(to: url, atomically: true, encoding: .utf8)
-        return url
-    }
-
-    func autoSaveCodexLog(state: FinalizeAISelectionState, finishedStatus: String) {
-        do {
-            let url = try writeCodexLog(state.codexLog)
-            state.savedLogURL = url
-            state.status = "\(finishedStatus) Log saved."
-        } catch {
-            state.savedLogURL = nil
-            state.status = "\(finishedStatus) Could not save log: \(error.localizedDescription)"
-            state.codexLog += "\n\n--- Log Save Error ---\n\(error.localizedDescription)"
-        }
-    }
-
-    func clearCodexLogFile() {
-        guard let url = codexReviewLogURL() else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
-
     func openConfigEditor() {
         openTextConfig(title: "Config File", url: configFileURL)
-    }
-
-    func openCodexFinalizeInstruction() {
-        do {
-            let url = try ensureCodexFinalizePromptFile()
-            openCodexFinalizeInstructionWindow(url: url)
-        } catch {
-            configStatus = "Could not open Codex instruction: \(error.localizedDescription)"
-        }
-    }
-
-    private func openCodexFinalizeInstructionWindow(url: URL) {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 620),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Codex Finalize Instruction"
-        window.contentMinSize = NSSize(width: 640, height: 460)
-        window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(
-            rootView: CodexFinalizeInstructionWindowView(promptURL: url)
-                .environmentObject(self)
-        )
-        window.center()
-        finalizeAIInstructionWindows.append(window)
-        trackRetainedWindow(window)
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func openFinalizeAIWindow() {
-        loadAppConfigValues()
-        guard !selectedFolderPath.isEmpty else {
-            showAlert(title: "No Project Selected", message: "Open a NewOCR project folder before finalizing Markdown with Codex.")
-            return
-        }
-
-        do {
-            _ = try ensureCodexFinalizePromptFile()
-        } catch {
-            showAlert(title: "Codex Instruction Not Ready", message: error.localizedDescription)
-            return
-        }
-
-        let items = finalizeAIFileItems()
-        guard !items.isEmpty else {
-            showAlert(title: "No Markdown Files", message: "Process OCR first so NewOCR has page Markdown files to finalize.")
-            return
-        }
-
-        let state = FinalizeAISelectionState(items: items)
-        state.status = "Select up to \(codexFinalizeMaxSections) sections."
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1160, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Codex Review"
-        window.contentMinSize = NSSize(width: 980, height: 620)
-        window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(
-            rootView: FinalizeAIWindowView(state: state)
-                .environmentObject(self)
-        )
-        window.center()
-        finalizeAIWindows.append(window)
-        trackRetainedWindow(window)
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func finalizeAIFileItems() -> [FinalizeAIFileItem] {
-        pdfFiles.flatMap { item -> [FinalizeAIFileItem] in
-            let folderURL = markdownFolderURL(for: item)
-            let files = appleVisionMarkdownPageFiles(in: folderURL)
-            guard !files.isEmpty else { return [] }
-            let sectionTitle = sectionListDisplayName(for: item)
-            return files.map { fileURL in
-                FinalizeAIFileItem(
-                    id: fileURL.path,
-                    markdownURL: fileURL,
-                    sectionURL: item.url,
-                    sectionTitle: sectionTitle
-                )
-            }
-        }
-    }
-
-    func canSelectFinalizeAISection(_ sectionTitle: String, in state: FinalizeAISelectionState) -> Bool {
-        state.selectedSectionTitles.contains(sectionTitle) || state.selectedSectionTitles.count < max(1, codexFinalizeMaxSections)
-    }
-
-    func toggleFinalizeAISection(_ sectionTitle: String, in state: FinalizeAISelectionState) {
-        if state.selectedSectionTitles.contains(sectionTitle) {
-            state.selectedSectionTitles.remove(sectionTitle)
-            state.status = "\(state.selectedSectionCount) sections selected."
-        } else if state.selectedSectionTitles.count < max(1, codexFinalizeMaxSections) {
-            state.selectedSectionTitles.insert(sectionTitle)
-            state.status = "\(state.selectedSectionCount) sections selected."
-        } else {
-            state.status = "Select up to \(max(1, codexFinalizeMaxSections)) sections."
-        }
-    }
-
-    func openFinalizeAIFolder(for item: FinalizeAIFileItem) {
-        NSWorkspace.shared.activateFileViewerSelecting([item.markdownURL, item.sectionURL])
-    }
-
-    func openFinalizeAIPDF(for item: FinalizeAIFileItem) {
-        NSWorkspace.shared.open(item.sectionURL)
-    }
-
-    func previewFinalizeAIFile(_ item: FinalizeAIFileItem) {
-        do {
-            loadAppConfigValues()
-            let markdown = try String(contentsOf: item.markdownURL, encoding: .utf8)
-            let previewURL = item.markdownURL
-                .deletingLastPathComponent()
-                .appendingPathComponent("\(item.markdownURL.deletingPathExtension().lastPathComponent)-codex-preview.html")
-            try previewHTML(for: markdown).write(to: previewURL, atomically: true, encoding: .utf8)
-            closeOCRMarkdownPreviewWindow()
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 820, height: 720),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = "Preview - \(item.markdownURL.lastPathComponent)"
-            window.center()
-            window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(
-                rootView: OCRMarkdownPreviewWindowView(
-                    previewURL: previewURL,
-                    readAccessURL: item.markdownURL.deletingLastPathComponent()
-                )
-            )
-            ocrPreviewWindow = window
-            window.makeKeyAndOrderFront(nil)
-        } catch {
-            showAlert(title: "Preview Failed", message: error.localizedDescription)
-        }
-    }
-
-    func runCodexFinalize(for items: [FinalizeAIFileItem], state: FinalizeAISelectionState) {
-        let limit = max(1, codexFinalizeMaxSections)
-        guard !items.isEmpty else {
-            state.status = "Select at least one section."
-            return
-        }
-        guard state.selectedSectionCount <= limit else {
-            state.status = "Select up to \(limit) sections."
-            return
-        }
-        guard !state.isRunning else { return }
-
-        do {
-            let prompt = try codexFinalizePrompt(for: items)
-            let selectedFolderPath = selectedFolderPath
-            let executable = codexExecutablePath
-            let model = codexFinalizeModel
-            clearCodexLogFile()
-            state.isRunning = true
-            state.savedLogURL = nil
-            state.codexReport = ""
-            state.codexLog = "Starting Codex on \(state.selectedSectionCount) section(s)...\nExecutable: \(executable)\nModel: \(model)\nProject: \(selectedFolderPath)\n\n"
-            state.status = "Running Codex on \(state.selectedSectionCount) section(s)..."
-            openCodexFinalizeLogWindow(state: state)
-            DispatchQueue.global(qos: .userInitiated).async {
-                let result = self.runCodexExec(prompt: prompt, projectPath: selectedFolderPath, executablePath: executable, model: model) { text in
-                    DispatchQueue.main.async {
-                        state.codexLog += text
-                    }
-                }
-                DispatchQueue.main.async {
-                    state.isRunning = false
-                    switch result {
-                    case .success(let output):
-                        let summary = output.isEmpty ? "Codex finished. Markdown files were edited in place." : "Codex finished."
-                        state.status = summary
-                        state.codexReport = self.codexFinalizeReport(from: output)
-                        if !output.isEmpty {
-                            state.codexLog += "\n\n--- Done ---\n\(output)"
-                        } else {
-                            state.codexLog += "\n\n--- Done ---"
-                        }
-                        self.autoSaveCodexLog(state: state, finishedStatus: summary)
-                        self.showAlert(title: "Codex Review Finished", message: state.codexReport)
-                    case .failure(let error):
-                        let summary = "Codex failed: \(error.localizedDescription)"
-                        state.status = summary
-                        state.codexLog += "\n\n--- Error ---\n\(error.localizedDescription)"
-                        self.autoSaveCodexLog(state: state, finishedStatus: summary)
-                    }
-                }
-            }
-        } catch {
-            state.status = "Could not run Codex: \(error.localizedDescription)"
-        }
-    }
-
-    private func codexFinalizeReport(from output: String) -> String {
-        let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedOutput.isEmpty else {
-            return "Codex finished. Markdown files were edited in place."
-        }
-
-        let beginMarker = "NEWOCR_REPORT_BEGIN"
-        let endMarker = "NEWOCR_REPORT_END"
-        if let beginRange = trimmedOutput.range(of: beginMarker),
-           let endRange = trimmedOutput.range(of: endMarker, range: beginRange.upperBound..<trimmedOutput.endIndex) {
-            let report = trimmedOutput[beginRange.upperBound..<endRange.lowerBound]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !report.isEmpty {
-                return report
-            }
-        }
-
-        return "Codex finished. Markdown files were edited in place.\n\nNo concise report block was found. Use Download Log to inspect the full Codex output."
-    }
-
-    private func runCodexExec(prompt: String, projectPath: String, executablePath: String, model: String = "", onOutput: ((String) -> Void)? = nil) -> Result<String, Error> {
-        do {
-            let process = Process()
-            let expandedExecutable = (executablePath.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
-
-            var codexArgs = [
-                "exec",
-                "--skip-git-repo-check",
-                "--sandbox", "workspace-write",
-                "-c", "shell_environment_policy.inherit=all",
-            ]
-            if !model.isEmpty {
-                codexArgs += ["-m", model]
-            }
-            codexArgs += ["--cd", projectPath, prompt]
-
-            if expandedExecutable.hasPrefix("/") {
-                process.executableURL = URL(fileURLWithPath: expandedExecutable)
-                process.arguments = codexArgs
-            } else {
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                process.arguments = [expandedExecutable.isEmpty ? "codex" : expandedExecutable] + codexArgs
-            }
-            process.currentDirectoryURL = URL(fileURLWithPath: projectPath, isDirectory: true)
-
-            // Inherit a richer environment than what Launch Services provides.
-            // Pull HOME, USER, TMPDIR, PATH, and CODEX_HOME so auth and temp
-            // dirs resolve correctly when the app is opened from Finder/Dock.
-            var env = ProcessInfo.processInfo.environment
-            if env["HOME"] == nil {
-                env["HOME"] = NSHomeDirectory()
-            }
-            if env["TMPDIR"] == nil {
-                env["TMPDIR"] = NSTemporaryDirectory()
-            }
-            if env["CODEX_HOME"] == nil {
-                env["CODEX_HOME"] = (NSHomeDirectory() as NSString).appendingPathComponent(".codex")
-            }
-            // Broaden PATH so Codex can locate Homebrew binaries.
-            let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-            let existingPath = env["PATH"] ?? ""
-            let mergedPath = (extraPaths + existingPath.split(separator: ":").map(String.init))
-                .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-                .joined(separator: ":")
-            env["PATH"] = mergedPath
-            process.environment = env
-
-            let stdout = Pipe()
-            let stderr = Pipe()
-            var accumulatedOutput = ""
-            var accumulatedError = ""
-            let lock = NSLock()
-            let pipeGroup = DispatchGroup()
-
-            // Close stdin so Codex does not block waiting for interactive input.
-            process.standardInput = FileHandle.nullDevice
-
-            pipeGroup.enter()
-            stdout.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if data.isEmpty {
-                    // EOF — all stdout data has been delivered
-                    stdout.fileHandleForReading.readabilityHandler = nil
-                    pipeGroup.leave()
-                    return
-                }
-                if let text = String(data: data, encoding: .utf8) {
-                    lock.lock()
-                    accumulatedOutput += text
-                    lock.unlock()
-                    onOutput?(text)
-                }
-            }
-
-            pipeGroup.enter()
-            stderr.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if data.isEmpty {
-                    // EOF — all stderr data has been delivered
-                    stderr.fileHandleForReading.readabilityHandler = nil
-                    pipeGroup.leave()
-                    return
-                }
-                if let text = String(data: data, encoding: .utf8) {
-                    lock.lock()
-                    accumulatedError += text
-                    lock.unlock()
-                    onOutput?("[stderr] " + text)
-                }
-            }
-
-            process.standardOutput = stdout
-            process.standardError = stderr
-            try process.run()
-            process.waitUntilExit()
-
-            // Wait for both pipe handlers to reach EOF so no data is lost.
-            _ = pipeGroup.wait(timeout: .now() + 30)
-
-            let output = accumulatedOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-            let errorOutput = accumulatedError.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard process.terminationStatus == 0 else {
-                throw NSError(
-                    domain: "NewOCR.CodexFinalize",
-                    code: Int(process.terminationStatus),
-                    userInfo: [NSLocalizedDescriptionKey: errorOutput.isEmpty ? "Codex exited with status \(process.terminationStatus)." : errorOutput]
-                )
-            }
-            return .success(output)
-        } catch {
-            return .failure(error)
-        }
-    }
-
-    private func codexFinalizePrompt(for items: [FinalizeAIFileItem]) throws -> String {
-        let instructionURL = try ensureCodexFinalizePromptFile()
-        let instruction = try String(contentsOf: instructionURL, encoding: .utf8)
-        let grouped = Dictionary(grouping: items, by: \.sectionTitle)
-        let sectionList = grouped.keys.sorted().map { sectionTitle in
-            let sectionItems = (grouped[sectionTitle] ?? []).sorted { left, right in
-                left.markdownURL.lastPathComponent.localizedStandardCompare(right.markdownURL.lastPathComponent) == .orderedAscending
-            }
-            let markdownList = sectionItems.map { "    - \($0.markdownURL.path)" }.joined(separator: "\n")
-            let pdfURL = sectionItems.first?.sectionURL
-
-            return """
-            - Section: \(sectionTitle)
-              PDF path: \(pdfURL?.path ?? "")
-              Markdown page files to edit in place:
-            \(markdownList)
-            """
-        }.joined(separator: "\n")
-
-        return """
-        \(instruction)
-
-        NewOCR Codex finalize task:
-        You can access the local filesystem. Edit only the listed Markdown files directly in place. Do not create alternate files.
-
-        Selected sections:
-        \(sectionList)
-        """
-    }
-
-    private var codexFinalizePromptURL: URL {
-        let rawValue = codexFinalizePromptFile.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fileName = rawValue.isEmpty ? "codex-finalize-prompt.txt" : rawValue
-        let expanded = (fileName as NSString).expandingTildeInPath
-        if expanded.hasPrefix("/") {
-            return URL(fileURLWithPath: expanded)
-        } else {
-            return configFileURL.deletingLastPathComponent().appendingPathComponent(fileName)
-        }
-    }
-
-    private func ensureCodexFinalizePromptFile() throws -> URL {
-        let url = codexFinalizePromptURL
-        if !FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path) {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        }
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try defaultCodexFinalizePrompt.write(to: url, atomically: true, encoding: .utf8)
-        }
-        return url
     }
 
     func chooseFrontCoverImage() {
@@ -2820,30 +2229,29 @@ final class AppState: ObservableObject {
         }
     }
 
-    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil, anchorWord: String? = nil, codexText: String? = nil, isAuto: Bool = false) throws -> Int {
+    func saveLayoutAreaRules(type: String, scope: String, currentSectionURL: URL, selectedSectionURLs: [URL], pageNumber: Int, rect: OCRLayoutAreaRect, markers: String? = nil, anchorWord: String? = nil, isAuto: Bool = false) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
         let cleanScope = scope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let cleanMarkers = markers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let cleanAnchorWord = anchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let cleanCodexText = codexText.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
             rules = [
-                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+                OCRLayoutAreaRule(type: type, scope: "all_sections", section: nil, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, isAuto: isAuto)
             ]
         case "selected_sections":
             rules = selectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+                OCRLayoutAreaRule(type: type, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, isAuto: isAuto)
             }
         case "page":
             rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: pageNumber, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, isAuto: isAuto)
             ]
         default:
             rules = [
-                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+                OCRLayoutAreaRule(type: type, scope: nil, section: currentSectionURL.lastPathComponent, page: nil, rect: rect, markers: cleanMarkers, anchorWord: cleanAnchorWord, isAuto: isAuto)
             ]
         }
         areas.rules.append(contentsOf: rules)
@@ -2851,7 +2259,7 @@ final class AppState: ObservableObject {
         return areas.rules.count
     }
 
-    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect, newMarkers: String? = nil, newAnchorWord: String? = nil, newCodexText: String? = nil, isAuto: Bool = false) throws -> Int {
+    func updateLayoutAreaRule(_ oldRule: OCRLayoutAreaRule, with newType: String, newScope: String, newCurrentSectionURL: URL, newSelectedSectionURLs: [URL], newPageNumber: Int, newRect: OCRLayoutAreaRect, newMarkers: String? = nil, newAnchorWord: String? = nil, isAuto: Bool = false) throws -> Int {
         let url = try ensureLayoutAreasFile()
         var areas = try loadLayoutAreasFileForEditing(from: url)
         if let index = areas.rules.firstIndex(of: oldRule) {
@@ -2860,24 +2268,23 @@ final class AppState: ObservableObject {
         let cleanScope = newScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let cleanMarkers = newMarkers.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let cleanAnchorWord = newAnchorWord.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let cleanCodexText = newCodexText.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let rules: [OCRLayoutAreaRule]
         switch cleanScope {
         case "all_sections":
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+                OCRLayoutAreaRule(type: newType, scope: "all_sections", section: nil, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, isAuto: isAuto)
             ]
         case "selected_sections":
             rules = newSelectedSectionURLs.map { sectionURL in
-                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: sectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, isAuto: isAuto)
             }
         case "page":
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: newPageNumber, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, isAuto: isAuto)
             ]
         default:
             rules = [
-                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, codexText: cleanCodexText, isAuto: isAuto)
+                OCRLayoutAreaRule(type: newType, scope: nil, section: newCurrentSectionURL.lastPathComponent, page: nil, rect: newRect, markers: cleanMarkers, anchorWord: cleanAnchorWord, isAuto: isAuto)
             ]
         }
         areas.rules.append(contentsOf: rules)
@@ -3672,6 +3079,17 @@ final class AppState: ObservableObject {
         }
     }
 
+    func sendEPUBByEmail() {
+        let path = !builtEPUBPath.isEmpty ? builtEPUBPath : (bookEPUBFilePathIfExists ?? "")
+        guard !path.isEmpty, !epubRecipientEmail.isEmpty else { return }
+        let epubURL = URL(fileURLWithPath: path)
+        let subject = epubURL.deletingPathExtension().lastPathComponent
+        guard let service = NSSharingService(named: .composeEmail) else { return }
+        service.recipients = [epubRecipientEmail]
+        service.subject = subject
+        service.perform(withItems: [epubURL])
+    }
+
     func openOCRMarkdownPreviewWindow() {
         guard let markdownFolderURL = localAppleVisionOutputFolderURL else {
             ocrStatus = "No PDF selected."
@@ -3766,8 +3184,6 @@ final class AppState: ObservableObject {
             closedWindow.contentView = nil
             self.ocrWindows.removeAll { $0 === closedWindow }
             self.ocrCompareWindows.removeAll { $0 === closedWindow }
-            self.finalizeAIWindows.removeAll { $0 === closedWindow }
-            self.finalizeAIInstructionWindows.removeAll { $0 === closedWindow }
             self.layoutAreaWindows.removeAll { $0 === closedWindow }
             self.configEditorWindows.removeAll { $0 === closedWindow }
             self.retainedWindowDelegates.removeValue(forKey: ObjectIdentifier(closedWindow))
@@ -6162,11 +5578,6 @@ final class AppState: ObservableObject {
         for rule in descRules {
             let label = rule.markers?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !label.isEmpty else { continue }
-            // Use Codex-saved caption text when available; fall back to Vision line matching.
-            if let codexText = rule.codexText, !codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result[label] = codexText.trimmingCharacters(in: .whitespacesAndNewlines)
-                continue
-            }
             let matchingLines = ocrLines
                 .filter { lineOverlapsLayoutArea($0, rule.rect, threshold: 0.18) }
                 .sorted { $0.top > $1.top }
@@ -6215,146 +5626,6 @@ final class AppState: ObservableObject {
         return data.base64EncodedString()
     }
 
-    private func typhoonOCRPrompt(figureLanguage: String = "Thai") -> String {
-        """
-        Extract all text from the image.
-
-
-        Instructions:
-        - Only return the clean Markdown.
-        - Do not include any explanation or extra text.
-        - You must include all information on the page.
-
-
-        Formatting Rules:
-        - Tables: Render tables using <table>...</table> in clean HTML format.
-        - Equations: Render equations using LaTeX syntax with inline ($...$) and block ($$...$$).
-        - Images/Charts/Diagrams: Wrap any clearly defined visual areas (e.g. charts, diagrams, pictures) in:
-
-
-        <figure>
-        Describe the image's main elements (people, objects, text), note any contextual clues (place, event, culture), mention visible text and its meaning, provide deeper analysis when relevant (especially for financial charts, graphs, or documents), comment on style or architecture if relevant, then give a concise overall summary. Describe in \(figureLanguage).
-        </figure>
-
-
-        - Page Numbers: Wrap page numbers in <page_number>...</page_number> (e.g., <page_number>14</page_number>).
-        - Checkboxes: Use ☐ for unchecked and ☑ for checked boxes.
-        """
-    }
-
-    private func typhoonOCRMarkdown(from page: PDFPage, scale: CGFloat = 2.5, figureLanguage: String = "Thai") -> String? {
-        let apiKey = typhoonOCRAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !apiKey.isEmpty else { return nil }
-        guard let image = try? renderPDFPageToCGImage(page, scale: scale) else { return nil }
-        guard let imageBase64 = try? pngBase64String(from: image) else { return nil }
-        guard let baseURL = URL(string: typhoonOCRBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "https://api.opentyphoon.ai/v1") else {
-            return nil
-        }
-        guard let endpointURL = URL(string: "/chat/completions", relativeTo: baseURL) else { return nil }
-
-        let prompt = typhoonOCRPrompt(figureLanguage: figureLanguage)
-        let body: [String: Any] = [
-            "model": typhoonOCRModel.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "typhoon-ocr",
-            "messages": [
-                [
-                    "role": "user",
-                    "content": [
-                        [
-                            "type": "text",
-                            "text": prompt
-                        ],
-                        [
-                            "type": "image_url",
-                            "image_url": [
-                                "url": "data:image/png;base64,\(imageBase64)"
-                            ]
-                        ]
-                    ]
-                ]
-            ],
-            "max_tokens": 16384,
-            "temperature": 0.1,
-            "top_p": 0.6,
-            "repetition_penalty": 1.1
-        ]
-
-        guard let requestData = try? JSONSerialization.data(withJSONObject: body, options: []) else {
-            return nil
-        }
-
-        var request = URLRequest(url: endpointURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = requestData
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 120
-        configuration.timeoutIntervalForResource = 120
-        let session = URLSession(configuration: configuration)
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var resultMarkdown: String?
-        var resultError: Error?
-
-        session.dataTask(with: request) { data, response, error in
-            defer { semaphore.signal() }
-            if let error {
-                resultError = error
-                return
-            }
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200...299).contains(httpResponse.statusCode),
-                  let data else {
-                resultError = NSError(domain: "NewOCR", code: 8, userInfo: [NSLocalizedDescriptionKey: "Typhoon OCR request failed."])
-                return
-            }
-
-            if let decoded = try? JSONDecoder().decode(TyphoonOCRChatResponse.self, from: data),
-               let content = decoded.choices.first?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !content.isEmpty {
-                resultMarkdown = content
-                return
-            }
-
-            resultError = NSError(domain: "NewOCR", code: 9, userInfo: [NSLocalizedDescriptionKey: "Typhoon OCR response could not be decoded."])
-        }.resume()
-
-        semaphore.wait()
-        if resultError != nil {
-            return nil
-        }
-        return resultMarkdown
-    }
-
-    private func typhoonOCRMarkdown(for page: PDFPage, figureLanguage: String = "Thai") -> String? {
-        let scale = max(2.5, autoDetectRenderScale)
-        return typhoonOCRMarkdown(from: page, scale: scale, figureLanguage: figureLanguage)
-    }
-
-    private func saveTyphoonOCRDebugMarkdown(
-        _ markdown: String,
-        projectURL: URL,
-        kind: String,
-        sectionStem: String,
-        pageNumber: Int
-    ) {
-        let debugFolder = projectURL
-            .appendingPathComponent("AppleVision/TyphoonOCR-debug", isDirectory: true)
-            .appendingPathComponent(kind, isDirectory: true)
-            .appendingPathComponent(sectionStem, isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: debugFolder, withIntermediateDirectories: true)
-            let fileURL = debugFolder.appendingPathComponent("page\(pageNumber).md")
-            try markdown.write(to: fileURL, atomically: true, encoding: .utf8)
-        } catch {
-            // Debug output only; ignore failures.
-        }
-    }
-
-    // Draws a labeled 10×10 coordinate grid onto a CGImage so Codex can read
-    // off normalized (0.0–1.0) coordinates precisely. Only used for images sent
-    // to Codex — never shown to the user.
     private func overlayCoordinateGrid(_ source: CGImage) -> CGImage {
         let w = source.width
         let h = source.height
@@ -7206,33 +6477,7 @@ final class AppState: ObservableObject {
         italicRules: [OCRLayoutAreaRule] = [],
         indentFraction: CGFloat = 0.04
     ) -> String {
-        // Pre-process: rules with codexText replace Vision-recognized lines with saved Codex text.
-        // Remove OCR lines overlapping those rules and inject synthetic lines carrying the Codex text.
-        // Injected lines fall inside the rule rects, so the block-classifier below picks them up normally.
-        let codexTextRules = (headerRules + h2Rules + header3Rules + blockquoteRules + footnoteRules)
-            .filter { !($0.codexText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        var effectiveLines: [OCRLine]
-        if codexTextRules.isEmpty {
-            effectiveLines = lines
-        } else {
-            var filtered = lines
-            var injected: [OCRLine] = []
-            for rule in codexTextRules {
-                filtered = filtered.filter { !lineOverlapsLayoutArea($0, rule.rect, threshold: 0.45) }
-                let rawTextLines = (rule.codexText ?? "")
-                    .components(separatedBy: "\n")
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                let rectHeight = max(0.001, rule.rect.top - rule.rect.bottom)
-                let lineStep = rawTextLines.count > 1 ? rectHeight / CGFloat(rawTextLines.count) : rectHeight
-                for (idx, txt) in rawTextLines.enumerated() {
-                    let top = rule.rect.top - CGFloat(idx) * lineStep
-                    let bottom = max(rule.rect.bottom, top - lineStep)
-                    injected.append(OCRLine(text: txt, left: rule.rect.left, right: rule.rect.right, bottom: bottom, top: top))
-                }
-            }
-            effectiveLines = filtered + injected
-        }
+        let effectiveLines = lines
 
         var blocks: [OCRMarkdownBlock] = effectiveLines.map { line in
             if headerRules.contains(where: { lineOverlapsLayoutArea(line, $0.rect, threshold: 0.45) }) {
@@ -8583,6 +7828,8 @@ final class AppState: ObservableObject {
         ocrParagraphTextAreaMinHeight = CGFloat(parseDouble(values["OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT"], defaultValue: 58, minimum: 40))
         ocrTitleMatchTopLineCount = Int(parseDouble(values["OCR_TITLE_MATCH_TOP_LINES"], defaultValue: 3, minimum: 0))
         previewTextScalePercent = min(parseDouble(values["PREVIEW_TEXT_SCALE_PERCENT"], defaultValue: 170, minimum: 80), 220)
+        let rawEmail = (values["EPUB_RECIPIENT_EMAIL"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        epubRecipientEmail = rawEmail.contains("@") && rawEmail.contains(".") ? rawEmail : ""
         shouldOpenOCRWindowFullScreen = (values["OCR_WINDOW_WIDTH"] ?? "FULL").trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "FULL"
         if !shouldOpenOCRWindowFullScreen {
             ocrWindowWidth = CGFloat(parseDouble(values["OCR_WINDOW_WIDTH"], defaultValue: 820, minimum: 640))
@@ -8604,28 +7851,6 @@ final class AppState: ObservableObject {
             addSplitWindowWidth = CGFloat(parseDouble(values["ADD_SPLIT_WINDOW_WIDTH"], defaultValue: 920, minimum: 760))
             addSplitWindowHeight = CGFloat(parseDouble(values["ADD_SPLIT_WINDOW_HEIGHT"], defaultValue: 720, minimum: 560))
         }
-        codexFinalizePromptFile = values["CODEX_FINALIZE_PROMPT_FILE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty ?? "codex-finalize-prompt.txt"
-        codexFinalizeMaxSections = max(1, Int(parseDouble(values["CODEX_FINALIZE_MAX_SECTIONS"], defaultValue: 5, minimum: 1)))
-        codexExecutablePath = values["CODEX_EXECUTABLE_PATH"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty ?? "/Applications/Codex.app/Contents/Resources/codex"
-        codexFinalizeModel = values["CODEX_FINALIZE_MODEL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty ?? defaultCodexFinalizeModel
-        typhoonOCRAPIKey = values["TYPHOON_OCR_API_KEY"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty ?? ""
-        typhoonOCRBaseURL = values["TYPHOON_OCR_BASE_URL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty ?? "https://api.opentyphoon.ai/v1"
-        typhoonOCRModel = values["TYPHOON_OCR_MODEL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty ?? "typhoon-ocr"
-        autoDetectThumbWidth = CGFloat(parseDouble(values["AUTO_DETECT_THUMB_WIDTH"], defaultValue: 80, minimum: 40))
-        autoDetectThumbHeight = CGFloat(parseDouble(values["AUTO_DETECT_THUMB_HEIGHT"], defaultValue: 104, minimum: 52))
-        autoDetectRenderScale = CGFloat(min(parseDouble(values["AUTO_DETECT_RENDER_SCALE"], defaultValue: 2.0, minimum: 1.0), 8.0))
     }
 
     private func readKeyValueConfig(from url: URL) -> [String: String] {
@@ -8712,6 +7937,131 @@ private struct ClearInitialFirstResponderView: NSViewRepresentable {
 struct NewOCRButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         NewOCRButtonStyleBody(configuration: configuration)
+    }
+}
+
+// ── Shared alert components ───────────────────────────────────────────────────
+
+struct AppAlertButtonStyle: ButtonStyle {
+    enum Variant { case red, blue, green }
+    let variant: Variant
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed
+        let bg: Color = switch variant {
+            case .red:   Color(red: 220/255, green:  50/255, blue:  50/255).opacity(pressed ? 0.75 : 1)
+            case .blue:  Color(red:   0/255, green: 122/255, blue: 255/255).opacity(pressed ? 0.75 : 1)
+            case .green: Color(red:  40/255, green: 185/255, blue:  70/255).opacity(pressed ? 0.75 : 1)
+        }
+        return configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Color.white)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 8)
+            .background(bg)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+}
+
+private struct AppAlertPanel<Content: View>: View {
+    var width: CGFloat? = nil
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .padding(32)
+            .frame(minWidth: width ?? 380, maxWidth: width ?? 520)
+            .background(NewOCRMainPalette.panelBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.30), radius: 22, x: 0, y: 10)
+    }
+}
+
+private struct AppSuccessAlertContent<Buttons: View>: View {
+    let systemImage: String
+    let iconColor: Color
+    let title: String
+    var subtitle: String? = nil
+    @ViewBuilder let buttons: () -> Buttons
+
+    var body: some View {
+        VStack(spacing: 20) {
+            ZStack {
+                Circle()
+                    .fill(iconColor)
+                    .frame(width: 64, height: 64)
+                Image(systemName: systemImage)
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            VStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(NewOCRMainPalette.headingText)
+                    .multilineTextAlignment(.center)
+                if let sub = subtitle {
+                    Text(sub)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            HStack(spacing: 10) { buttons() }
+        }
+    }
+}
+
+private struct AppConfirmAlertContent<Details: View, Buttons: View>: View {
+    let systemImage: String
+    let iconColor: Color
+    let title: String
+    let subtitle: String
+    @ViewBuilder let details: () -> Details
+    @ViewBuilder let buttons: () -> Buttons
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(iconColor)
+                        .frame(width: 56, height: 56)
+                    Image(systemName: systemImage)
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.headingText)
+                    Text(subtitle)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+                Spacer(minLength: 0)
+            }
+            VStack(alignment: .leading, spacing: 10) { details() }
+                .font(.system(size: 15, weight: .semibold))
+                .labelStyle(.titleAndIcon)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(NewOCRMainPalette.fieldBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
+                )
+            HStack(spacing: 10) {
+                Spacer()
+                buttons()
+            }
+        }
     }
 }
 
@@ -9620,46 +8970,31 @@ struct StepOneLoadPDFView: View {
             }
 
             if appState.isEPUBBuiltAlertPresented {
-                VStack(spacing: 18) {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color.white.opacity(0.94))
-                                .frame(width: 44, height: 44)
-                            Image(systemName: "book.closed.fill")
-                                .font(.system(size: 24, weight: .semibold))
-                                .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
+                AppAlertPanel {
+                    AppSuccessAlertContent(
+                        systemImage: "book.closed.fill",
+                        iconColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                        title: "EPUB created",
+                        subtitle: appState.builtEPUBPath.isEmpty ? nil : URL(fileURLWithPath: appState.builtEPUBPath).lastPathComponent
+                    ) {
+                        Button { appState.isEPUBBuiltAlertPresented = false } label: {
+                            Label("Close", systemImage: "xmark")
+                        }
+                        .buttonStyle(AppAlertButtonStyle(variant: .red))
+
+                        if !appState.epubRecipientEmail.isEmpty {
+                            Button { appState.sendEPUBByEmail() } label: {
+                                Label("Send email", systemImage: "envelope")
+                            }
+                            .buttonStyle(AppAlertButtonStyle(variant: .blue))
                         }
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("EPUB was created successfully")
-                                .font(.system(size: 22, weight: .semibold))
-                                .foregroundStyle(NewOCRMainPalette.headingText)
+                        Button { appState.openBuiltEPUBInBooks() } label: {
+                            Label("Open in Books", systemImage: "book.closed")
                         }
+                        .buttonStyle(AppAlertButtonStyle(variant: .green))
                     }
-
-                    HStack(spacing: 10) {
-                        Button {
-                            appState.openBuiltEPUBInBooks()
-                        } label: {
-                            Label("Open", systemImage: "book")
-                        }
-
-                        Button("Close") {
-                            appState.isEPUBBuiltAlertPresented = false
-                        }
-                    }
-                    .buttonStyle(NewOCRButtonStyle())
                 }
-                .padding(22)
-                .frame(minWidth: 430, maxWidth: 560)
-                .background(NewOCRMainPalette.panelBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
             }
 
             if appState.isLayoutRefreshConfirmationPresented {
@@ -9690,85 +9025,28 @@ private struct CropResetConfirmationView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                    Image(systemName: "crop")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(Color.black)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Prepare PDF for Cropping?")
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text("Cropping changes the page layout used by existing split sections.")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
+        AppAlertPanel(width: 560) {
+            AppConfirmAlertContent(
+                systemImage: "crop",
+                iconColor: Color(red: 0/255, green: 122/255, blue: 255/255),
+                title: "Prepare PDF for cropping?",
+                subtitle: "Cropping changes the page layout used by existing split sections."
+            ) {
                 Label("This project already contains section PDF files.", systemImage: "doc.richtext")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Label("OK removes all section files and generated OCR resources so the project can be cropped cleanly.", systemImage: "trash")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Label("Close leaves the project unchanged.", systemImage: "xmark.circle")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
-            }
-            .font(.system(size: 15, weight: .semibold))
-            .labelStyle(.titleAndIcon)
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(NewOCRMainPalette.fieldBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
-
-            HStack(spacing: 12) {
-                Spacer()
-
-                OCRIconButton(
-                    title: "OK",
-                    systemImage: "checkmark",
-                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
-                    foregroundColor: .black,
-                    size: 42
-                ) {
-                    appState.confirmCropResetAndOpenCrop()
-                }
-                .keyboardShortcut(.defaultAction)
-
-                OCRIconButton(
-                    title: "Close",
-                    systemImage: "xmark",
-                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
-                    foregroundColor: .white,
-                    size: 42
-                ) {
-                    appState.closeCropResetConfirmation()
-                }
-                .keyboardShortcut(.cancelAction)
+            } buttons: {
+                Button { appState.closeCropResetConfirmation() } label: { Label("Close", systemImage: "xmark") }
+                    .buttonStyle(AppAlertButtonStyle(variant: .red))
+                    .keyboardShortcut(.cancelAction)
+                Button { appState.confirmCropResetAndOpenCrop() } label: { Label("OK", systemImage: "checkmark") }
+                    .buttonStyle(AppAlertButtonStyle(variant: .green))
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(22)
-        .frame(width: 560)
-        .background(NewOCRMainPalette.panelBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
-        .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -9776,85 +9054,28 @@ private struct LayoutRefreshConfirmationView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(Color(red: 255/255, green: 169/255, blue: 48/255))
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Refresh Existing OCR Data?")
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text("Defining layout areas changes how OCR output is generated.")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
+        AppAlertPanel(width: 560) {
+            AppConfirmAlertContent(
+                systemImage: "exclamationmark.triangle.fill",
+                iconColor: Color(red: 255/255, green: 169/255, blue: 48/255),
+                title: "Refresh existing OCR data?",
+                subtitle: "Defining layout areas changes how OCR output is generated."
+            ) {
                 Label("This project already contains OCR output or PDF sections marked Ready for EPUB.", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Label("OK removes existing PDF-section OCR Markdown, images, OCR snapshots, and line-cache data.", systemImage: "arrow.clockwise")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Label("Ready for EPUB flags are reset so the sections can be processed again.", systemImage: "checkmark.square")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
-            }
-            .font(.system(size: 15, weight: .semibold))
-            .labelStyle(.titleAndIcon)
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(NewOCRMainPalette.fieldBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
-
-            HStack(spacing: 12) {
-                Spacer()
-
-                OCRIconButton(
-                    title: "OK",
-                    systemImage: "checkmark",
-                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
-                    foregroundColor: .black,
-                    size: 42
-                ) {
-                    appState.confirmLayoutRefreshAndOpenEditor()
-                }
-                .keyboardShortcut(.defaultAction)
-
-                OCRIconButton(
-                    title: "Close",
-                    systemImage: "xmark",
-                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
-                    foregroundColor: .white,
-                    size: 42
-                ) {
-                    appState.closeLayoutRefreshConfirmation()
-                }
-                .keyboardShortcut(.cancelAction)
+            } buttons: {
+                Button { appState.closeLayoutRefreshConfirmation() } label: { Label("Close", systemImage: "xmark") }
+                    .buttonStyle(AppAlertButtonStyle(variant: .red))
+                    .keyboardShortcut(.cancelAction)
+                Button { appState.confirmLayoutRefreshAndOpenEditor() } label: { Label("OK", systemImage: "checkmark") }
+                    .buttonStyle(AppAlertButtonStyle(variant: .green))
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(22)
-        .frame(width: 560)
-        .background(NewOCRMainPalette.panelBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
-        .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -9862,31 +9083,13 @@ private struct ClearAllOCRConfirmationView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                    Image(systemName: "trash.fill")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Clear All OCR?")
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text("OCR Markdown files and resources will be removed for all sections.")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
+        AppAlertPanel(width: 560) {
+            AppConfirmAlertContent(
+                systemImage: "trash.fill",
+                iconColor: Color(red: 220/255, green: 50/255, blue: 50/255),
+                title: "Clear all OCR?",
+                subtitle: "OCR Markdown files and resources will be removed for all sections."
+            ) {
                 Label("Removes `AppleVision/MD/<section>/` for every section.", systemImage: "trash")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Label("Removes all pure OCR snapshots from `OriginalOCR/` folders.", systemImage: "doc.text")
@@ -9897,54 +9100,15 @@ private struct ClearAllOCRConfirmationView: View {
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Label("Preserves header/footer review file for future processing.", systemImage: "checkmark.circle")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
-            }
-            .font(.system(size: 15, weight: .semibold))
-            .labelStyle(.titleAndIcon)
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(NewOCRMainPalette.fieldBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
-
-            HStack(spacing: 12) {
-                Spacer()
-
-                OCRIconButton(
-                    title: "Clear All",
-                    systemImage: "checkmark",
-                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
-                    foregroundColor: .black,
-                    size: 42
-                ) {
-                    appState.confirmClearAllOCRAndProceed()
-                }
-                .keyboardShortcut(.defaultAction)
-
-                OCRIconButton(
-                    title: "Close",
-                    systemImage: "xmark",
-                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
-                    foregroundColor: .white,
-                    size: 42
-                ) {
-                    appState.closeClearAllOCRConfirmation()
-                }
-                .keyboardShortcut(.cancelAction)
+            } buttons: {
+                Button { appState.closeClearAllOCRConfirmation() } label: { Label("Close", systemImage: "xmark") }
+                    .buttonStyle(AppAlertButtonStyle(variant: .red))
+                    .keyboardShortcut(.cancelAction)
+                Button { appState.confirmClearAllOCRAndProceed() } label: { Label("Clear all", systemImage: "trash") }
+                    .buttonStyle(AppAlertButtonStyle(variant: .green))
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(22)
-        .frame(width: 560)
-        .background(NewOCRMainPalette.panelBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
-        .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -9952,31 +9116,13 @@ private struct ClearOCRConfirmationView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(Color(red: 255/255, green: 71/255, blue: 71/255))
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Clear OCR for \(appState.pendingClearOCRItem.map { appState.sectionRemovalTitle(for: $0) } ?? "Section")?")
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text("OCR Markdown files and resources will be removed.")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                }
-
-                Spacer(minLength: 0)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
+        AppAlertPanel(width: 560) {
+            AppConfirmAlertContent(
+                systemImage: "xmark.circle.fill",
+                iconColor: Color(red: 220/255, green: 50/255, blue: 50/255),
+                title: "Clear OCR for \(appState.pendingClearOCRItem.map { appState.sectionRemovalTitle(for: $0) } ?? "section")?",
+                subtitle: "OCR Markdown files and resources will be removed."
+            ) {
                 Label("Removes `AppleVision/MD/<section>/` directory with all Markdown files and images.", systemImage: "trash")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Label("Removes the pure OCR snapshot from `OriginalOCR/` folder.", systemImage: "doc.text")
@@ -9987,54 +9133,15 @@ private struct ClearOCRConfirmationView: View {
                     .foregroundStyle(NewOCRMainPalette.primaryText)
                 Label("Preserves header/footer review file for future processing.", systemImage: "checkmark.circle")
                     .foregroundStyle(NewOCRMainPalette.primaryText)
-            }
-            .font(.system(size: 15, weight: .semibold))
-            .labelStyle(.titleAndIcon)
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(NewOCRMainPalette.fieldBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
-
-            HStack(spacing: 12) {
-                Spacer()
-
-                OCRIconButton(
-                    title: "Clear",
-                    systemImage: "checkmark",
-                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
-                    foregroundColor: .black,
-                    size: 42
-                ) {
-                    appState.confirmClearOCRAndProceed()
-                }
-                .keyboardShortcut(.defaultAction)
-
-                OCRIconButton(
-                    title: "Close",
-                    systemImage: "xmark",
-                    backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
-                    foregroundColor: .white,
-                    size: 42
-                ) {
-                    appState.closeClearOCRConfirmation()
-                }
-                .keyboardShortcut(.cancelAction)
+            } buttons: {
+                Button { appState.closeClearOCRConfirmation() } label: { Label("Close", systemImage: "xmark") }
+                    .buttonStyle(AppAlertButtonStyle(variant: .red))
+                    .keyboardShortcut(.cancelAction)
+                Button { appState.confirmClearOCRAndProceed() } label: { Label("Clear", systemImage: "trash") }
+                    .buttonStyle(AppAlertButtonStyle(variant: .green))
+                    .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(22)
-        .frame(width: 560)
-        .background(NewOCRMainPalette.panelBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
-        .buttonStyle(NewOCRButtonStyle())
     }
 }
 
@@ -10172,29 +9279,6 @@ private struct RulePreviewSheet: View, Identifiable {
             .frame(minHeight: 380)
             .padding(16)
 
-            // Codex text block
-            if let codexText = rule.codexText, !codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Divider().overlay(NewOCRMainPalette.stroke)
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "text.quote")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Color(red: 100/255, green: 180/255, blue: 255/255))
-                        Text("Codex text override")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    }
-                    Text(codexText)
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(NewOCRMainPalette.primaryText)
-                        .italic()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
-                .background(Color(red: 30/255, green: 42/255, blue: 60/255))
-            }
         }
         .frame(minWidth: 640, minHeight: 560)
         .background(NewOCRMainPalette.windowBackground)
@@ -10651,30 +9735,6 @@ private struct LayoutAreaRuleRow: View {
                     }
                 }
 
-                if let codexText = rule.codexText, !codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "quote.opening")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color(red: 100/255, green: 180/255, blue: 255/255))
-                            .padding(.top, 1)
-                        Text(codexText)
-                            .font(.system(size: 13, weight: .regular))
-                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                            .lineLimit(3)
-                            .multilineTextAlignment(.leading)
-                            .italic()
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(red: 40/255, green: 55/255, blue: 75/255))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .stroke(Color(red: 60/255, green: 110/255, blue: 175/255).opacity(0.7), lineWidth: 1)
-                    )
-                    .padding(.top, 2)
-                }
             }
 
             Spacer()
@@ -11055,423 +10115,6 @@ struct ConfigEditorView: View {
         .padding(22)
         .background(NewOCRMainPalette.windowBackground)
         .buttonStyle(NewOCRButtonStyle())
-    }
-}
-
-struct FinalizeAIWindowView: View {
-    @EnvironmentObject private var appState: AppState
-    @ObservedObject var state: FinalizeAISelectionState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .center, spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(Color.black)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Codex Review")
-                        .font(.system(size: 31, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text("Select up to \(max(1, appState.codexFinalizeMaxSections)) sections")
-                        .font(.system(size: MainTypography.smallSize, weight: .medium))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                }
-
-                Spacer()
-
-                OCRIconButton(title: "Codex Instruction", systemImage: "quote.bubble", backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255), foregroundColor: .black) {
-                    appState.openCodexFinalizeInstruction()
-                }
-                .disabled(state.isRunning)
-
-                OCRIconButton(
-                    title: "Codex Log",
-                    systemImage: "info.circle",
-                    backgroundColor: Color(red: 60/255, green: 60/255, blue: 72/255),
-                    foregroundColor: .white
-                ) {
-                    appState.openCodexFinalizeLogWindow(state: state)
-                }
-
-                OCRIconButton(
-                    title: "Run Codex",
-                    systemImage: "paperplane.fill",
-                    backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
-                    foregroundColor: .black
-                ) {
-                    appState.runCodexFinalize(for: state.selectedItems, state: state)
-                }
-                .disabled(state.selectedItems.isEmpty || state.isRunning)
-
-                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
-                    NSApp.keyWindow?.close()
-                }
-            }
-
-            HStack(spacing: 10) {
-                Text("\(state.selectedSectionCount) sections selected")
-                    .font(.system(size: MainTypography.bodySize, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
-                Text("Max \(max(1, appState.codexFinalizeMaxSections))")
-                    .font(.system(size: MainTypography.smallSize, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.12))
-                    .clipShape(Capsule())
-                Spacer()
-                Text(state.status)
-                    .font(.system(size: MainTypography.smallSize, weight: .medium))
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .padding(12)
-            .background(NewOCRMainPalette.panelBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
-
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(state.sectionTitles, id: \.self) { sectionTitle in
-                        FinalizeAISectionGroup(
-                            sectionTitle: sectionTitle,
-                            items: state.items(in: sectionTitle),
-                            state: state
-                        )
-                        .environmentObject(appState)
-                    }
-                }
-                .padding(10)
-            }
-            .background(NewOCRMainPalette.panelBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
-        }
-        .padding(22)
-        .frame(minWidth: 980, minHeight: 620)
-        .background(NewOCRMainPalette.windowBackground)
-        .buttonStyle(NewOCRButtonStyle())
-    }
-}
-
-struct CodexFinalizeInstructionWindowView: View {
-    @EnvironmentObject private var appState: AppState
-    let promptURL: URL
-    @State private var promptText = ""
-    @State private var status = "AI instruction is ready."
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .center, spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                    Image(systemName: "quote.bubble")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(Color.black)
-                }
-
-                Text("Codex Finalize Instruction")
-                    .font(.system(size: 31, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.headingText)
-
-                Spacer()
-
-                OCRIconButton(title: "Save", systemImage: "square.and.arrow.down", backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255), foregroundColor: .black) {
-                    savePrompt()
-                }
-                .keyboardShortcut("s", modifiers: [.command])
-
-                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
-                    NSApp.keyWindow?.close()
-                }
-            }
-
-            TextEditor(text: $promptText)
-                .font(.system(size: 16, design: .monospaced))
-                .foregroundStyle(NewOCRMainPalette.primaryText)
-                .scrollContentBackground(.hidden)
-                .background(NewOCRMainPalette.fieldBackground)
-                .frame(minWidth: 640, minHeight: 360)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                )
-
-            Text(status)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(NewOCRMainPalette.secondaryText)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .padding(22)
-        .background(NewOCRMainPalette.windowBackground)
-        .buttonStyle(NewOCRButtonStyle())
-        .onAppear {
-            promptText = (try? String(contentsOf: promptURL, encoding: .utf8)) ?? defaultCodexFinalizePrompt
-            status = "Editing Codex instruction."
-        }
-    }
-
-    private func savePrompt() {
-        do {
-            try promptText.write(to: promptURL, atomically: true, encoding: .utf8)
-            status = "Saved Codex instruction."
-            appState.configStatus = "Saved \(promptURL.lastPathComponent)."
-        } catch {
-            status = "Could not save Codex instruction: \(error.localizedDescription)"
-        }
-    }
-}
-
-struct CodexFinalizeLogWindowView: View {
-    @EnvironmentObject private var appState: AppState
-    @ObservedObject var state: FinalizeAISelectionState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .center, spacing: 16) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.white.opacity(0.94))
-                        .frame(width: 58, height: 58)
-                        .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
-                    Image(systemName: "terminal")
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(Color.black)
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Codex Log")
-                        .font(.system(size: 31, weight: .semibold))
-                        .foregroundStyle(NewOCRMainPalette.headingText)
-                    Text(state.isRunning ? "Running..." : state.status)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Spacer(minLength: 10)
-
-                OCRIconButton(
-                    title: "Download Log",
-                    systemImage: "arrow.down.doc",
-                    backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255),
-                    foregroundColor: .white
-                ) {
-                    if let url = state.savedLogURL {
-                        NSWorkspace.shared.activateFileViewerSelecting([url])
-                    }
-                }
-                .disabled(state.savedLogURL == nil)
-
-                OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
-                    appState.closeCodexFinalizeLogWindow()
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    if state.isRunning {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(state.isRunning ? "Codex is running..." : (state.codexLog.isEmpty ? "No output yet. Run Codex to see progress here." : state.status))
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(state.isRunning ? NewOCRMainPalette.secondaryText : NewOCRMainPalette.primaryText)
-                        .lineLimit(2)
-                    Spacer()
-                }
-
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        Text(state.codexLog.isEmpty ? " " : state.codexLog)
-                            .font(.system(size: 14, design: .monospaced))
-                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
-                            .id("logBottom")
-                    }
-                    .background(NewOCRMainPalette.fieldBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                    )
-                    .onChange(of: state.codexLog) {
-                        withAnimation {
-                            proxy.scrollTo("logBottom", anchor: .bottom)
-                        }
-                    }
-                }
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(NewOCRMainPalette.panelBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-            )
-        }
-        .padding(22)
-        .frame(minWidth: 620, minHeight: 420)
-        .background(NewOCRMainPalette.windowBackground)
-        .buttonStyle(NewOCRButtonStyle())
-    }
-}
-
-private struct FinalizeAISectionGroup: View {
-    @EnvironmentObject private var appState: AppState
-    let sectionTitle: String
-    let items: [FinalizeAIFileItem]
-    @ObservedObject var state: FinalizeAISelectionState
-
-    private var isSelected: Bool {
-        state.selectedSectionTitles.contains(sectionTitle)
-    }
-
-    private var sectionPDFItem: FinalizeAIFileItem? {
-        items.first
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                NewOCRLargeCheckboxButton(
-                    title: isSelected ? "Selected section for AI finalize" : "Not selected section for AI finalize",
-                    isChecked: Binding(
-                        get: { isSelected },
-                        set: { _ in appState.toggleFinalizeAISection(sectionTitle, in: state) }
-                    ),
-                    checkedColor: Color(red: 30/255, green: 139/255, blue: 238/255)
-                )
-                .disabled(!isSelected && !appState.canSelectFinalizeAISection(sectionTitle, in: state))
-
-                Image(systemName: "doc.richtext")
-                    .font(.system(size: MainTypography.iconSize, weight: .semibold))
-                    .foregroundStyle(Color.orange)
-                Text(sectionTitle)
-                    .font(.system(size: MainTypography.bodySize, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                Text("\(items.count) pages")
-                    .font(.system(size: MainTypography.smallSize, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                Text(isSelected ? "Selected" : "Not selected")
-                    .font(.system(size: MainTypography.smallSize, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.white.opacity(0.12))
-                    .clipShape(Capsule())
-                SectionIconButton(
-                    title: "Open PDF",
-                    systemImage: "doc.richtext",
-                    isDisabled: sectionPDFItem == nil,
-                    backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255),
-                    foregroundColor: .white
-                ) {
-                    if let sectionPDFItem {
-                        appState.openFinalizeAIPDF(for: sectionPDFItem)
-                    }
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(NewOCRMainPalette.rowBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 7) {
-                ForEach(items) { item in
-                    FinalizeAIFileRow(item: item, state: state)
-                }
-            }
-        }
-        .padding(10)
-        .background(isSelected ? NewOCRMainPalette.fieldBackground.opacity(0.72) : NewOCRMainPalette.fieldBackground.opacity(0.52))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isSelected ? Color(red: 30/255, green: 139/255, blue: 238/255) : NewOCRMainPalette.stroke, lineWidth: 1)
-        )
-    }
-}
-
-private struct FinalizeAIFileRow: View {
-    @EnvironmentObject private var appState: AppState
-    let item: FinalizeAIFileItem
-    @ObservedObject var state: FinalizeAISelectionState
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "doc.text")
-                .font(.system(size: MainTypography.iconSize, weight: .semibold))
-                .foregroundStyle(NewOCRMainPalette.secondaryText)
-                .frame(width: 46, height: 36)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.displayName)
-                    .font(.system(size: MainTypography.bodySize, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(item.folderPath)
-                    .font(.system(size: MainTypography.smallSize, weight: .medium))
-                    .foregroundStyle(NewOCRMainPalette.tertiaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            Spacer(minLength: 12)
-
-            SectionIconButton(
-                title: "Preview",
-                systemImage: "eye",
-                isDisabled: false,
-                backgroundColor: Color.orange.opacity(0.92),
-                foregroundColor: .black
-            ) {
-                appState.previewFinalizeAIFile(item)
-            }
-
-            SectionIconButton(
-                title: "Show Files",
-                systemImage: "folder",
-                isDisabled: false,
-                backgroundColor: Color(red: 30/255, green: 139/255, blue: 238/255),
-                foregroundColor: .white
-            ) {
-                appState.openFinalizeAIFolder(for: item)
-            }
-        }
-        .padding(12)
-        .background(NewOCRMainPalette.fieldBackground.opacity(0.74))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-        )
     }
 }
 
@@ -11896,57 +10539,35 @@ struct StepTwoOCRView: View {
                 Color.black.opacity(0.34)
                     .ignoresSafeArea()
 
-                VStack(spacing: 18) {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(Color.white.opacity(0.94))
-                                .frame(width: 44, height: 44)
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 24, weight: .semibold))
-                                .foregroundStyle(Color(red: 53/255, green: 200/255, blue: 90/255))
-                        }
+                AppAlertPanel {
+                    AppSuccessAlertContent(
+                        systemImage: "checkmark",
+                        iconColor: Color(red: 53/255, green: 200/255, blue: 90/255),
+                        title: appState.ocrSaveAlertMessage
+                    ) {
+                        Button {
+                            isSaveAlertPresented = false
+                            appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
+                            windowToCloseAfterSave = nil
+                        } label: { Label("Close", systemImage: "xmark") }
+                        .buttonStyle(AppAlertButtonStyle(variant: .red))
 
-                        Text(appState.ocrSaveAlertMessage)
-                            .font(.system(size: 22, weight: .semibold))
-                            .foregroundStyle(NewOCRMainPalette.headingText)
-                    }
+                        Button {
+                            isSaveAlertPresented = false
+                            windowToCloseAfterSave = nil
+                        } label: { Label("OK", systemImage: "checkmark") }
+                        .buttonStyle(AppAlertButtonStyle(variant: .blue))
 
-                    HStack(spacing: 10) {
-                        OCRIconButton(
-                            title: "Mark Completed",
-                            systemImage: "checkmark.square.fill",
-                            backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255),
-                            size: 38
-                        ) {
+                        Button {
                             appState.markSelectedSectionReadyForEPUB()
                             isSaveAlertPresented = false
                             appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
                             windowToCloseAfterSave = nil
-                        }
+                        } label: { Label("Mark completed", systemImage: "checkmark.square.fill") }
+                        .buttonStyle(AppAlertButtonStyle(variant: .green))
                         .disabled(!appState.selectedSectionCanBeMarkedReady)
-
-                        Button("OK") {
-                            isSaveAlertPresented = false
-                            windowToCloseAfterSave = nil
-                        }
-
-                        Button("Close") {
-                            isSaveAlertPresented = false
-                            appState.closeOCRWindowsAndPreview(windowToCloseAfterSave)
-                            windowToCloseAfterSave = nil
-                        }
                     }
-                    .buttonStyle(NewOCRButtonStyle())
                 }
-                .padding(22)
-                .frame(minWidth: 340)
-                .background(NewOCRMainPalette.panelBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
-                )
                 .shadow(color: Color.black.opacity(0.28), radius: 18, x: 0, y: 8)
             }
         }
@@ -15242,9 +13863,6 @@ struct LayoutAreaEditorWindowView: View {
         let anchorWordValue = state.selectedType == "refmark"
             ? (state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines))
             : nil
-        let codexTextValue = codexTextApplies(to: state.selectedType)
-            ? (state.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.codexText.trimmingCharacters(in: .whitespacesAndNewlines))
-            : nil
         do {
             let count: Int
             if let loadedRule = state.loadedRule {
@@ -15257,8 +13875,7 @@ struct LayoutAreaEditorWindowView: View {
                     newPageNumber: state.selectedPage,
                     newRect: state.normalizedOCRRect,
                     newMarkers: markersValue,
-                    newAnchorWord: anchorWordValue,
-                    newCodexText: codexTextValue
+                    newAnchorWord: anchorWordValue
                 )
                 state.loadedRule = nil
                 state.status = "Updated \(displayName(for: state.selectedType)) area."
@@ -15271,8 +13888,7 @@ struct LayoutAreaEditorWindowView: View {
                     pageNumber: state.selectedPage,
                     rect: state.normalizedOCRRect,
                     markers: markersValue,
-                    anchorWord: anchorWordValue,
-                    codexText: codexTextValue
+                    anchorWord: anchorWordValue
                 )
                 state.status = savedStatusMessage(for: state.selectedType)
             }
@@ -15285,10 +13901,6 @@ struct LayoutAreaEditorWindowView: View {
 
     private func markersApply(to type: String) -> Bool {
         type == "footnote" || type == "refmark" || type == "image" || type == "image_desc"
-    }
-
-    private func codexTextApplies(to type: String) -> Bool {
-        type == "header" || type == "h2" || type == "header3" || type == "blockquote" || type == "footnote" || type == "image_desc"
     }
 
     private func loadPreviewImageAsync() {
@@ -15598,9 +14210,7 @@ struct LayoutAreaEditorWindowView: View {
     }
 
     private var controls: some View {
-        let showCodexRow = state.loadedRule != nil && !state.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-
-        return VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .center, spacing: 16) {
                     if markersApply(to: state.selectedType) {
@@ -15624,56 +14234,12 @@ struct LayoutAreaEditorWindowView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-
-            if showCodexRow {
-                Divider().overlay(NewOCRMainPalette.stroke)
-
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "text.quote")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color(red: 100/255, green: 180/255, blue: 255/255))
-                        .padding(.top, 3)
-
-                    ZStack(alignment: .topLeading) {
-                        if state.codexText.isEmpty {
-                            Text("Codex text override…")
-                                .font(.system(size: 13))
-                                .foregroundStyle(NewOCRMainPalette.tertiaryText)
-                                .italic()
-                                .allowsHitTesting(false)
-                                .padding(.leading, 4)
-                                .padding(.top, 2)
-                        }
-                        TextEditor(text: $state.codexText)
-                            .font(.system(size: 13, weight: .regular))
-                            .foregroundStyle(NewOCRMainPalette.primaryText)
-                            .scrollContentBackground(.hidden)
-                            .background(Color.clear)
-                            .frame(minHeight: 52, maxHeight: 96)
-                    }
-
-                    Button {
-                        state.codexText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                    .help("Clear Codex text override")
-                    .padding(.top, 2)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(NewOCRMainPalette.fieldBackground)
-            }
         }
         .background(NewOCRMainPalette.panelBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(showCodexRow ? Color(red: 100/255, green: 180/255, blue: 255/255).opacity(0.45) : NewOCRMainPalette.stroke, lineWidth: 1)
+                .stroke(NewOCRMainPalette.stroke, lineWidth: 1)
         )
     }
 
@@ -15691,9 +14257,6 @@ struct LayoutAreaEditorWindowView: View {
                     }
                     if type.id != "refmark" {
                         state.anchorWord = ""
-                    }
-                    if !codexTextApplies(to: type.id) {
-                        state.codexText = ""
                     }
                 }
             }
@@ -15789,83 +14352,6 @@ struct LayoutAreaEditorWindowView: View {
                     .help(helpText)
             }
             .padding(.leading, 8)
-        )
-    }
-
-    private var codexTextPanel: some View {
-        let typeColorMap: [String: Color] = [
-            "header": Color(red: 60/255, green: 120/255, blue: 220/255),
-            "h2": Color(red: 60/255, green: 120/255, blue: 220/255),
-            "header3": Color(red: 60/255, green: 120/255, blue: 220/255),
-            "blockquote": Color(red: 210/255, green: 130/255, blue: 60/255),
-            "footnote": Color(red: 60/255, green: 180/255, blue: 100/255),
-            "image_desc": Color(red: 210/255, green: 170/255, blue: 60/255)
-        ]
-        let accentColor = typeColorMap[state.selectedType] ?? Color(red: 100/255, green: 160/255, blue: 255/255)
-        let hasText = !state.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-
-        return VStack(alignment: .leading, spacing: 0) {
-            // Header strip
-            HStack(spacing: 8) {
-                Image(systemName: "text.quote")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(accentColor)
-                Text("Codex Text Override")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
-                Text("— replaces Vision OCR for this area during OCR runs")
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(NewOCRMainPalette.secondaryText)
-                Spacer(minLength: 0)
-                if hasText {
-                    Button {
-                        state.codexText = ""
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text("Clear")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .foregroundStyle(NewOCRMainPalette.secondaryText)
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 9)
-            .padding(.bottom, 7)
-
-            Divider().overlay(NewOCRMainPalette.stroke)
-
-            // Text editor
-            ZStack(alignment: .topLeading) {
-                if state.codexText.isEmpty {
-                    Text("Paste or type the Codex-detected text here. During OCR, this text replaces Vision recognition for the drawn rectangle.")
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(NewOCRMainPalette.tertiaryText)
-                        .italic()
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $state.codexText)
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(NewOCRMainPalette.primaryText)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.clear)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
-                    .frame(minHeight: 64, maxHeight: 120)
-            }
-            .background(NewOCRMainPalette.fieldBackground)
-        }
-        .background(NewOCRMainPalette.panelBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(hasText ? accentColor.opacity(0.55) : NewOCRMainPalette.stroke, lineWidth: 1)
         )
     }
 
@@ -15988,9 +14474,6 @@ struct LayoutAreaEditorWindowView: View {
         let anchorWordValue = state.selectedType == "refmark"
             ? (state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.anchorWord.trimmingCharacters(in: .whitespacesAndNewlines))
             : nil
-        let codexTextValue = codexTextApplies(to: state.selectedType)
-            ? (state.codexText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : state.codexText.trimmingCharacters(in: .whitespacesAndNewlines))
-            : nil
         do {
             let count: Int
             if let loadedRule = state.loadedRule {
@@ -16003,8 +14486,7 @@ struct LayoutAreaEditorWindowView: View {
                     newPageNumber: state.selectedPage,
                     newRect: state.normalizedOCRRect,
                     newMarkers: markersValue,
-                    newAnchorWord: anchorWordValue,
-                    newCodexText: codexTextValue
+                    newAnchorWord: anchorWordValue
                 )
                 state.loadedRule = nil
                 state.status = "Updated \(displayName(for: state.selectedType)) area."
@@ -16017,8 +14499,7 @@ struct LayoutAreaEditorWindowView: View {
                     pageNumber: state.selectedPage,
                     rect: state.normalizedOCRRect,
                     markers: markersValue,
-                    anchorWord: anchorWordValue,
-                    codexText: codexTextValue
+                    anchorWord: anchorWordValue
                 )
                 state.status = savedStatusMessage(for: state.selectedType)
             }

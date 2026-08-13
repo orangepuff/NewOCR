@@ -261,6 +261,10 @@ blockquote,
   line-height: 1.65;
 }
 
+blockquote + blockquote {
+  margin-top: 0;
+}
+
 blockquote p,
 .quote p {
   margin: 0.4em 0;

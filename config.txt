@@ -1,57 +1,43 @@
-PDF_LIST_MIN_HEIGHT=420
-# Set MAIN_WINDOW_WIDTH=FULL to open the main window at full screen size.
+# ── Window Sizes ─────────────────────────────────────────────────────────────
+# Use FULL to open each window at full screen size, or set a number (pixels).
+
 MAIN_WINDOW_WIDTH=FULL
 MAIN_WINDOW_HEIGHT=FULL
-# Set OCR_WINDOW_WIDTH=FULL to open the OCR window at full screen size.
+
 OCR_WINDOW_WIDTH=FULL
 OCR_WINDOW_HEIGHT=FULL
-# Set CROP_PDF_WINDOW_WIDTH=FULL to open the Crop PDF window at full screen size.
+
 CROP_PDF_WINDOW_WIDTH=FULL
-# Used only when CROP_PDF_WINDOW_WIDTH is a number.
-CROP_PDF_WINDOW_HEIGHT=720
-# Set ADD_SPLIT_WINDOW_WIDTH=FULL to open the Add Split window at full screen size.
+CROP_PDF_WINDOW_HEIGHT=720    # used only when CROP_PDF_WINDOW_WIDTH is a number
+
 ADD_SPLIT_WINDOW_WIDTH=FULL
-# Used only when ADD_SPLIT_WINDOW_WIDTH is a number.
-ADD_SPLIT_WINDOW_HEIGHT=720
-OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
-# Render scale used when rasterising PDF pages for OCR.
-# Higher values produce sharper images and better recognition accuracy, especially
-# for small or italic text in high-DPI scanned books. PDF points are 72 pt/inch,
-# so scale 4.0 ≈ 288 DPI and scale 6.0 ≈ 432 DPI. Range: 1.0–8.0. Default: 4.0
+ADD_SPLIT_WINDOW_HEIGHT=720   # used only when ADD_SPLIT_WINDOW_WIDTH is a number
+
+
+# ── OCR ───────────────────────────────────────────────────────────────
+# Render scale when rasterising PDF pages for OCR.
+# Higher values → sharper images and better accuracy, especially for small or
+# italic text. 72 pt/inch base: scale 4.0 ≈ 288 DPI, scale 6.0 ≈ 432 DPI.
+# Range: 1.0–8.0. Default: 4.0
 OCR_RENDER_SCALE=8.0
-# During OCR, remove a line from the top N OCR lines if it matches the section title.
+
+# Remove a line from the top N OCR lines if it matches the section title.
 OCR_TITLE_MATCH_TOP_LINES=3
-# Preview-only text scale percent. This does not affect EPUB output.
+
+
+# ── UI ───────────────────────────────────────────────────────────────
+# Preview-only text scale (%). Does not affect EPUB output.
 PREVIEW_TEXT_SCALE_PERCENT=170
-# Codex executable used by Edit PDF > Finalize with Codex.
-CODEX_EXECUTABLE_PATH=/Applications/Codex.app/Contents/Resources/codex
-# Prompt file used by Edit PDF > Finalize with Codex.
-CODEX_FINALIZE_PROMPT_FILE=codex-finalize-prompt.txt
-# Maximum number of Markdown sections NewOCR can edit in one Codex run.
-CODEX_FINALIZE_MAX_SECTIONS=5
-# Model used by Finalize with Codex. If blank or missing, NewOCR uses gpt-5.4-mini.
-# Set a different value only if your account and provider support it.
-CODEX_FINALIZE_MODEL=gpt-5.4-mini
 
-# Typhoon OCR API key used by Auto Detect Quote / Footnote when available.
-# Leave blank to keep using local heuristics and Apple Vision OCR fallbacks.
-TYPHOON_OCR_API_KEY=sk-Aj56dxfXFB2Sd2qSt6bW1stDriqtgLpub4PTGKPF44CP5a53
-# Optional Typhoon OCR base URL.
-TYPHOON_OCR_BASE_URL=https://api.opentyphoon.ai/v1
-# Optional Typhoon OCR model id.
-TYPHOON_OCR_MODEL=typhoon-ocr
+PDF_LIST_MIN_HEIGHT=420
+OCR_PARAGRAPH_TEXTAREA_MIN_HEIGHT=58
 
-# New projects made from the New button are created here.
+
+# ── Projects ───────────────────────────────────────────────────────────────
+# Default folder for new projects created with the New button.
 NEW_PROJECTS_FOLDER=~/Downloads
 
-# Render scale used when rasterising PDF pages for Auto Detect Codex scans
-# (Header, Quote, Footnote, Image). Codex only needs to see layout regions so a
-# lower scale renders and uploads much faster than OCR_RENDER_SCALE.
-# Range: 1.0–8.0. Default: 2.0 (≈ 144 DPI — fast and sufficient for layout detection).
-AUTO_DETECT_RENDER_SCALE=2.0
-
-# Thumbnail size (points) shown in Auto Detect candidate lists (Header, Quote, etc.).
-# Width and height are applied to all auto-detect panels so thumbnails are consistent.
-# Minimum: width 40, height 52. Default: 80 x 104.
-AUTO_DETECT_THUMB_WIDTH=350
-AUTO_DETECT_THUMB_HEIGHT=350
+# ── Email ──────────────────────────────────────────────────────────────────
+# Recipient email shown as a "Send Email" button in the EPUB success popup.
+# Leave blank to hide the button. Uses Mail (the Mac app) to compose the email.
+EPUB_RECIPIENT_EMAIL=orangepuffmufc_HL8GLL@kindle.com

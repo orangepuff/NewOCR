@@ -287,14 +287,25 @@ def markdown_heading_parts(stripped):
 def markdown_blockquote_lines(lines, start_index):
     quote_lines = []
     next_index = start_index
+    pending_blanks = 0
     while next_index < len(lines):
         stripped = lines[next_index].strip()
         if not stripped:
-            break
+            pending_blanks += 1
+            next_index += 1
+            continue
         if not stripped.startswith(">"):
+            # Rewind blank lines so the outer loop handles them
+            next_index -= pending_blanks
+            pending_blanks = 0
             break
+        for _ in range(pending_blanks):
+            quote_lines.append("")
+        pending_blanks = 0
         quote_lines.append(stripped[1:].strip())
         next_index += 1
+    if pending_blanks > 0:
+        next_index -= pending_blanks
     return quote_lines, next_index
 
 
