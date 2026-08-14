@@ -435,10 +435,16 @@ def markdown_to_xhtml_body(text, fallback_title, source_path=None, image_map=Non
                     label = m.group(1)
                     note_text = footnote_definitions.get(label) or m.group(2).strip()
                     fragment = footnote_fragment_id(label, f"fn-{label}")
+                    # Only add the back-link when the label was actually referenced in the text.
+                    # If there is no reference mark, the anchor #fnref-... does not exist.
+                    if label in footnote_state["used"]:
+                        back_link = f' <a href="#fnref-{html.escape(fragment)}" class="footnote-back">&#8617;</a>'
+                    else:
+                        back_link = ""
                     items.append(
                         f'<li id="fn-{html.escape(fragment)}">'
-                        f'{markdown_inline_to_html(note_text, footnote_state)} '
-                        f'<a href="#fnref-{html.escape(fragment)}" class="footnote-back">&#8617;</a>'
+                        f'{markdown_inline_to_html(note_text, footnote_state)}'
+                        f'{back_link}'
                         f'</li>'
                     )
                     inline_rendered.add(label)

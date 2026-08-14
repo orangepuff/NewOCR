@@ -568,6 +568,7 @@ final class AppState: ObservableObject {
     @Published var builtEPUBPath: String = ""
     @Published var isEPUBBuiltAlertPresented: Bool = false
     @Published var epubRecipientEmail: String = ""
+    @Published var isEditEPUBWindowOpen: Bool = false
     @Published var isOCRSaveAlertPresented: Bool = false
     @Published var ocrSaveAlertMessage: String = ""
     @Published var isCSSAppliedAlertPresented: Bool = false
@@ -616,6 +617,7 @@ final class AppState: ObservableObject {
     private var retainedWindowDelegates: [ObjectIdentifier: WindowCleanupDelegate] = [:]
     private weak var ocrPreviewWindow: NSWindow?
     private weak var ocrLogWindow: NSWindow?
+    private weak var epubEditorWindow: NSWindow?
     private var detachedSplitPlannerStates: [SplitPlannerState] = []
     private var activeConfigFileURL: URL?
     private var pendingLayoutAreaSectionItems: [PDFFileItem] = []
@@ -3088,6 +3090,45 @@ final class AppState: ObservableObject {
         service.recipients = [epubRecipientEmail]
         service.subject = subject
         service.perform(withItems: [epubURL])
+    }
+
+    func openEPUBEditorWindow() {
+        epubEditorWindow?.close()
+        let chapters = epubEditorChapters()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1060, height: 720),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Edit EPUB"
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 820, height: 540)
+        window.contentView = NSHostingView(
+            rootView: EPUBEditorView(chapters: chapters)
+                .environmentObject(self)
+        )
+        if let visibleFrame = NSScreen.main?.visibleFrame {
+            window.setFrame(visibleFrame, display: true)
+        } else {
+            window.center()
+        }
+        epubEditorWindow = window
+        trackRetainedWindow(window)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func epubEditorChapters() -> [EPUBEditorChapter] {
+        var result: [EPUBEditorChapter] = []
+        for (index, item) in pdfFiles.enumerated() {
+            let folderURL = markdownFolderURL(for: item)
+            let files = appleVisionMarkdownPageFiles(in: folderURL)
+            guard !files.isEmpty else { continue }
+            let title = chapterTitle(for: item, markdownFiles: files)
+            let displayName = item.url.deletingPathExtension().lastPathComponent
+            result.append(EPUBEditorChapter(id: index, title: title, markdownFiles: files, displayFileName: displayName))
+        }
+        return result
     }
 
     func openOCRMarkdownPreviewWindow() {
@@ -8822,6 +8863,24 @@ struct StepOneLoadPDFView: View {
                         .controlSize(.large)
                         .disabled(appState.isOCRRunning || appState.markdownChapterCount == 0)
 
+                        if appState.bookEPUBFilePathIfExists != nil {
+                            Button {
+                                appState.openEPUBEditorWindow()
+                            } label: {
+                                Label("Edit EPUB", systemImage: "pencil")
+                            }
+                            .controlSize(.large)
+
+                            if !appState.epubRecipientEmail.isEmpty {
+                                Button {
+                                    appState.sendEPUBByEmail()
+                                } label: {
+                                    Label("Send Email", systemImage: "envelope")
+                                }
+                                .controlSize(.large)
+                            }
+                        }
+
                         OCRIconButton(title: "Close", systemImage: "xmark", backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255), foregroundColor: .white) {
                             NSApp.terminate(nil)
                         }
@@ -8981,6 +9040,14 @@ struct StepOneLoadPDFView: View {
                             Label("Close", systemImage: "xmark")
                         }
                         .buttonStyle(AppAlertButtonStyle(variant: .red))
+
+                        Button {
+                            appState.isEPUBBuiltAlertPresented = false
+                            appState.openEPUBEditorWindow()
+                        } label: {
+                            Label("Edit EPUB", systemImage: "pencil")
+                        }
+                        .buttonStyle(AppAlertButtonStyle(variant: .green))
 
                         if !appState.epubRecipientEmail.isEmpty {
                             Button { appState.sendEPUBByEmail() } label: {
@@ -16219,6 +16286,652 @@ struct NewOCRApp: App {
                 }
         }
         .windowStyle(.titleBar)
+    }
+}
+
+// MARK: - Edit EPUB
+
+struct EPUBEditorChapter: Identifiable {
+    let id: Int
+    let title: String
+    let markdownFiles: [URL]
+    let displayFileName: String
+}
+
+final class EPUBEditorState: ObservableObject {
+    @Published var chapters: [EPUBEditorChapter]
+    @Published var selectedIndex: Int = 0
+    @Published var editedText: String = ""
+    @Published var isDirty: Bool = false
+    @Published var previewHTML: String = ""
+
+    init(chapters: [EPUBEditorChapter]) {
+        self.chapters = chapters
+        if !chapters.isEmpty { loadChapter(at: 0) }
+    }
+
+    var selectedChapter: EPUBEditorChapter? {
+        chapters.indices.contains(selectedIndex) ? chapters[selectedIndex] : nil
+    }
+
+    func selectChapter(at index: Int) {
+        guard chapters.indices.contains(index) else { return }
+        selectedIndex = index
+        loadChapter(at: index)
+    }
+
+    private func loadChapter(at index: Int) {
+        guard chapters.indices.contains(index) else { return }
+        let chapter = chapters[index]
+        let texts = chapter.markdownFiles.compactMap { url -> String? in
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        editedText = texts.joined(separator: "\n\n")
+        isDirty = false
+        refreshPreview()
+    }
+
+    func save() {
+        guard let chapter = selectedChapter, let firstFile = chapter.markdownFiles.first else { return }
+        do {
+            try editedText.write(to: firstFile, atomically: true, encoding: .utf8)
+            for url in chapter.markdownFiles.dropFirst() { try? FileManager.default.removeItem(at: url) }
+            isDirty = false
+        } catch {}
+    }
+
+    func refreshPreview() {
+        previewHTML = EPUBMarkdownRenderer.toHTML(text: editedText, title: selectedChapter?.title ?? "")
+    }
+}
+
+private enum EPUBMarkdownRenderer {
+    static func toHTML(text: String, title: String) -> String {
+        let body = markdownToBody(text)
+        return """
+        <!DOCTYPE html>
+        <html lang="th">
+        <head>
+        <meta charset="utf-8"/>
+        <style>
+        body{font-family:-apple-system,'Helvetica Neue',sans-serif;font-size:15px;line-height:1.85;padding:28px 36px;color:#1a1820;background:white;max-width:680px;margin:0 auto;}
+        h1{font-size:1.5em;font-weight:700;margin:1.2em 0 0.5em;}
+        h2{font-size:1.25em;font-weight:700;margin:1em 0 0.4em;}
+        h3{font-size:1.1em;font-weight:600;margin:0.9em 0 0.3em;}
+        p{margin:0 0 0.8em;}
+        strong{font-weight:700;}
+        em{font-style:italic;}
+        blockquote{margin:0.8em 0 0.8em 1.5em;padding-left:1em;border-left:3px solid #ccc;color:#555;}
+        .left{text-align:left;}.center{text-align:center;}.right{text-align:right;}
+        sup.fn{font-size:0.72em;}
+        </style>
+        </head>
+        <body>\(body)</body>
+        </html>
+        """
+    }
+
+    private static func markdownToBody(_ text: String) -> String {
+        var parts: [String] = []
+        var paraLines: [String] = []
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+        var i = 0
+
+        func flushPara() {
+            let joined = paraLines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                .joined(separator: " ")
+            if !joined.isEmpty { parts.append("<p>\(inline(joined))</p>") }
+            paraLines.removeAll()
+        }
+
+        while i < lines.count {
+            let raw = lines[i]
+            let s = raw.trimmingCharacters(in: .whitespaces)
+            if s.isEmpty { flushPara(); i += 1; continue }
+
+            if s.hasPrefix("<!-- page-break") || s.hasPrefix("[[page-break") {
+                flushPara()
+                parts.append("<hr style='border:none;page-break-after:always;'/>")
+                i += 1; continue
+            }
+
+            // aligned paragraph <p class="...">
+            if s.lowercased().hasPrefix("<p "), s.lowercased().hasSuffix("</p>") {
+                flushPara()
+                if let cls = s.range(of: "(?i)(?<=class=[\"'])(left|right|center)(?=[\"'])", options: .regularExpression) {
+                    let clsStr = String(s[cls])
+                    let inner = s.replacingOccurrences(of: #"(?i)<p\s[^>]*>"#, with: "", options: .regularExpression)
+                        .replacingOccurrences(of: "</p>", with: "", options: .caseInsensitive)
+                    parts.append("<p class=\"\(clsStr)\">\(inline(inner))</p>")
+                }
+                i += 1; continue
+            }
+
+            // headings
+            if s.first == "#" {
+                flushPara()
+                let hashes = s.prefix(while: { $0 == "#" }).count
+                let content = s.dropFirst(hashes).trimmingCharacters(in: .whitespaces)
+                let lvl = min(hashes, 6)
+                parts.append("<h\(lvl)>\(inline(content))</h\(lvl)>")
+                i += 1; continue
+            }
+
+            // blockquote
+            if s.hasPrefix(">") {
+                flushPara()
+                var qlines: [String] = []
+                while i < lines.count {
+                    let qs = lines[i].trimmingCharacters(in: .whitespaces)
+                    if qs.hasPrefix(">") { qlines.append(String(qs.dropFirst()).trimmingCharacters(in: .whitespaces)); i += 1 }
+                    else { break }
+                }
+                parts.append("<blockquote><p>\(qlines.map { inline($0) }.joined(separator: "<br/>"))</p></blockquote>")
+                continue
+            }
+
+            paraLines.append(s)
+            i += 1
+        }
+        flushPara()
+        return parts.joined(separator: "\n")
+    }
+
+    private static func inline(_ s: String) -> String {
+        var out = s
+        out = out.replacingOccurrences(of: "&", with: "&amp;")
+        out = out.replacingOccurrences(of: "<", with: "&lt;")
+        out = out.replacingOccurrences(of: ">", with: "&gt;")
+        out = out.replacingOccurrences(of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#, with: "<em>$1</em>", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"\[\^([^\]]+)\]"#, with: "<sup class='fn'>[$1]</sup>", options: .regularExpression)
+        return out
+    }
+}
+
+// MARK: - EPUBTextActions
+final class EPUBTextActions: ObservableObject {
+    var applyBold: (() -> Void)?
+    var applyItalic: (() -> Void)?
+    var applyBlockquote: (() -> Void)?
+    var applyHeading1: (() -> Void)?
+    var applyHeading2: (() -> Void)?
+    var applyHeading3: (() -> Void)?
+    var applyLeft: (() -> Void)?
+    var applyCenter: (() -> Void)?
+    var applyRight: (() -> Void)?
+    var applyBulletList: (() -> Void)?
+    var applyOrderedList: (() -> Void)?
+    var applyImage: (() -> Void)?
+}
+
+// MARK: - EPUBMarkdownTextEditor
+private struct EPUBMarkdownTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    let textActions: EPUBTextActions
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let textView = NSTextView()
+        textView.delegate = context.coordinator
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.drawsBackground = true
+        textView.backgroundColor = .textBackgroundColor
+        textView.font = .systemFont(ofSize: OCRTypography.editorFontSize)
+        textView.textContainerInset = OCRTypography.editorInset
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+
+        let coord = context.coordinator
+        textActions.applyBold = { coord.applyWrapper("**") }
+        textActions.applyItalic = { coord.applyWrapper("*") }
+        textActions.applyBlockquote = { coord.applyBlockquote() }
+        textActions.applyHeading1 = { coord.applyHeading(1) }
+        textActions.applyHeading2 = { coord.applyHeading(2) }
+        textActions.applyHeading3 = { coord.applyHeading(3) }
+        textActions.applyLeft = { coord.applyAlignment("left") }
+        textActions.applyCenter = { coord.applyAlignment("center") }
+        textActions.applyRight = { coord.applyAlignment("right") }
+        textActions.applyBulletList = { coord.applyBulletList() }
+        textActions.applyOrderedList = { coord.applyOrderedList() }
+        textActions.applyImage = { coord.insertImagePlaceholder() }
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        context.coordinator.parent = self
+        if textView.string != text { textView.string = text }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: EPUBMarkdownTextEditor
+        weak var textView: NSTextView?
+        init(_ parent: EPUBMarkdownTextEditor) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let tv = textView else { return }
+            parent.text = tv.string
+        }
+
+        func applyWrapper(_ marker: String) {
+            guard let tv = textView else { return }
+            let sel = tv.selectedRange()
+            guard sel.length > 0 else { return }
+            let selected = (tv.string as NSString).substring(with: sel)
+            let rep = "\(marker)\(selected)\(marker)"
+            tv.shouldChangeText(in: sel, replacementString: rep)
+            tv.replaceCharacters(in: sel, with: rep)
+            tv.didChangeText()
+            tv.setSelectedRange(NSRange(location: sel.location + marker.count, length: sel.length))
+            parent.text = tv.string
+        }
+
+        func applyBlockquote() {
+            applyTransform { $0.components(separatedBy: .newlines).map { l in
+                l.trimmingCharacters(in: .whitespaces).hasPrefix(">") ? l : "> \(l)"
+            }.joined(separator: "\n") }
+        }
+
+        func applyHeading(_ level: Int) {
+            let m = String(repeating: "#", count: max(1, min(level, 6)))
+            applyTransform { $0.components(separatedBy: .newlines).map { l in
+                let c = l.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: #"^#{1,6}\s*"#, with: "", options: .regularExpression)
+                return c.isEmpty ? "" : "\(m) \(c)"
+            }.joined(separator: "\n") }
+        }
+
+        func applyAlignment(_ alignment: String) {
+            applyTransform { $0.components(separatedBy: "\n\n").map { block in
+                let c = block.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: #"(?is)^<p\s[^>]*>(.*?)</p>$"#, with: "$1", options: .regularExpression)
+                    .replacingOccurrences(of: "\n", with: "<br/>")
+                return c.isEmpty ? "" : "<p class=\"\(alignment)\">\(c)</p>"
+            }.joined(separator: "\n\n") }
+        }
+
+        func applyBulletList() {
+            applyTransform { $0.components(separatedBy: .newlines).map { l in
+                let t = l.trimmingCharacters(in: .whitespaces)
+                return t.isEmpty ? "" : "- \(t)"
+            }.joined(separator: "\n") }
+        }
+
+        func applyOrderedList() {
+            applyTransform { text in
+                var n = 1
+                return text.components(separatedBy: .newlines).map { l in
+                    let t = l.trimmingCharacters(in: .whitespaces)
+                    if t.isEmpty { return "" }
+                    let item = "\(n). \(t)"; n += 1; return item
+                }.joined(separator: "\n")
+            }
+        }
+
+        func insertImagePlaceholder() {
+            guard let tv = textView else { return }
+            let sel = tv.selectedRange()
+            let ph = "![Alt text](Images/example.png)"
+            tv.shouldChangeText(in: sel, replacementString: ph)
+            tv.replaceCharacters(in: sel, with: ph)
+            tv.didChangeText()
+            parent.text = tv.string
+        }
+
+        private func applyTransform(_ transform: (String) -> String) {
+            guard let tv = textView else { return }
+            let sel = tv.selectedRange()
+            guard sel.length > 0 else { return }
+            let selected = (tv.string as NSString).substring(with: sel)
+            let rep = transform(selected)
+            tv.shouldChangeText(in: sel, replacementString: rep)
+            tv.replaceCharacters(in: sel, with: rep)
+            tv.didChangeText()
+            tv.setSelectedRange(NSRange(location: sel.location, length: rep.count))
+            parent.text = tv.string
+        }
+    }
+}
+
+// MARK: - EPUBHTMLPreviewView
+private struct EPUBHTMLPreviewView: NSViewRepresentable {
+    let html: String
+    func makeNSView(context: Context) -> WKWebView {
+        let wv = WKWebView()
+        wv.layer?.backgroundColor = NSColor.white.cgColor
+        return wv
+    }
+    func updateNSView(_ wv: WKWebView, context: Context) {
+        wv.loadHTMLString(html, baseURL: nil)
+    }
+}
+
+// MARK: - EPUBToolbarButton
+private struct EPUBToolbarButton<Label: View>: View {
+    let tooltip: String
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            label()
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 30)
+                .background(
+                    isHovered
+                        ? Color(nsColor: NSColor(calibratedWhite: 0.50, alpha: 1))
+                        : Color(nsColor: NSColor(calibratedWhite: 0.38, alpha: 1))
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
+        .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - EPUBEditorView
+struct EPUBEditorView: View {
+    @EnvironmentObject private var appState: AppState
+    @StateObject private var editorState: EPUBEditorState
+    @StateObject private var textActions = EPUBTextActions()
+    @State private var isSyntaxHelpPresented = false
+
+    init(chapters: [EPUBEditorChapter]) {
+        _editorState = StateObject(wrappedValue: EPUBEditorState(chapters: chapters))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            headerRow
+            HSplitView {
+                tocPanel
+                    .frame(minWidth: 180, idealWidth: 210, maxWidth: 280, maxHeight: .infinity)
+                editorPanel
+                    .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+                previewPanel
+                    .frame(minWidth: 220, idealWidth: 290, maxWidth: 380, maxHeight: .infinity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(22)
+        .background(NewOCRMainPalette.windowBackground)
+        .popover(isPresented: $isSyntaxHelpPresented) {
+            MarkdownSyntaxPopoverView()
+        }
+    }
+
+    // MARK: Header
+    private var headerRow: some View {
+        HStack(alignment: .center, spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(0.94))
+                    .frame(width: 58, height: 58)
+                    .shadow(color: Color.black.opacity(0.14), radius: 8, x: 0, y: 3)
+                Image(systemName: "book.closed.fill")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Color.black)
+            }
+            Text("Edit EPUB")
+                .font(.system(size: 31, weight: .semibold))
+                .foregroundStyle(NewOCRMainPalette.headingText)
+            Spacer(minLength: 10)
+            HStack(spacing: 8) {
+                OCRIconButton(title: "Markdown Syntax", systemImage: "info.circle",
+                              backgroundColor: Color(red: 255/255, green: 182/255, blue: 216/255)) {
+                    isSyntaxHelpPresented.toggle()
+                }
+                OCRIconButton(title: "Save Chapter", systemImage: "square.and.arrow.down",
+                              backgroundColor: Color(red: 53/255, green: 200/255, blue: 90/255)) {
+                    editorState.save()
+                    editorState.refreshPreview()
+                }
+                .disabled(!editorState.isDirty)
+                OCRIconButton(title: "Rebuild EPUB", systemImage: "arrow.trianglehead.clockwise",
+                              backgroundColor: Color(red: 255/255, green: 159/255, blue: 10/255)) {
+                    editorState.save()
+                    appState.buildBookEPUB()
+                }
+                OCRIconButton(title: "Close", systemImage: "xmark",
+                              backgroundColor: Color(red: 255/255, green: 71/255, blue: 71/255),
+                              foregroundColor: .white) {
+                    NSApp.keyWindow?.close()
+                }
+            }
+        }
+    }
+
+    // MARK: TOC Panel
+    private var tocPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("TABLE OF CONTENTS")
+                .font(.system(size: 10, weight: .bold))
+                .kerning(0.8)
+                .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                .padding(.horizontal, 4)
+
+            Divider().overlay(NewOCRMainPalette.stroke)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(editorState.chapters) { chapter in
+                        tocRow(chapter)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            Spacer(minLength: 0)
+            Divider().overlay(NewOCRMainPalette.stroke)
+            Text("Total: \(editorState.chapters.count) chapters")
+                .font(.system(size: 10))
+                .foregroundStyle(NewOCRMainPalette.tertiaryText)
+        }
+        .padding(10)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private func tocRow(_ chapter: EPUBEditorChapter) -> some View {
+        let isSelected = chapter.id == editorState.selectedIndex
+        Button {
+            if editorState.isDirty { editorState.save() }
+            editorState.selectChapter(at: chapter.id)
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(chapter.id + 1). \(chapter.title)")
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? NewOCRMainPalette.headingText : NewOCRMainPalette.secondaryText)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                Text(chapter.displayFileName)
+                    .font(.system(size: 10))
+                    .foregroundStyle(NewOCRMainPalette.tertiaryText)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? NewOCRMainPalette.fieldBackground : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(isSelected ? NewOCRMainPalette.stroke : Color.clear, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Editor Panel
+    private var editorPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.text")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color(red: 30/255, green: 139/255, blue: 238/255))
+                    Text(editorState.selectedChapter?.displayFileName ?? "–")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(NewOCRMainPalette.fieldBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+                Spacer()
+                if editorState.isDirty {
+                    Text("Edited")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color(red: 255/255, green: 159/255, blue: 10/255))
+                }
+            }
+
+            formattingToolbar
+
+            EPUBMarkdownTextEditor(
+                text: Binding(
+                    get: { editorState.editedText },
+                    set: { editorState.editedText = $0; editorState.isDirty = true }
+                ),
+                textActions: textActions
+            )
+            .frame(minHeight: 200, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+
+            HStack {
+                let words = editorState.editedText.split(separator: " ").count
+                let chars = editorState.editedText.count
+                Text("Words: \(words)   Characters: \(chars)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                Spacer()
+                if !editorState.isDirty {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color(red: 53/255, green: 200/255, blue: 90/255)).frame(width: 6, height: 6)
+                        Text("Saved").font(.system(size: 11)).foregroundStyle(NewOCRMainPalette.tertiaryText)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+    }
+
+    private var formattingToolbar: some View {
+        HStack(spacing: 4) {
+            epubToolbarLabel("H1", tooltip: "Heading 1") { textActions.applyHeading1?() }
+            epubToolbarLabel("H2", tooltip: "Heading 2") { textActions.applyHeading2?() }
+            epubToolbarLabel("H3", tooltip: "Heading 3") { textActions.applyHeading3?() }
+            Divider().frame(height: 20).overlay(NewOCRMainPalette.stroke)
+            epubToolbarBold()
+            epubToolbarItalic()
+            Divider().frame(height: 20).overlay(NewOCRMainPalette.stroke)
+            epubToolbarIcon("text.quote", tooltip: "Blockquote") { textActions.applyBlockquote?() }
+            epubToolbarIcon("list.bullet", tooltip: "Bullet List") { textActions.applyBulletList?() }
+            epubToolbarIcon("list.number", tooltip: "Numbered List") { textActions.applyOrderedList?() }
+            Divider().frame(height: 20).overlay(NewOCRMainPalette.stroke)
+            epubToolbarIcon("text.alignleft", tooltip: "Align Left") { textActions.applyLeft?() }
+            epubToolbarIcon("text.aligncenter", tooltip: "Align Center") { textActions.applyCenter?() }
+            epubToolbarIcon("text.alignright", tooltip: "Align Right") { textActions.applyRight?() }
+            Divider().frame(height: 20).overlay(NewOCRMainPalette.stroke)
+            epubToolbarIcon("photo", tooltip: "Insert Image") { textActions.applyImage?() }
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(NewOCRMainPalette.fieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+    }
+
+    private func epubToolbarLabel(_ label: String, tooltip: String, action: @escaping () -> Void) -> some View {
+        EPUBToolbarButton(tooltip: tooltip, action: action) {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+        }
+    }
+
+    private func epubToolbarBold() -> some View {
+        EPUBToolbarButton(tooltip: "Bold (select text first)", action: { textActions.applyBold?() }) {
+            Text("B").font(.system(size: 13, weight: .bold))
+        }
+    }
+
+    private func epubToolbarItalic() -> some View {
+        EPUBToolbarButton(tooltip: "Italic (select text first)", action: { textActions.applyItalic?() }) {
+            Text("I").font(.system(size: 13).italic())
+        }
+    }
+
+    private func epubToolbarIcon(_ systemImage: String, tooltip: String, action: @escaping () -> Void) -> some View {
+        EPUBToolbarButton(tooltip: tooltip, action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+        }
+    }
+
+    // MARK: Preview Panel
+    private var previewPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("EPUB PREVIEW")
+                    .font(.system(size: 10, weight: .bold))
+                    .kerning(0.8)
+                    .foregroundStyle(NewOCRMainPalette.tertiaryText)
+                Spacer()
+                Button {
+                    editorState.refreshPreview()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NewOCRMainPalette.secondaryText)
+                }
+                .buttonStyle(.plain)
+                .help("Refresh Preview")
+            }
+            .padding(.horizontal, 4)
+
+            EPUBHTMLPreviewView(html: editorState.previewHTML)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
+        }
+        .padding(10)
+        .background(NewOCRMainPalette.panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(NewOCRMainPalette.stroke, lineWidth: 1))
     }
 }
 
